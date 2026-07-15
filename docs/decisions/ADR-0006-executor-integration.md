@@ -76,7 +76,7 @@ Phase 1のdoが**生まないもの**（明記）:
 plan.generated   Planレイヤーは縮退（単一capabilityタスクのみ）
 test.result      子プロセス内のテスト実行を外から決定的に識別できない
 user.verdict     第2層は将来の verdict コマンド（ADR-0003）
-tomo.asked       Curiosityの質問は別ADR
+tomo.asked       Curiosityの質問は別ADR（→ ADR-0007）
 ```
 
 `--cap` の既定 `implement` はトレードオフ: 毎回の明示は摩擦がdogfoodを殺し、
@@ -108,7 +108,7 @@ doの終了時、1行だけ聞く:
 - ここで聞かないと第1層が永遠に空になる。自動収穫できるのはexit codeだけで、
   **exit 0は「成果物が採用された」を意味しない**
 - これはOutcome観測であってCuriosityの質問ではない。Tomoの1日1問は
-  質問予算ごと別ADRで扱う
+  質問予算ごと別ADRで扱う（→ [ADR-0007](ADR-0007-curiosity-question.md)）
 
 ---
 
