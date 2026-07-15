@@ -1,0 +1,344 @@
+# Execution Model
+
+## 基本思想
+
+Tomobitは、特定のAIを実行するシステムではない。
+
+Tomobitは、
+
+> **「何を達成したいか」を宣言し、「誰が実現するか」を経験から学習するシステム**
+
+である。
+
+AIは交換可能であり、経験こそがTomobit最大の資産となる。
+
+---
+
+# レイヤー構造
+
+```text
+User Request
+      │
+      ▼
+Intent
+      │
+      ▼
+Plan
+      │
+      ▼
+Capability
+      │
+      ▼
+Execution Engine
+      │
+      ▼
+Provider
+      │
+      ▼
+Executor
+      │
+      ▼
+Runtime
+```
+
+各レイヤーは単一責務を持ち、下位レイヤーの実装詳細を意識しない。
+
+---
+
+# Intent
+
+Intentは
+
+> **ユーザーが最終的に達成したい目的**
+
+を表す。
+
+例
+
+- Fix Bug
+- Implement Feature
+- Improve Performance
+- Review Code
+- Analyze Repository
+
+IntentはAIやWorkflowに依存しない。
+
+---
+
+# Plan
+
+Planは
+
+> **Intentを達成するための実行計画**
+
+である。
+
+例
+
+```text
+Fix Bug
+
+↓
+
+Analyze
+
+↓
+
+Implement
+
+↓
+
+Test
+
+↓
+
+Review
+```
+
+Planは固定ではない。
+
+Experience Engineは成功率や実行コストを元にPlan自体を改善する。
+
+Tomobitにおける「成長」とは、Planの改善でもある。
+
+---
+
+# Capability
+
+Capabilityは
+
+> **Planを構成する最小の能力単位**
+
+である。
+
+Capabilityは「誰が実行するか」を持たない。
+
+例
+
+- analyze
+- implement
+- review
+- refactor
+- summarize
+- test
+- benchmark
+- commit
+- deploy
+- notify
+
+WorkflowはCapabilityのみを定義する。
+
+```yaml
+plan:
+
+  - capability: analyze
+
+  - capability: implement
+
+  - capability: test
+
+  - capability: review
+```
+
+---
+
+# Execution Engine
+
+Execution Engineは
+
+Capabilityを満たせるProviderを探索し、
+
+Experienceを基に最適な実行方法を決定する。
+
+判断材料
+
+- Success Rate
+- Cost
+- Execution Time
+- User Preference
+- Project Context
+- Adapter Availability
+- Local / Remote
+- Current Load
+
+Execution EngineはCapabilityを実行するだけであり、
+AIそのものを意識しない。
+
+---
+
+# Provider
+
+Providerは
+
+> **Capabilityを提供する実行手段**
+
+を管理する。
+
+例
+
+```text
+implement
+
+↓
+
+Claude Code
+Codex
+Gemini
+```
+
+Providerは実行可能な候補を返す。
+
+---
+
+# Executor
+
+ExecutorはProviderを利用してCapabilityを実行する。
+
+例
+
+- LLM Executor
+- Shell Executor
+- Git Executor
+- Docker Executor
+- MCP Executor
+- Human Executor
+
+ExecutorはRuntimeの違いを吸収する。
+
+---
+
+# Runtime
+
+Runtimeは実際の実行環境である。
+
+例
+
+- Claude Code CLI
+- Codex CLI
+- Ollama
+- Docker
+- Shell
+- Git
+- Browser
+- Remote API
+
+TomobitはRuntimeを直接意識しない。
+
+---
+
+# Experience Engine
+
+Experience EngineはTomobitの中核である。
+
+責務
+
+- Experienceの蓄積
+- 成功率の算出
+- Provider評価
+- Plan改善
+- Capability選択の改善
+- 重み更新
+
+Experienceは単なるログではなく、
+
+> **Tomobitの知識**
+
+として扱われる。
+
+---
+
+# Experience Model
+
+Experienceは以下の関係を持つ。
+
+```text
+Context
+      │
+      ▼
+Intent
+      │
+      ▼
+Plan
+      │
+      ▼
+Capability
+      │
+      ▼
+Provider
+      │
+      ▼
+Outcome
+```
+
+例
+
+```text
+Rust
+Axum
+
+↓
+
+Fix Bug
+
+↓
+
+Implement
+
+↓
+
+Claude Code
+
+↓
+
+Success
+```
+
+この情報が将来のPlan・Provider選択に利用される。
+
+---
+
+# Learning Loop
+
+Tomobitは以下のループを繰り返す。
+
+```text
+Request
+
+↓
+
+Intent
+
+↓
+
+Plan
+
+↓
+
+Capability
+
+↓
+
+Execution
+
+↓
+
+Experience
+
+↓
+
+Experience Engine
+
+↓
+
+Plan Improvement
+
+↓
+
+Next Request
+```
+
+この循環こそがTomobitの「成長」である。
+
+AIは成長しない。
+
+**Tomobitが経験から成長する。**
