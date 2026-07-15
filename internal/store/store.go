@@ -282,12 +282,15 @@ func (s *Store) CurrentExperiences() ([]*core.Experience, error) {
 
 // KnownValues returns the distinct values already recorded for a context
 // key — the vocabulary handed to the extraction prompt (SCHEMA.md D5).
+// Reads experiences_current, not experiences: vocabulary from superseded
+// extractor versions would otherwise be re-suggested to the model forever,
+// resurrecting exactly the misextractions a version bump was meant to fix.
 func (s *Store) KnownValues(key string) ([]string, error) {
 	// WHERE/ORDER BY reference the SELECT alias v — a SQLite extension over
 	// strict SQL, safe on the fixed SQLite backend (ADR-0004).
 	rows, err := s.DB.Query(`
 		SELECT DISTINCT json_extract(context, '$.' || ?) AS v
-		FROM experiences WHERE v IS NOT NULL AND v != '' ORDER BY v`, key)
+		FROM experiences_current WHERE v IS NOT NULL AND v != '' ORDER BY v`, key)
 	if err != nil {
 		return nil, err
 	}

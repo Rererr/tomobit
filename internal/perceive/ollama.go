@@ -41,7 +41,7 @@ const extractSystem = `You classify a coding task session for a knowledge base. 
 
 Field semantics:
 - "lang": the programming language of the code being worked on (e.g. "rust", "go", "typescript"). NOT the natural language of the conversation. Empty string if no code involved.
-- "framework": the main library/framework involved (e.g. "axum", "react"). Empty string if none is clearly involved.
+- "framework": the main library/framework involved (e.g. "axum", "react"). Must never equal the value of "lang" — a programming language is not a framework. Empty string when the task only uses the language and its standard library.
 - "topic": the single most defining technical theme of the task (e.g. "lifetime", "concurrency", "auth"). One short lowercase word or hyphenated phrase. Empty string if nothing stands out.
 - "size": rough task size. "small" = one-file tweak, "medium" = multi-file change, "large" = cross-cutting work. Empty string if unclear.
 
