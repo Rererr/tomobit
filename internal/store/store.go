@@ -1,0 +1,421 @@
+// Package store implements SCHEMA.md v1.0 on SQLite: append-only truth
+// (events, experiences), rebuildable projections (connections,
+// surprise_ledger), and persistent working state (curiosity_queue).
+package store
+
+import (
+	"crypto/rand"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+
+	_ "modernc.org/sqlite"
+
+	"github.com/Rererr/tomobit/internal/core"
+)
+
+const schema = `
+PRAGMA journal_mode = WAL;
+PRAGMA busy_timeout = 5000;
+
+CREATE TABLE IF NOT EXISTS events (
+  id         INTEGER PRIMARY KEY,
+  session_id TEXT    NOT NULL,
+  seq        INTEGER NOT NULL,
+  ts         INTEGER NOT NULL,
+  v          INTEGER NOT NULL DEFAULT 1,
+  type       TEXT    NOT NULL,
+  payload    TEXT    NOT NULL CHECK (json_valid(payload)),
+  UNIQUE (session_id, seq)
+);
+CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
+  BEGIN SELECT RAISE(ABORT, 'events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
+  BEGIN SELECT RAISE(ABORT, 'events is append-only'); END;
+
+CREATE TABLE IF NOT EXISTS experiences (
+  id              TEXT    PRIMARY KEY,
+  session_id      TEXT    NOT NULL,
+  ts              INTEGER NOT NULL,
+  kind            TEXT    NOT NULL CHECK (kind IN ('execution','preference')),
+  extractor_ver   INTEGER NOT NULL,
+  extractor_model TEXT    NOT NULL,
+  context         TEXT    NOT NULL CHECK (json_valid(context)),
+  provider        TEXT,
+  outcome         TEXT    NOT NULL CHECK (json_valid(outcome)),
+  source          TEXT    NOT NULL DEFAULT 'production'
+                  CHECK (source IN ('production','learning'))
+);
+CREATE INDEX IF NOT EXISTS experiences_by_session ON experiences (session_id);
+CREATE TRIGGER IF NOT EXISTS experiences_no_update BEFORE UPDATE ON experiences
+  BEGIN SELECT RAISE(ABORT, 'experiences is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS experiences_no_delete BEFORE DELETE ON experiences
+  BEGIN SELECT RAISE(ABORT, 'experiences is append-only'); END;
+
+CREATE VIEW IF NOT EXISTS experiences_current AS
+  SELECT * FROM experiences e
+  WHERE e.extractor_ver = (
+    SELECT max(extractor_ver) FROM experiences
+    WHERE session_id = e.session_id AND kind = e.kind
+  );
+
+CREATE TABLE IF NOT EXISTS connections (
+  kind        TEXT    NOT NULL CHECK (kind IN ('capability','preference')),
+  scope_key   TEXT    NOT NULL,
+  target      TEXT    NOT NULL,
+  alpha       REAL    NOT NULL,
+  beta        REAL    NOT NULL,
+  last_update INTEGER NOT NULL,
+  born_ts     INTEGER NOT NULL,
+  parent_key  TEXT,
+  PRIMARY KEY (kind, scope_key, target)
+);
+
+CREATE TABLE IF NOT EXISTS surprise_ledger (
+  kind          TEXT    NOT NULL,
+  scope_key     TEXT    NOT NULL,
+  target        TEXT    NOT NULL,
+  experience_id TEXT    NOT NULL,
+  ts            INTEGER NOT NULL,
+  p             REAL    NOT NULL,
+  y             REAL    NOT NULL,
+  s_excess      REAL    NOT NULL,
+  PRIMARY KEY (kind, scope_key, target, experience_id)
+);
+
+CREATE TABLE IF NOT EXISTS curiosity_queue (
+  id          TEXT    PRIMARY KEY,
+  created_ts  INTEGER NOT NULL,
+  signal      TEXT    NOT NULL,
+  payload     TEXT    NOT NULL CHECK (json_valid(payload)),
+  priority    REAL    NOT NULL,
+  status      TEXT    NOT NULL DEFAULT 'pending'
+              CHECK (status IN ('pending','done','dismissed','expired')),
+  resolved_ts INTEGER
+);
+`
+
+type Store struct {
+	DB *sql.DB
+}
+
+func Open(path string) (*Store, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	// modernc.org/sqlite serializes writes; a single connection avoids
+	// SQLITE_BUSY between concurrent statements in one process.
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return &Store{DB: db}, nil
+}
+
+func (s *Store) Close() error { return s.DB.Close() }
+
+// NewID returns a sortable unique id: hex ms timestamp + random suffix.
+func NewID(tsMs int64) string {
+	var r [4]byte
+	rand.Read(r[:])
+	return fmt.Sprintf("%013x-%x", tsMs, r)
+}
+
+// ---- truth: events ----
+
+type Event struct {
+	ID        int64
+	SessionID string
+	Seq       int64
+	TS        int64
+	V         int
+	Type      string
+	Payload   map[string]any
+}
+
+// AppendEvent assigns the next seq within the session atomically.
+func (s *Store) AppendEvent(sessionID, typ string, tsMs int64, payload map[string]any) error {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.Exec(`
+		INSERT INTO events (session_id, seq, ts, type, payload)
+		VALUES (?, (SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE session_id = ?), ?, ?, ?)`,
+		sessionID, sessionID, tsMs, typ, string(b))
+	return err
+}
+
+func (s *Store) EventsBySession(sessionID string) ([]*Event, error) {
+	rows, err := s.DB.Query(`
+		SELECT id, session_id, seq, ts, v, type, payload
+		FROM events WHERE session_id = ? ORDER BY seq`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Event
+	for rows.Next() {
+		e := &Event{}
+		var payload string
+		if err := rows.Scan(&e.ID, &e.SessionID, &e.Seq, &e.TS, &e.V, &e.Type, &payload); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(payload), &e.Payload); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// PendingSessions returns finished sessions that have no experience at
+// extractor_ver >= ver — the Deferred Perception queue, derived by query
+// (SCHEMA.md: no table needed).
+func (s *Store) PendingSessions(ver int) ([]string, error) {
+	// ORDER BY id references a column outside the DISTINCT projection —
+	// rejected by strict SQL, accepted by SQLite (fixed backend, ADR-0004).
+	rows, err := s.DB.Query(`
+		SELECT DISTINCT session_id FROM events e
+		WHERE type IN ('task.finished','task.cancelled')
+		  AND session_id NOT IN (
+		    SELECT session_id FROM experiences WHERE extractor_ver >= ?
+		  )
+		ORDER BY id`, ver)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// ---- truth: experiences ----
+
+func (s *Store) InsertExperience(e *core.Experience) error {
+	provider := sql.NullString{String: e.Provider, Valid: e.Provider != ""}
+	_, err := s.DB.Exec(`
+		INSERT INTO experiences
+		  (id, session_id, ts, kind, extractor_ver, extractor_model,
+		   context, provider, outcome, source)
+		VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		e.ID, e.SessionID, e.TS, e.Kind, e.ExtractorVer, e.ExtractorModel,
+		core.MarshalContext(e.Context), provider,
+		core.MarshalOutcome(e.Outcome), e.Source)
+	return err
+}
+
+// InsertExperiences inserts a session's experiences atomically: any single
+// failure rolls the whole batch back. A partial commit would drop the
+// session out of PendingSessions (which is satisfied by even one experience
+// at the version), stranding the uninserted preference experiences forever
+// — truth is append-only, so no rebuild could recover them.
+func (s *Store) InsertExperiences(exps []*core.Experience) error {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`
+		INSERT INTO experiences
+		  (id, session_id, ts, kind, extractor_ver, extractor_model,
+		   context, provider, outcome, source)
+		VALUES (?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for i, e := range exps {
+		provider := sql.NullString{String: e.Provider, Valid: e.Provider != ""}
+		if _, err := stmt.Exec(
+			e.ID, e.SessionID, e.TS, e.Kind, e.ExtractorVer, e.ExtractorModel,
+			core.MarshalContext(e.Context), provider,
+			core.MarshalOutcome(e.Outcome), e.Source); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("insert experience %d/%d (id=%s): %w", i+1, len(exps), e.ID, err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) CurrentExperiences() ([]*core.Experience, error) {
+	rows, err := s.DB.Query(`
+		SELECT id, session_id, ts, kind, extractor_ver, extractor_model,
+		       context, provider, outcome, source
+		FROM experiences_current ORDER BY ts, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*core.Experience
+	for rows.Next() {
+		e := &core.Experience{}
+		var ctx, outcome string
+		var provider sql.NullString
+		if err := rows.Scan(&e.ID, &e.SessionID, &e.TS, &e.Kind,
+			&e.ExtractorVer, &e.ExtractorModel, &ctx, &provider, &outcome, &e.Source); err != nil {
+			return nil, err
+		}
+		e.Provider = provider.String
+		if err := json.Unmarshal([]byte(ctx), &e.Context); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(outcome), &e.Outcome); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// KnownValues returns the distinct values already recorded for a context
+// key — the vocabulary handed to the extraction prompt (SCHEMA.md D5).
+func (s *Store) KnownValues(key string) ([]string, error) {
+	// WHERE/ORDER BY reference the SELECT alias v — a SQLite extension over
+	// strict SQL, safe on the fixed SQLite backend (ADR-0004).
+	rows, err := s.DB.Query(`
+		SELECT DISTINCT json_extract(context, '$.' || ?) AS v
+		FROM experiences WHERE v IS NOT NULL AND v != '' ORDER BY v`, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// ---- projections ----
+
+func (s *Store) GetConnection(kind, scopeKey, target string) (*core.Connection, error) {
+	row := s.DB.QueryRow(`
+		SELECT kind, scope_key, target, alpha, beta, last_update, born_ts,
+		       COALESCE(parent_key,'')
+		FROM connections WHERE kind=? AND scope_key=? AND target=?`,
+		kind, scopeKey, target)
+	c := &core.Connection{}
+	err := row.Scan(&c.Kind, &c.ScopeKey, &c.Target, &c.Alpha, &c.Beta,
+		&c.LastUpdate, &c.BornTS, &c.ParentKey)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (s *Store) UpsertConnection(c *core.Connection) error {
+	parent := sql.NullString{String: c.ParentKey, Valid: c.ParentKey != ""}
+	_, err := s.DB.Exec(`
+		INSERT INTO connections
+		  (kind, scope_key, target, alpha, beta, last_update, born_ts, parent_key)
+		VALUES (?,?,?,?,?,?,?,?)
+		ON CONFLICT (kind, scope_key, target) DO UPDATE SET
+		  alpha=excluded.alpha, beta=excluded.beta,
+		  last_update=excluded.last_update`,
+		c.Kind, c.ScopeKey, c.Target, c.Alpha, c.Beta, c.LastUpdate, c.BornTS, parent)
+	return err
+}
+
+func (s *Store) DeleteConnection(kind, scopeKey, target string) error {
+	_, err := s.DB.Exec(`DELETE FROM connections WHERE kind=? AND scope_key=? AND target=?`,
+		kind, scopeKey, target)
+	return err
+}
+
+func (s *Store) ConnectionsFor(kind, target string) ([]*core.Connection, error) {
+	return s.queryConnections(`
+		SELECT kind, scope_key, target, alpha, beta, last_update, born_ts,
+		       COALESCE(parent_key,'')
+		FROM connections WHERE kind=? AND target=? ORDER BY scope_key`, kind, target)
+}
+
+func (s *Store) AllConnections() ([]*core.Connection, error) {
+	return s.queryConnections(`
+		SELECT kind, scope_key, target, alpha, beta, last_update, born_ts,
+		       COALESCE(parent_key,'')
+		FROM connections ORDER BY kind, scope_key, target`)
+}
+
+func (s *Store) queryConnections(q string, args ...any) ([]*core.Connection, error) {
+	rows, err := s.DB.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*core.Connection
+	for rows.Next() {
+		c := &core.Connection{}
+		if err := rows.Scan(&c.Kind, &c.ScopeKey, &c.Target, &c.Alpha, &c.Beta,
+			&c.LastUpdate, &c.BornTS, &c.ParentKey); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) InsertLedger(e *core.LedgerEntry) error {
+	_, err := s.DB.Exec(`
+		INSERT OR REPLACE INTO surprise_ledger
+		  (kind, scope_key, target, experience_id, ts, p, y, s_excess)
+		VALUES (?,?,?,?,?,?,?,?)`,
+		e.Kind, e.ScopeKey, e.Target, e.ExperienceID, e.TS, e.P, e.Y, e.SExcess)
+	return err
+}
+
+func (s *Store) LedgerFor(kind, scopeKey, target string) ([]*core.LedgerEntry, error) {
+	rows, err := s.DB.Query(`
+		SELECT kind, scope_key, target, experience_id, ts, p, y, s_excess
+		FROM surprise_ledger WHERE kind=? AND scope_key=? AND target=?
+		ORDER BY ts`, kind, scopeKey, target)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*core.LedgerEntry
+	for rows.Next() {
+		e := &core.LedgerEntry{}
+		if err := rows.Scan(&e.Kind, &e.ScopeKey, &e.Target, &e.ExperienceID,
+			&e.TS, &e.P, &e.Y, &e.SExcess); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteLedgerFor(kind, scopeKey, target string) error {
+	_, err := s.DB.Exec(`
+		DELETE FROM surprise_ledger WHERE kind=? AND scope_key=? AND target=?`,
+		kind, scopeKey, target)
+	return err
+}
+
+// ClearProjections wipes everything rebuildable (SCHEMA.md D10).
+func (s *Store) ClearProjections() error {
+	if _, err := s.DB.Exec(`DELETE FROM connections`); err != nil {
+		return err
+	}
+	_, err := s.DB.Exec(`DELETE FROM surprise_ledger`)
+	return err
+}

@@ -170,6 +170,7 @@ ADR-0005の通り、改版の本体はプロンプト/schemaであり、
 ```text
 key    「形」→ JSON schemaのenumで閉じる
        初期セット: cap / lang / framework / topic / size / review / model
+       （review は最小コア v1 では未実装。追加時は extractor_ver +1）
        key追加 = schema改版 = extractor_ver +1 として記録に残る
 
 value  「意味」→ プロンプトが担う
