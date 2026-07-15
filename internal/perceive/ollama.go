@@ -24,6 +24,23 @@ type Ollama struct {
 
 func (o *Ollama) Name() string { return o.Model }
 
+// Digest limits for the prompt (truth stays untruncated — ADR-0006: events
+// keep the full assistant text, only the perception prompt is bounded).
+const (
+	// maxEventChars caps one event's marshalled payload. A single
+	// provider.output can carry a full assistant turn with no upper bound at
+	// the truth layer; without a per-event cap, one long turn could alone
+	// consume the entire session budget below.
+	maxEventChars = 2000
+	// maxSessionChars caps the whole "Session events" block handed to the
+	// model. qwen3:8b's context window is not the constraint here — latency
+	// is (ADR-0004: ~2.4s/38 tok/s measured baseline). The four fields
+	// extracted (lang/framework/topic/size) are decided by a handful of
+	// lines, not the full transcript, so bounding the prompt trades away
+	// transcript detail the extractor was not using anyway.
+	maxSessionChars = 12000
+)
+
 // format: shape only (ADR-0005 Decision 2).
 var extractSchema = map[string]any{
 	"type": "object",
@@ -62,13 +79,6 @@ func (o *Ollama) ExtractContext(events []*store.Event, vocab map[string][]string
 		vb.WriteString(fmt.Sprintf("- %s: %s\n", k, strings.Join(vocab[k], ", ")))
 	}
 
-	var sb strings.Builder
-	sb.WriteString("Session events:\n")
-	for _, e := range events {
-		p, _ := json.Marshal(e.Payload)
-		sb.WriteString(fmt.Sprintf("%s %s\n", e.Type, p))
-	}
-
 	body, err := json.Marshal(map[string]any{
 		"model":  o.Model,
 		"stream": false,
@@ -79,7 +89,7 @@ func (o *Ollama) ExtractContext(events []*store.Event, vocab map[string][]string
 		},
 		"messages": []map[string]string{
 			{"role": "system", "content": extractSystem + "\n\n" + vb.String()},
-			{"role": "user", "content": sb.String()},
+			{"role": "user", "content": eventsSection(events)},
 		},
 	})
 	if err != nil {
@@ -109,4 +119,32 @@ func (o *Ollama) ExtractContext(events []*store.Event, vocab map[string][]string
 		return nil, fmt.Errorf("ollama: model returned non-JSON content: %w", err)
 	}
 	return out, nil
+}
+
+// eventsSection renders a session's events for the prompt, within
+// maxEventChars/maxSessionChars. Truncation is noted inline so the model
+// (and anyone reading the prompt while debugging) can tell the digest is
+// partial rather than assume the transcript ended there.
+func eventsSection(events []*store.Event) string {
+	var sb strings.Builder
+	sb.WriteString("Session events:\n")
+	total := 0
+	omitted := 0
+	for _, e := range events {
+		p, _ := json.Marshal(e.Payload)
+		line := fmt.Sprintf("%s %s\n", e.Type, p)
+		if len(line) > maxEventChars {
+			line = line[:maxEventChars] + "...[event truncated]\n"
+		}
+		if total+len(line) > maxSessionChars {
+			omitted++
+			continue
+		}
+		total += len(line)
+		sb.WriteString(line)
+	}
+	if omitted > 0 {
+		fmt.Fprintf(&sb, "...[%d further event(s) omitted: session digest limit reached]\n", omitted)
+	}
+	return sb.String()
 }

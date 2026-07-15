@@ -85,6 +85,48 @@ func TestExtractContextErrorsOnNon200(t *testing.T) {
 	}
 }
 
+func TestEventsSectionTruncatesAnOversizedSingleEvent(t *testing.T) {
+	huge := strings.Repeat("a", maxEventChars*2)
+	events := []*store.Event{ev("provider.output", map[string]any{"text": huge})}
+
+	got := eventsSection(events)
+	if len(got) >= len(huge) {
+		t.Errorf("an oversized event should be truncated, got %d chars", len(got))
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Errorf("truncation of a single event should be noted in the prompt: %q", got)
+	}
+}
+
+func TestEventsSectionOmitsEventsBeyondTheSessionBudget(t *testing.T) {
+	var events []*store.Event
+	for i := 0; i < 50; i++ {
+		events = append(events, ev("provider.output", map[string]any{"text": strings.Repeat("x", maxEventChars-100)}))
+	}
+
+	got := eventsSection(events)
+	if len(got) > maxSessionChars+500 { // headroom for the trailing omission note
+		t.Errorf("session digest should stay near the budget, got %d chars", len(got))
+	}
+	if !strings.Contains(got, "omitted") {
+		t.Errorf("omitting events should be noted in the prompt: tail=%q", got[len(got)-200:])
+	}
+}
+
+func TestEventsSectionKeepsSmallSessionsIntact(t *testing.T) {
+	events := []*store.Event{
+		ev("task.started", map[string]any{"intent": "fix the bug"}),
+		ev("task.finished", map[string]any{"adopted": "as-is"}),
+	}
+	got := eventsSection(events)
+	if strings.Contains(got, "truncated") || strings.Contains(got, "omitted") {
+		t.Errorf("a session well under budget should not be marked as truncated: %q", got)
+	}
+	if !strings.Contains(got, "task.started") || !strings.Contains(got, "task.finished") {
+		t.Errorf("both events should be present verbatim: %q", got)
+	}
+}
+
 func TestExtractContextErrorsOnNonJSONContent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"message":{"content":"not json at all"}}`)
