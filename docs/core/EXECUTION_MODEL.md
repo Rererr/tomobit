@@ -94,6 +94,24 @@ Review
 Planは固定ではない。
 
 Planの改善もExperienceから学習される。
+
+PlanはConnectionのもう一つの賭け先である。
+
+```text
+(context) ──台帳──▶ Plan       どの手順が効くか
+(context) ──台帳──▶ Provider   どの相棒が効くか
+```
+
+選択・減衰・Split・事前継承は、
+Providerと同じ機構が全て適用される。
+
+新しいPlan変種はCuriosityが提案する。
+変異は純関数、採否は数式、誕生は継承。
+
+LLMはPlanを生成しない。
+
+詳細は [ADR-0014](../decisions/ADR-0014-plan-learning-same-ledger.md)。
+
 Tomobitにおける「成長」とは、Planの改善でもある。
 
 ---

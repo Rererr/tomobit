@@ -72,15 +72,15 @@ Connectionは関係性である。
 例えば
 
 ```text
-Rust
+Go
 
 ↓
 
-Borrow Checker
+Goroutine
 
 ↓
 
-Lifetime
+Data Race
 
 ↓
 
@@ -93,11 +93,11 @@ Success
 
 Tomobitは
 
-「RustならClaude」
+「GoならClaude」
 
 というRuleを保存するのではなく、
 
-これらのNode同士のConnectionを保持する。
+このContextとProviderのConnectionを保持する。
 
 Connectionは以下の情報を持つ。
 
@@ -118,25 +118,53 @@ KnowledgeはRuleの集合ではない。
 
 KnowledgeはConnection Networkとして保持される。
 
+ノードは語彙のトークンとProvider、
+辺は生きたBeta台帳を持つConnectionである。
+
 ```text
-                 Borrow Checker
-                ╱               ╲
-               ╱                 ╲
-           Rust ───────── Lifetime
-             │                     │
-             │                     │
-             ▼                     ▼
-       Claude Code            Codex
-             │                     │
-             └────────┬────────────┘
-                      ▼
-                  Successful Fix
+(go) ──────────────────────── Claude   ████████░░
+(go) ──────────────────────── Codex    ███░░░░░░░
+
+              │
+              │ Split — 意味のある差の発見
+              ▼
+
+(go, topic=concurrency) ───── Claude   ██░░░░░░░░
+(go, topic=concurrency) ───── Codex    ███████░░░
 ```
 
-Nodeよりも重要なのは、
-Node同士のConnectionである。
+粗い島ではClaudeが勝ち、
+並行処理の島ではCodexが逆転する。
+
+この逆転を発見し、
+島を切り出すのがSplitである。
+
+トークン同士を直接結ぶ辺は存在しない。
+
+GoとGoroutineは、
+同じExperienceの中で出会う。
+
+その出会いに意味があるとき、
+Splitが新しい島として切り出す。
 
 KnowledgeはConnection全体の状態として存在する。
+
+---
+
+# Episodic Memory
+
+類似Experienceの想起は、
+器官としてはまだ存在しない。
+
+しかしexperiencesという真実が
+追記専用で残り続ける限り、
+
+「似た経験を思い出す」は、
+いつでも後から導出できる射影である。
+
+権利は保全されている。
+
+約束はまだしない。
 
 ---
 
@@ -146,33 +174,46 @@ Strategyは保存しない。
 
 毎回生成する。
 
+生成には二つの座席があり、
+座る者が異なる。
+
 ```text
-Current Context
+タスク記述
+
+        ↓
+
+LLM（意味付け）
+
+        ↓
+
+Context属性トークン
 
         +
 
 Knowledge Network
 
-        +
+        ↓
 
-Current Goal
-
-        +
-
-Current State
+純関数（判断）
 
         ↓
 
-Small Local LLM
-
-        ↓
-
-Strategy
+Strategy（Provider決定）
 ```
+
+LLMが担うのは意味付けまでである。
+
+タスク記述を、
+Experienceと同じ語彙のContext属性トークンへ写像する。
+
+そこから先は数式である。
+
+同じConnectionと同じContextからは、
+同じ判断が導かれる。
 
 StrategyはKnowledgeではない。
 
-Knowledgeから生成される
+Knowledgeから導出される
 **現在最適な判断**である。
 
 ---
@@ -180,24 +221,32 @@ Knowledgeから生成される
 # Role of the Local LLM
 
 軽量ローカルLLMは
-コードを書くためだけに存在するのではない。
+判断するために存在するのではない。
 
 Tomobitでは
 
-> **Knowledge Networkを読み解き、ConnectionからStrategyを生成する認知エンジン**
+> **Realityとタスク記述を、共有語彙へ写像する知覚器官（extractor）**
 
 として機能する。
 
-またアイドル状態では
+LLMの座席はPerception / Experience側にのみある。
 
-- Experienceの再解釈
-- Connection更新
-- 類似Experienceの発見
-- 知識の再構成
+判断の側に、
+交換不能なAIは存在しない。
 
-を継続的に実施できる。
+アイドル状態のLLMの仕事も、
+判断を練ることではない。
+
+> **過去をより良く知覚し直すこと**である。
+
+- extractorの改版（extractor_ver +1）
+- 蓄積されたRealityの再知覚
+- Experienceの再生成
 
 Tomobitは停止中も成長し続ける。
+
+ただし磨かれるのは判断のアルゴリズムではなく、
+判断が読むExperienceの品質である。
 
 ---
 
@@ -250,6 +299,23 @@ Strategyは保存しない。
 
 Knowledge Networkから、
 その瞬間ごとに生成される。
+
+---
+
+## Meaning by Model, Judgment by Math
+
+意味付けはLLM、判断は数式。
+
+LLMは世界とタスクを語彙へ写像する。
+
+Providerを決めるのは、
+Connectionの統計に対する純関数である。
+
+判断の側に交換不能なAIが存在しないから、
+
+成長は検証でき、
+判断は監査でき、
+AIは交換できる。
 
 ---
 

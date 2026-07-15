@@ -181,6 +181,44 @@ Everything else is replaceable.
 
 ---
 
+## Experience Sovereignty
+
+Experience belongs to the user.
+
+It lives on the user's machine,
+
+leaves in a format the user can carry,
+
+and by default passes through no one else's hands.
+
+Tomobit may be replaced.
+
+The experience that raised it may not be taken.
+
+---
+
+## Individuality is Derived
+
+No two Tomobits are alike.
+
+Not because a personality was designed,
+
+but because experience shaped each one differently.
+
+What it likes,
+
+where it is confident,
+
+where it hesitates —
+
+all of it is derived from the experience you shared.
+
+Your companion is yours,
+
+because your experience made it.
+
+---
+
 ## Connection over Knowledge
 
 Connections matter more than stored facts.
