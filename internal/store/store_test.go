@@ -218,6 +218,30 @@ func TestKnownValuesAreDistinctNonEmptyAndSorted(t *testing.T) {
 	}
 }
 
+func TestKnownValuesExcludeSupersededExtractorVersions(t *testing.T) {
+	s := openTest(t)
+	insertExpFull(t, s, &core.Experience{
+		ID: "a", SessionID: "s1", TS: 1, Kind: core.KindExecution,
+		ExtractorVer: 1, ExtractorModel: "none",
+		Context: map[string]string{"framework": "rust"}, Provider: "claude",
+		Outcome: core.Outcome{}, Source: "production",
+	})
+	insertExpFull(t, s, &core.Experience{
+		ID: "b", SessionID: "s1", TS: 1, Kind: core.KindExecution,
+		ExtractorVer: 2, ExtractorModel: "none",
+		Context: map[string]string{"framework": "axum"}, Provider: "claude",
+		Outcome: core.Outcome{}, Source: "production",
+	})
+
+	got, err := s.KnownValues("framework")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "axum" {
+		t.Errorf("superseded vocabulary should not be re-suggested: got %v, want [axum]", got)
+	}
+}
+
 func TestConnectionCRUD(t *testing.T) {
 	s := openTest(t)
 	c := &core.Connection{

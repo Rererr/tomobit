@@ -83,6 +83,13 @@ func (p *Perceiver) perceiveSession(sessionID string) ([]*core.Experience, error
 			ctx[k] = v
 		}
 	}
+	// qwen3:8b echoes the language into framework despite the prompt rule
+	// (measured: "go worker pool" → framework=go survived two prompt
+	// iterations). A language is never a framework, and the equality is
+	// decidable — so decide it here, not in the prompt (ADR-0004).
+	if ctx["framework"] == ctx["lang"] {
+		delete(ctx, "framework")
+	}
 	if det.capability != "" {
 		ctx["cap"] = det.capability
 	}

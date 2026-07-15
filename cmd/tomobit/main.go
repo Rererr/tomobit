@@ -16,7 +16,7 @@ import (
 	"github.com/Rererr/tomobit/internal/store"
 )
 
-const extractorVer = 1 // bump when the extraction prompt/schema changes
+const extractorVer = 2 // bump when the extraction prompt/schema changes
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {

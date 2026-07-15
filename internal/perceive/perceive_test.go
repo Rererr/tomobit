@@ -183,6 +183,30 @@ func TestRunProducesExecutionAndPreferenceExperiences(t *testing.T) {
 	}
 }
 
+func TestRunDropsFrameworkWhenItEqualsLang(t *testing.T) {
+	s := openStore(t)
+	finishedSession(t, s, "sess")
+	ext := &fakeExtractor{semantic: map[string]string{"lang": "go", "framework": "Go"}}
+	p := &Perceiver{Store: s, Extractor: ext, Ver: 1}
+
+	if _, err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := s.CurrentExperiences()
+	var exec *core.Experience
+	for _, e := range cur {
+		if e.Kind == core.KindExecution {
+			exec = e
+		}
+	}
+	if _, ok := exec.Context["framework"]; ok {
+		t.Errorf("a language is never a framework — framework should be dropped: %v", exec.Context)
+	}
+	if exec.Context["lang"] != "go" {
+		t.Errorf("lang should survive the guard: %v", exec.Context)
+	}
+}
+
 func TestRunWithoutExtractorSkipsSemanticContext(t *testing.T) {
 	s := openStore(t)
 	finishedSession(t, s, "sess")
