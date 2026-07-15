@@ -7,11 +7,22 @@ Tomobitが外界を知覚するためのコンポーネントである。
 
 責務は、
 
-> **現実世界で発生した出来事を、構造化された Observation として認識すること**
+> **現実世界の事実を、構造化された共有語彙として認識すること**
 
 である。
 
-意味付けは行わない。
+知覚する事実は二つある。
+
+- 過去の出来事 — 実行の結果として世界に起きたこと
+- 現在のタスク記述 — これから実行しようとしていること
+
+どちらも同じextractor、同じ語彙、
+同じextractor_ver管理で構造化される。
+
+Perceptionが行う意味付けは、
+語彙への写像までである。
+
+評価はしない。
 
 学習もしない。
 
@@ -72,6 +83,7 @@ Perception Engineは以下のみを担当する。
 - Eventの集約
 - Observation生成
 - Observation保存
+- タスク記述の構造化（実行前のContext属性トークン抽出）
 
 以下は担当しない。
 
@@ -204,6 +216,45 @@ Knowledge形成に利用しない。
 
 ---
 
+# Task Perception
+
+知覚は実行の後だけに起きるのではない。
+
+実行の前にも起きる。
+
+タスク記述はまだ出来事ではないが、
+Tomobitの前に現れた現実である。
+
+Perception Engineはタスク記述を、
+ExperienceのContextと同じ語彙の
+Context属性トークンへ構造化する。
+
+```text
+タスク記述
+
+↓
+
+extractor（LLM）
+
+↓
+
+Context属性トークン
+
+↓
+
+Decision Engine
+```
+
+過去の知覚と実行前の知覚が
+同じ語彙を共有するから、
+
+Experienceは判断に接続できる。
+
+語彙が割れた瞬間に、
+経験は資産でなくなる。
+
+---
+
 # Observation Sources
 
 Perception Engineは
@@ -330,9 +381,12 @@ Realityを観測する。
 ## Facts over Interpretation
 
 Observationは
-意味付けを行わない。
+評価を含まない。
 
 事実だけを保持する。
+
+語彙への写像はするが、
+良し悪しは付けない。
 
 ---
 

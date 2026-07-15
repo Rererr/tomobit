@@ -54,18 +54,18 @@ Tomobitを構成する認知コンポーネントと、
                         ▼
               Knowledge Network
                         │
-         ┌──────────────┴──────────────┐
-         ▼                             ▼
- Decision Engine               Curiosity Engine
-                                       │
-                                       ▼
-                                Curiosity Queue
-                                       │
-                                       ▼
-                             Learning Scheduler
-                                       │
-                                       ▼
-                               Executor Manager
+         ┌──────────────┼─────────────────────┐
+         ▼              ▼                     ▼
+ Decision Engine  Curiosity Engine    Reflection Engine
+                        │                     │
+                        ▼                     ▼
+                 Curiosity Queue            Human
+                        │
+                        ▼
+               Learning Scheduler
+                        │
+                        ▼
+                Executor Manager
 ```
 
 ---
@@ -280,6 +280,24 @@ Learning Candidateを実行するか判断する。
 
 ---
 
+## Reflection Engine
+
+台帳の出来事を人の言葉に映す。
+
+担当
+
+- 気付き候補の検出（Split誕生 / 逆転 / Questioned / 名誉回復 / 再知覚）
+- 語る価値の選択（反応の台帳から、数式で）
+- 語りの言語化（LLM＝言語化のみ）
+- 反応の記帳
+
+担当しない
+
+- 判断
+- 新しい真実の生成（語りは射影）
+
+---
+
 # Two Sources of Reality
 
 Realityには二種類存在する。
@@ -308,6 +326,8 @@ Curiosityによって生成されるReality。
 - 再レビュー
 - 再評価
 - 新Model検証
+- Tomoの質問への回答
+- 気付きへの反応（Reflection）
 
 Perception Engineは
 両者を区別せずObservationを生成する。
@@ -368,7 +388,9 @@ Connectionを育て、
 
 理解を形成し、
 
-好奇心によって新たなRealityを生み出す。
+好奇心によって新たなRealityを生み出し、
+
+気付きを人へ映す。
 
 それぞれの役割を持つ認知コンポーネントが協調することで、
 Tomobitという一つの「生きたハーネス」が成り立つ。

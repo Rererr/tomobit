@@ -87,6 +87,14 @@ Learning Requestを生成するのみである。
 
 Curiosityは複数のSignalから生成される。
 
+Signalは検出器である。
+
+「これは調べる価値があるかもしれない」と
+推薦するまでが仕事であり、順位は付けない。
+
+順位は単一の物差し
+（[Value of Information](#value-of-information)）が付ける。
+
 例
 
 ## Knowledge Gap
@@ -235,6 +243,62 @@ Learning Schedulerが守る。
 
 ---
 
+## Plan Proposal
+
+あるIntentのPlanメニューに空きがあり、
+既存Planの台帳は収束している —
+今のメニューから学べることが減っている。
+
+既存Planへの構造的変異
+（drop / insert / swap、いずれも純関数）で
+新しいPlan変種を提案する。
+
+LLMはPlanを生成しない。
+
+変異は純関数、採否は数式、誕生は継承。
+
+新参Planの初陣は n(stakes) が自然と
+軽いタスクに割り当てる。
+
+（[ADR-0014](../decisions/ADR-0014-plan-learning-same-ledger.md)）
+
+---
+
+# Value of Information
+
+Signalの推薦に順位を付けるのは、
+単一の純関数である。
+
+```text
+VoI = 文脈の到来頻度 × 判断の揺らぎ
+
+到来頻度   その文脈が仕事でどれくらい来るか
+           （eventsから数えるだけ）
+
+揺らぎ     判断のくじ（Thompson Sampling）を
+           M本引いてみて、勝者が割れる率。
+           毎回同じなら0 — もう迷っていない
+```
+
+新しい部品はない。
+判断に使うサンプラーを、そのまま計測に使い回す。
+
+> **不確実性は好奇心の理由にならない。**
+> **判断が変わることだけが理由になる。**
+
+年に一度しか来ない島の謎は、
+どれほど深くてもVoI ≈ 0である。
+
+コストでは割らない。
+
+価値の物差しはVoI、財布の紐はScheduler。
+Learning CandidateのEstimated Costは
+予約フィールドである（v1では常に空）。
+
+（[ADR-0016](../decisions/ADR-0016-curiosity-priority-voi.md)）
+
+---
+
 # Curiosity Queue
 
 Curiosity Engineは
@@ -248,21 +312,14 @@ Learning TaskをQueueへ登録する。
 例
 
 ```text
-Priority 95
+VoI 0.34   Compare Codex with Claude on Go
+           毎日来る × 迷っている
 
-Evaluate Claude 5 on Rust
+VoI 0.08   Evaluate Claude 5 on Rust
+           時々来る × やや迷い
 
-------------------------
-
-Priority 82
-
-Compare Codex with Claude on Go
-
-------------------------
-
-Priority 61
-
-Re-evaluate Python Refactoring
+VoI 0.01   Re-evaluate Python Refactoring
+           よく来る × ほぼ確定
 ```
 
 Queueは永続化される。
@@ -402,6 +459,11 @@ Curiosityを利用してはならない。
 最適化ではなく、
 
 Knowledge Networkを豊かにすることである。
+
+ただし豊かさは、使われる場所で測る。
+
+誰も訪れない島の地図を精密にすることは、
+豊かさではなく退蔵である。
 
 ---
 

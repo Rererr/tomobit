@@ -1,6 +1,6 @@
 # ADR-0008: Tomoの姿 — 成長はViewである
 
-- Status: **Accepted**
+- Status: **Accepted**（Decision 2のステージ関数は [ADR-0017](ADR-0017-stage-function-calibration.md) で置換）
 - Date: 2026-07-15
 - 関連: [VISION.md](../core/VISION.md)（Growth = Connectionの質）,
   [ADR-0007](ADR-0007-curiosity-question.md)（「保存された属性は嘘をつく」の先例）,
