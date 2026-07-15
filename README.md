@@ -38,10 +38,16 @@
 
 ## Status
 
-設計フェーズ完了（ADR-0001〜0005）。実装フェーズへ。
+最小コア実装済み（記帳 → 知覚 → Connection更新 → rebuild）。
 
 Stack: **Go / SQLite / Ollama**（完全ローカル）
 
-スキーマ確定済み（[SCHEMA.md](docs/design/SCHEMA.md)）。
-次の一手: `go mod init` → 最小コア実装（記帳 → 抽出 → Connection更新 → rebuild）。
+```
+tomobit record  --session <id> --type <event.type> [--json '{...}']
+tomobit perceive   # 未知覚セッションをOllama(qwen3:8b)で経験化しConnectionへ反映
+tomobit rebuild    # 射影を破棄しexperiencesから再構築（決定的）
+tomobit status     # Connection一覧（強度・確信度・状態）
+```
+
+DBは `~/.tomobit/tomobit.db`（`--db` / `$TOMOBIT_DB` で変更可）。
 実装時ノブ: 減衰半減期・事前分布の継承・backoffブレンド → [CONNECTION_ENGINE.md の Open Questions](docs/core/CONNECTION_ENGINE.md#open-questions)
