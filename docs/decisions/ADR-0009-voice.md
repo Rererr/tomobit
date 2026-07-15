@@ -101,6 +101,8 @@ Confidence < 0.5   「{scope}は{provider}と相性いいかも」（推量）
 提案の選定基準      stable中Evidence最大 → なければquestioned中LedgerSum最大
 ```
 
+- 英語化はDecision 4で決定済み（v1は日本語・文字列はvoiceに集約済みで
+  改修点は1箇所）。切替の実施は配布フェーズの判断であり、このADRの
+  未決事項ではない
 - 残るOpen Questions:
-  - 英語化のタイミング（10万人に届く言語はどちらか）
   - 「引き分け」回答の相槌（ADR-0007のOpen Questionと連動）

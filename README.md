@@ -25,6 +25,7 @@
 
 ### 実装設計
 - [docs/design/SCHEMA.md](docs/design/SCHEMA.md) — スキーマ v1.0（**確定** — D1〜D11・R1〜R4レビュー済み）
+- [docs/design/SPRITES.md](docs/design/SPRITES.md) — Tomoスプライト正本（16×12・2フレーム・パレット）
 
 ### 意思決定の記録
 - [ADR-0001](docs/decisions/ADR-0001-connection-granularity.md) — Connectionの誕生モデル（粗→Split採用）
@@ -36,6 +37,7 @@
 - [ADR-0007](docs/decisions/ADR-0007-curiosity-question.md) — Curiosityの最初の器官（Preference GapはView / 質問予算はeventsから導出 / doの区切りでTomoの質問）
 - [ADR-0008](docs/decisions/ADR-0008-appearance.md) — Tomoの姿（成長ステージはView / ドット絵＝半ブロック＋ANSI / 依存ゼロ）
 - [ADR-0009](docs/decisions/ADR-0009-voice.md) — Tomoの声（発話＝Viewの写像 / LLM不使用 / 語調は確信度のView）
+- [ADR-0010](docs/decisions/ADR-0010-codex-adapter.md) — 2つ目のAdapter（codex / `do --provider` / 写像はエラー経路実採取＋仕様準拠）
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。
@@ -51,7 +53,7 @@ Stack: **Go / SQLite / Ollama**（完全ローカル・外部依存ゼロのタ�
 
 ```
 tomobit            # 相棒ビュー（アバター・発話・Connection一覧）
-tomobit do [--cap <capability>] "<prompt>"
+tomobit do [--provider claude-code|codex] [--cap <capability>] "<prompt>"
                    # 実行→記帳→採用確認→best-effort知覚→（予算とGapがあれば）Tomoの質問
 tomobit record  --session <id> --type <event.type> [--json '{...}']
 tomobit perceive   # 未知覚セッションをOllama(qwen3:8b)で経験化しConnectionへ反映
