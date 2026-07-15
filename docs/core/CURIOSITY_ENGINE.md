@@ -230,7 +230,8 @@ Learning Schedulerが守る。
 
 スキップは自由。ペナルティはない。
 
-（[ADR-0003](../decisions/ADR-0003-outcome-and-preference.md)）
+（[ADR-0003](../decisions/ADR-0003-outcome-and-preference.md)、
+実装形は [ADR-0007](../decisions/ADR-0007-curiosity-question.md)）
 
 ---
 
@@ -238,6 +239,11 @@ Learning Schedulerが守る。
 
 Curiosity Engineは
 Learning TaskをQueueへ登録する。
+
+> ただし、connectionsとexperiencesから**再導出できるシグナル**
+> （Preference Gap / Questioned）はQueueに保存しない。
+> 聞く・裁く直前にViewとして導出する（[ADR-0007](../decisions/ADR-0007-curiosity-question.md)）。
+> Queueが持つのは再導出できない外部観測のみ。
 
 例
 
