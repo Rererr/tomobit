@@ -20,6 +20,7 @@ import (
 	"github.com/Rererr/tomobit/internal/curiosity"
 	"github.com/Rererr/tomobit/internal/executor"
 	"github.com/Rererr/tomobit/internal/executor/claudecode"
+	"github.com/Rererr/tomobit/internal/executor/codex"
 	"github.com/Rererr/tomobit/internal/face"
 	"github.com/Rererr/tomobit/internal/perceive"
 	"github.com/Rererr/tomobit/internal/store"
@@ -27,6 +28,28 @@ import (
 )
 
 const extractorVer = 3 // bump when the extraction prompt/schema changes
+
+// providers is the Decision Engine's Phase 1 stand-in (ADR-0010 Decision 1):
+// a human picks via --provider until Connections grow enough to justify
+// automatic selection. Registered names are SCHEMA.md R3 provider names.
+var providers = map[string]executor.Adapter{
+	"claude-code": claudecode.New(),
+	"codex":       codex.New(),
+}
+
+// resolveProvider looks up a registered Adapter by name, or reports the
+// available names so an unknown --provider fails with something actionable.
+func resolveProvider(name string) (executor.Adapter, error) {
+	if a, ok := providers[name]; ok {
+		return a, nil
+	}
+	names := make([]string, 0, len(providers))
+	for n := range providers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return nil, fmt.Errorf("do: unknown provider %q (available: %s)", name, strings.Join(names, ", "))
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -73,6 +96,7 @@ func usage() {
 usage:
   tomobit          (no args) companion view — avatar, mood, a line, connections
   tomobit do       [--cap implement] [--timeout 0] [--permission-mode <mode>]
+                   [--provider claude-code|codex]
                    [--model qwen3:8b] [--url http://localhost:11434] "<prompt>"
   tomobit record   --session <id> --type <event.type> [--json '{...}']
   tomobit perceive [--model qwen3:8b] [--url http://localhost:11434]
@@ -143,7 +167,8 @@ func cmdDo(args []string) error {
 	db := dbFlag(fs)
 	capability := fs.String("cap", "implement", "capability of the task")
 	timeout := fs.Duration("timeout", 0, "max run time, 0 = no limit")
-	permMode := fs.String("permission-mode", "", "claude --permission-mode passthrough")
+	permMode := fs.String("permission-mode", "", "permission mode passthrough (claude --permission-mode / codex --sandbox)")
+	providerName := fs.String("provider", "claude-code", "adapter to run: claude-code|codex")
 	model := fs.String("model", "qwen3:8b", "ollama model for best-effort perception")
 	url := fs.String("url", "", "ollama base url (default http://localhost:11434)")
 	fs.Parse(args)
@@ -151,6 +176,10 @@ func cmdDo(args []string) error {
 	prompt := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if prompt == "" {
 		return fmt.Errorf("do: a prompt is required")
+	}
+	adapter, err := resolveProvider(*providerName)
+	if err != nil {
+		return err
 	}
 
 	s, err := openStore(*db)
@@ -185,7 +214,7 @@ func cmdDo(args []string) error {
 
 	// Warn (malformed stream lines) is always visible; Debug (recognised,
 	// intentionally dropped lines) only under TOMOBIT_DEBUG.
-	ex := &executor.Executor{Adapter: claudecode.New(), Stderr: os.Stderr, Warn: os.Stderr}
+	ex := &executor.Executor{Adapter: adapter, Stderr: os.Stderr, Warn: os.Stderr}
 	if os.Getenv("TOMOBIT_DEBUG") != "" {
 		ex.Debug = os.Stderr
 	}
@@ -511,7 +540,7 @@ func cmdStatus(args []string) error {
 			fmt.Printf("「%s」\n\n", text)
 		}
 	}
-	return printConnections(os.Stdout, cands, now)
+	return printConnections(os.Stdout, cands, now, tty)
 }
 
 // printAvatar draws the sprite (ADR-0008 Decision 4): a short animation in
@@ -529,15 +558,40 @@ func printAvatar(w io.Writer, stage int) {
 	face.Animate(w, stage, face.Color256)
 }
 
-// printConnections renders the KIND/SCOPE/.../STATE table, unchanged across
-// TTY and piped output — only the avatar and speech above it are TTY-gated.
-func printConnections(w io.Writer, cands []voice.Candidate, now int64) error {
+// scopeColumnWidth and targetColumnWidth cap the TTY table's SCOPE/TARGET
+// columns so a token-heavy scope key (many Split children accumulate
+// tokens) doesn't push STRENGTH/CONF/EVIDENCE/STATE off the visible line.
+const (
+	scopeColumnWidth  = 40
+	targetColumnWidth = 24
+)
+
+// printConnections renders the KIND/SCOPE/.../STATE table. On a TTY, SCOPE
+// and TARGET are truncated to a fixed display width; piped output (tty=false)
+// stays exactly as before, since a machine reader needs the untruncated key.
+func printConnections(w io.Writer, cands []voice.Candidate, now int64, tty bool) error {
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "KIND\tSCOPE\tTARGET\tSTRENGTH\tCONF\tEVIDENCE\tSTATE")
 	for _, x := range cands {
 		c := x.Conn
+		scope, target := c.ScopeKey, c.Target
+		if tty {
+			scope = truncate(scope, scopeColumnWidth)
+			target = truncate(target, targetColumnWidth)
+		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%.2f\t%.2f\t%.1f\t%s\n",
-			c.Kind, c.ScopeKey, c.Target, c.Mean(now), c.Confidence(now), c.Evidence(now), x.State)
+			c.Kind, scope, target, c.Mean(now), c.Confidence(now), c.Evidence(now), x.State)
 	}
 	return tw.Flush()
+}
+
+// truncate shortens s to at most max runes, replacing the cut tail with a
+// single ellipsis rune. Rune-based (not byte-based) so a multi-byte
+// character straddling the cut point is never split into invalid UTF-8.
+func truncate(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max-1]) + "…"
 }

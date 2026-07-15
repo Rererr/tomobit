@@ -17,11 +17,21 @@ import (
 )
 
 // Knobs (ADR-0007 Consequences: the numbers a human decides).
+//
+// NMin/FMin sit at 2.5, not 3.0: n fresh experiences decay to just under n
+// the instant they are observed, so a 3.0 gate would demand a 4th use forever
+// (measured in the organic E2E — 3+3 runs left evidence at 2.9999). 2.5 keeps
+// the intent "3 uses open the gate" and lets it stay open for ~24 days of
+// decay. EMax mirrors the same trap in reverse: at 1.0 a single answered
+// question (evidence 1.0) would fall below the ceiling seconds later and Tomo
+// would re-ask a preference it already knows; 0.5 keeps one answer binding
+// for one half-life (~90 days), after which the preference is stale enough
+// that asking again is the desired behavior (ADR-0007 追記).
 const (
 	ThetaEven = 1.0 // nats: providers are indistinguishable below this ln BF
-	NMin      = 3.0 // effective evidence each capability Connection needs
-	FMin      = 3.0 // decayed scope frequency worth a question
-	EMax      = 1.0 // "we don't know the preference yet" ceiling
+	NMin      = 2.5 // effective evidence each capability Connection needs
+	FMin      = 2.5 // decayed scope frequency worth a question
+	EMax      = 0.5 // "we don't know the preference yet" ceiling
 
 	// BudgetWindowMs is the rolling window in which a single tomo.asked spends
 	// the whole budget (ADR-0007 Decision 3).

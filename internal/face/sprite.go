@@ -91,7 +91,7 @@ var sprites = [StagePartner + 1][2][spriteHeight]string{
 	StageChild: {
 		{
 			"................",
-			"................",
+			".......g........",
 			"......kkkk......",
 			".....kyyyyk.....",
 			"....kyyyyyyk....",
@@ -105,7 +105,7 @@ var sprites = [StagePartner + 1][2][spriteHeight]string{
 		},
 		{
 			"................",
-			"................",
+			"........g.......",
 			"......kkkk......",
 			".....kyyyyk.....",
 			"....kyyyyyyk....",

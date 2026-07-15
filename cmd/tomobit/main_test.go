@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Rererr/tomobit/internal/core"
 	"github.com/Rererr/tomobit/internal/executor"
@@ -50,6 +51,32 @@ func TestAdoptionPayloadEOFCarriesNoSignal(t *testing.T) {
 	got := adoptionPayload(strings.NewReader(""))
 	if len(got) != 0 {
 		t.Errorf("EOF: got %v, want empty payload (not as-is)", got)
+	}
+}
+
+func TestResolveProviderFindsRegisteredAdapters(t *testing.T) {
+	for _, name := range []string{"claude-code", "codex"} {
+		a, err := resolveProvider(name)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+		if a.Name() != name {
+			t.Errorf("%s: adapter Name() = %q", name, a.Name())
+		}
+	}
+}
+
+// TestResolveProviderUnknownNameListsRegisteredNames guards --provider typos:
+// the error must name the available adapters, not just reject silently.
+func TestResolveProviderUnknownNameListsRegisteredNames(t *testing.T) {
+	_, err := resolveProvider("gemini")
+	if err == nil {
+		t.Fatal("unknown provider should error")
+	}
+	for _, want := range []string{"gemini", "claude-code", "codex"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q: got %v", want, err)
+		}
 	}
 }
 
@@ -297,5 +324,45 @@ func TestCompanionViewSkipsAvatarWhenStdoutIsNotATTY(t *testing.T) {
 	}
 	if want := "no connections yet — record a session and run `tomobit perceive`\n"; got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestTruncateExactWidthIsUnchanged guards the boundary: a string exactly at
+// the column width must not lose a character (only strings that exceed the
+// width should be cut).
+func TestTruncateExactWidthIsUnchanged(t *testing.T) {
+	s := strings.Repeat("a", 40)
+	if got := truncate(s, 40); got != s {
+		t.Errorf("40-rune input at width 40: got %q, want unchanged", got)
+	}
+}
+
+// TestTruncateOneOverWidthGetsEllipsis guards the other side of the same
+// boundary: one rune past the width must be cut down to the width, with the
+// last rune replaced by an ellipsis so the total display width is preserved.
+func TestTruncateOneOverWidthGetsEllipsis(t *testing.T) {
+	got := truncate(strings.Repeat("a", 41), 40)
+	if n := utf8.RuneCountInString(got); n != 40 {
+		t.Errorf("truncated rune count: got %d, want 40", n)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncated string should end with an ellipsis: got %q", got)
+	}
+}
+
+// TestTruncateIsRuneSafeAcrossMultibyteCharacters guards against a byte-based
+// cut splitting a multi-byte rune (e.g. a Japanese scope token) into invalid
+// UTF-8.
+func TestTruncateIsRuneSafeAcrossMultibyteCharacters(t *testing.T) {
+	s := strings.Repeat("あ", 20) + strings.Repeat("a", 21) // 41 runes, mixed width
+	got := truncate(s, 40)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncation must not split a multi-byte rune: got %q", got)
+	}
+	if n := utf8.RuneCountInString(got); n != 40 {
+		t.Errorf("truncated rune count: got %d, want 40", n)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncated string should end with an ellipsis: got %q", got)
 	}
 }
