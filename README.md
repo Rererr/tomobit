@@ -27,12 +27,16 @@
 - [ADR-0001](docs/decisions/ADR-0001-connection-granularity.md) — Connectionの誕生モデル（粗→Split採用）
 - [ADR-0002](docs/decisions/ADR-0002-surprise-and-split-judgment.md) — Surpriseの定義（超過surprisal）とSplit有意判定（補正付きln BF＋ヒステリシス）
 - [ADR-0003](docs/decisions/ADR-0003-outcome-and-preference.md) — Outcome三層信号、能力/好みの二重Connection、Tomoの質問
+- [ADR-0004](docs/decisions/ADR-0004-tech-stack.md) — 技術選定（Go / SQLite真実と射影の分離 / Ollama＋Deferred Perception / 段階的デーモン化）
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。
 
 ## Status
 
-思想・認知アーキテクチャの設計フェーズ。実装未着手。
+設計フェーズ完了（ADR-0001〜0004）。実装フェーズへ。
 
-次の論点: 残りは実装時に決めるノブ（減衰半減期・事前分布の継承・backoffブレンド）→ [CONNECTION_ENGINE.md の Open Questions](docs/core/CONNECTION_ENGINE.md#open-questions)。設計の主要論点はADR-0001〜0003で確定済み。
+Stack: **Go / SQLite / Ollama**（完全ローカル）
+
+次の一手: 最小コアのスキーマ設計（events / experiencesテーブル初版）。
+実装時ノブ: 減衰半減期・事前分布の継承・backoffブレンド → [CONNECTION_ENGINE.md の Open Questions](docs/core/CONNECTION_ENGINE.md#open-questions)
