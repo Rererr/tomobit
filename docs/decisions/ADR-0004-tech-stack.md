@@ -119,3 +119,40 @@ SDKロックインなし。
 - Rustで得られたはずのADTモデリングは放棄。型の厳密さより反復速度と継続性を取った
 - 実装時ノブ: Ollamaのモデル選定、抽出プロンプト、rebuildの実行タイミング
 - 次: 最小コアのスキーマ設計（events / experiencesテーブル初版）→ 実装着手
+
+---
+
+## 追記（2026-07-15）: 実装時ノブの充填
+
+最小コア実装を経て、Decision 3 の実装時ノブが確定した。
+
+### モデル = qwen3:8b
+
+「8Bクラスのinstruct（qwen系/llama系）」枠から **qwen3:8b**（5.2GB）を採用。
+決め手は日本語の強さ。
+
+```text
+環境    Ollama 0.32.0（Homebrew / brew services で常駐）、localhost:11434
+実測    Apple M4 Pro / 48GB で 2.4秒・38 tok/s（1セッション知覚は約6.7秒）
+呼出    temperature=0, think=false → 同一入力で3回連続同一JSON（決定的）
+```
+
+### JSON schemaは「形」しか保証しない
+
+`format` によるJSON schema指定は、OllamaがGBNF文法へ変換する際に
+**descriptionを捨てる**。schemaが保証するのは構造のみで、フィールドの
+意味論は届かない（実測: language="Japanese" 誤抽出。schema側修正は
+3回とも反証、プロンプト側へ移して解決）。
+
+```text
+schema    構造の保証（型・必須フィールド）
+プロンプト  意味論の保証（各フィールドが何を指すか、禁止事項）
+Goガード   決定的な後処理（例: framework欄への言語名混入を除去）
+```
+
+プロンプト/スキーマの変更は `extractor_ver` をバンプし、
+`tomobit rebuild` で過去分を再知覚する（Deferred Perceptionの応用）。
+
+### 残ノブ
+
+rebuildの実行タイミングは未確定（現状は手動）。デーモン化（Phase 2）の論点。
