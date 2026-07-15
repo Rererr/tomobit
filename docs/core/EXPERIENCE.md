@@ -13,7 +13,7 @@ Experienceは単なるログではない。
 である。
 
 TomobitはExperienceを蓄積し、
-Patternを抽出し、
+Connectionを育て、
 Strategyを改善することで成長する。
 
 ---
@@ -47,7 +47,7 @@ Session
 Experience
     │
     ▼
-Pattern
+Connection
     │
     ▼
 Strategy
@@ -60,7 +60,7 @@ Strategy
 | Event | 実行中に発生した生ログ |
 | Session | 1回の実行全体 |
 | Experience | Sessionの要約 |
-| Pattern | Experienceの統計・傾向 |
+| Connection | Experienceから育つ知識（Beta事後分布） |
 | Strategy | 次回以降の意思決定 |
 
 ---
@@ -158,8 +158,8 @@ Outcome
 Success
 ```
 
-Experienceは
-後続のPattern抽出に利用される。
+ExperienceはConnection Engineに読まれ、
+Connectionを育てる。
 
 ---
 
@@ -180,7 +180,7 @@ Context例
 - Runtime
 - Platform
 
-ContextはPattern抽出の重要な要素となる。
+ContextはConnectionの粒度を決める重要な要素となる。
 
 ---
 
@@ -188,12 +188,24 @@ ContextはPattern抽出の重要な要素となる。
 
 Experienceは必ず結果を持つ。
 
-例
+Outcomeは三層の信号から構成される。
 
-- Success
-- Failed
-- Cancelled
-- Partial Success
+```text
+第1層  Objective（自動収穫・毎回）
+       Test Result / Compile / そのまま採用 / 手直し量 / 後日Revert
+
+第2層  Explicit Verdict（任意）
+       👍 / 👎 — 強い上書き
+
+第3層  Preference（Tomoの質問への回答）
+       「どっちが好みだった?」 → 好みのConnectionへ
+```
+
+第1層が毎回。
+第2層は気が向いた時だけ。
+第3層は聞かれた時だけ。
+
+**判定疲れを人間に負わせない。**
 
 加えて、
 
@@ -201,51 +213,33 @@ Experienceは必ず結果を持つ。
 - Cost
 - Retry Count
 - Human Intervention
-- Test Result
 
 なども保持する。
 
+（[ADR-0003](../decisions/ADR-0003-outcome-and-preference.md)）
+
 ---
 
-# Pattern
+# Connection
 
-Patternは
+Connectionは
 
-> **Experienceから抽出された傾向**
+> **複数のExperienceから育った知識**
 
 である。
 
-例
+かつてこの層はPatternと呼ばれていた。
 
-```text
-Rust
+統計（Success Rate / Average Time）は
+Connectionの導出ビューに吸収された。
 
-Fix Bug
+ConnectionはExperienceを直接変更しない。
 
-Claude Code
+ConnectionはExperienceから継続的に再生成できる。
 
-Success Rate
-
-96%
-```
-
-または
-
-```text
-React
-
-Review
-
-Codex
-
-Average Time
-
-18 sec
-```
-
-PatternはExperienceを直接変更しない。
-
-Patternは継続的に再生成できる。
+詳細は
+[CONNECTION_ENGINE.md](CONNECTION_ENGINE.md) /
+[KNOWLEDGE_EVOLUTION.md](KNOWLEDGE_EVOLUTION.md)。
 
 ---
 
@@ -253,7 +247,7 @@ Patternは継続的に再生成できる。
 
 Strategyは
 
-Patternを利用して
+Knowledge Network（Connectionの集合）を利用して
 Tomobitが次回どのように意思決定するかを表す。
 
 例
@@ -329,7 +323,7 @@ Experience
 
 ↓
 
-Pattern
+Connection
 
 ↓
 
@@ -352,7 +346,7 @@ Eventは変更しない。
 
 ## Rebuildable Knowledge
 
-Pattern・Strategyは
+Connection・Strategyは
 Experienceから再生成可能である。
 
 ---

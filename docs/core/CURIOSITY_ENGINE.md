@@ -189,6 +189,51 @@ Success : 92%
 
 ---
 
+## Questioned
+
+Surprise台帳が正に浮上した（+2 nats）。
+
+確信しているConnectionが、
+現実に殴られ続けている。
+
+審判（Split判定）を提案する。
+
+（[ADR-0002](../decisions/ADR-0002-surprise-and-split-judgment.md)）
+
+---
+
+## Preference Gap
+
+能力が互角で、好みを知らない。
+
+```text
+(Rust) : Claude vs Codex
+
+能力     互角（BFが中立帯）
+文脈     頻繁に来る（決定に効く）
+好み     証拠なし
+```
+
+**Tomoの質問**を生成する。
+
+「最近RustのレビューでClaudeとCodex両方使ってるけど、
+どっちが好みだった?」
+
+質問はLearning Realityの一種であり、
+Human Executorが実行する。
+
+本当に迷っている時しか聞かないので、
+質問は自然と賢い質問になる。
+
+質問予算（初期値: 1日1問）は
+Learning Schedulerが守る。
+
+スキップは自由。ペナルティはない。
+
+（[ADR-0003](../decisions/ADR-0003-outcome-and-preference.md)）
+
+---
+
 # Curiosity Queue
 
 Curiosity Engineは

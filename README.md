@@ -25,6 +25,8 @@
 
 ### 意思決定の記録
 - [ADR-0001](docs/decisions/ADR-0001-connection-granularity.md) — Connectionの誕生モデル（粗→Split採用）
+- [ADR-0002](docs/decisions/ADR-0002-surprise-and-split-judgment.md) — Surpriseの定義（超過surprisal）とSplit有意判定（補正付きln BF＋ヒステリシス）
+- [ADR-0003](docs/decisions/ADR-0003-outcome-and-preference.md) — Outcome三層信号、能力/好みの二重Connection、Tomoの質問
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。
@@ -33,4 +35,4 @@
 
 思想・認知アーキテクチャの設計フェーズ。実装未着手。
 
-次の論点: Split検出器の中身（Surpriseの定義・有意判定の閾値）→ [CONNECTION_ENGINE.md の Open Questions](docs/core/CONNECTION_ENGINE.md#open-questions)
+次の論点: 残りは実装時に決めるノブ（減衰半減期・事前分布の継承・backoffブレンド）→ [CONNECTION_ENGINE.md の Open Questions](docs/core/CONNECTION_ENGINE.md#open-questions)。設計の主要論点はADR-0001〜0003で確定済み。
