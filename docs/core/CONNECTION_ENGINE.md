@@ -238,23 +238,83 @@ Split:
 
 Splitの燃料は予測誤差である。
 
-既存Connectionが予測を外すたび、
-その時のContext属性を添えて記録する。
+ただし、外れた回数ではない。
+
+> **Surprise ＝ 驚き − 迷い（超過surprisal）**
 
 ```text
-予測誤差が特定の属性と相関し始める
-
-→ Split候補
+s_excess = −log P(y | 予測) − H(予測)
 ```
 
-役割分担
+較正されたConnectionでは期待値ゼロ。
+
+成功が続けば沈み、
+失敗が続けば浮上する。
+
+迷っているConnectionは、
+外れても驚かない。
+
+確信しているConnectionが外れた時だけ、
+深く驚く。
+
+観測のたび、台帳に記す。
 
 ```text
-Curiosity Engine   Split候補に「気付く」
-Connection Engine  Splitを「実行する」
+{ connection, experience_id, Context属性一式, y, p̂, s_excess }
+```
+
+台帳はExperienceログから再計算可能な
+**導出インデックス**である。
+
+One Ledgerは無傷である。
+
+台帳が正に浮上したら（+2 nats）、
+そのConnectionはQuestionedとなり、
+Curiosity Queueに載る。
+
+```text
+Curiosity Engine   台帳の浮上に「気付く」
+Connection Engine  審判を「実行する」
 ```
 
 Curiosityは気付き、Connectionは変わる。
+
+---
+
+# The Judgment
+
+割るかどうかは、対数ベイズファクターが決める。
+
+```text
+H0  このConnectionは一枚岩
+H1  属性aの有無で世界が違う
+
+ln BF = ln P(D|H1) − ln P(D|H0)
+        （Beta-Binomial閉形式 / 減衰済み実効カウント）
+
+属性をm個調べたら割り引く
+
+判定値 = ln BF − ln m
+```
+
+閾値はヒステリシスを持つ。
+
+```text
+判定値 ≥ +3   Split（履歴つき誕生）
+判定値 ≤  0   Merge（親へ畳む）
+中間帯        現状維持
+```
+
+**形成には強い刺激が要るが、維持は安い。**
+
+シナプス可塑性の非対称性と同型である。
+
+誤って割っても、
+Born with HistoryとMergeが安く畳み直す。
+
+だから審判は、やや前のめりでよい。
+
+詳細は [ADR-0002](../decisions/ADR-0002-surprise-and-split-judgment.md)。
 
 ---
 
@@ -303,6 +363,45 @@ Splitの逆向きも、同じ判定である。
 判定器は一つ。
 
 > **細は、粗と統計的に食い違う時だけ存在を許される。**
+
+---
+
+# Capability and Preference
+
+Connectionには二種類ある。
+
+```text
+能力のConnection
+  (Rust) → Claude           Beta(α, β)
+  テスト結果・👍👎・暗黙シグナルが記帳される
+
+好みのConnection
+  (Rust) : Claude vs Codex  Beta(α, β)
+  Tomoの質問への回答が記帳される
+```
+
+「負けた」と「できなかった」は別の事実である。
+
+選好を能力に記帳すると、
+有能な次点が失敗者として沈む。
+
+だから帳簿を分ける。
+
+One Ledgerは「一つの事実に一つの帳簿」であり、
+能力と好みは直交する別の事実である。
+
+Decision Engineは、
+
+> **能力で足切りし、好みで順位を付ける。**
+
+好みのConnectionも実体は減衰Betaひとつ。
+
+Decay / Confidence / Surprise / Split のすべてが
+同じように働く。
+
+**趣味にもシナプスが生える。**
+
+詳細は [ADR-0003](../decisions/ADR-0003-outcome-and-preference.md)。
 
 ---
 
@@ -414,24 +513,22 @@ Splitの判定とMergeの判定は同じものである。
 次に詰めるべき未解決点。
 
 ```text
-1. Surpriseの定義
-   予測誤差をどう測るか（対数損失 / 単純な外れ回数 / 分布距離）
-
-2. Splitの有意判定
-   「食い違い」の閾値（尤度比検定 / ベイズファクター / 実効サンプル数の下限）
-
-3. 減衰の半減期
+1. 減衰の半減期
    基本値と、Conflictによる加速率
 
-4. 事前分布
+2. 事前分布
    Beta(1,1)か、親Connectionの事後を子の事前に継承するか
 
-5. バックオフのブレンド
+3. バックオフのブレンド
    粗と細のConfidenceをどう混ぜるか（hard switch / 重み付き平均）
+```
 
-6. Outcomeの質
-   Success/Failの判定信号（テスト結果＋人間の一押し）
-   生きたグラフほど、報酬信号の質がクリティカルになる
+解決済み
+
+```text
+Surpriseの定義      → 超過surprisal（本文 Surprise節 / ADR-0002）
+Splitの有意判定     → 補正付き ln BF とヒステリシス（本文 The Judgment節 / ADR-0002）
+Outcomeの質         → 三層信号＋能力/好みの二重Connection＋Tomoの質問（ADR-0003）
 ```
 
 ---
