@@ -17,10 +17,13 @@ import (
 	"time"
 
 	"github.com/Rererr/tomobit/internal/core"
+	"github.com/Rererr/tomobit/internal/curiosity"
 	"github.com/Rererr/tomobit/internal/executor"
 	"github.com/Rererr/tomobit/internal/executor/claudecode"
+	"github.com/Rererr/tomobit/internal/face"
 	"github.com/Rererr/tomobit/internal/perceive"
 	"github.com/Rererr/tomobit/internal/store"
+	"github.com/Rererr/tomobit/internal/voice"
 )
 
 const extractorVer = 3 // bump when the extraction prompt/schema changes
@@ -34,8 +37,9 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		usage()
-		return nil
+		// ADR-0008 Consequences: the first screen is the companion view, not
+		// the manual — usage moved to `tomobit help`.
+		return cmdStatus(nil)
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
@@ -53,6 +57,11 @@ func run(args []string) error {
 		usage()
 		return nil
 	default:
+		if strings.HasPrefix(cmd, "-") {
+			// A bare `tomobit --db X` names no subcommand — route the flags to
+			// the companion view instead of failing as "unknown command".
+			return cmdStatus(args)
+		}
 		usage()
 		return fmt.Errorf("unknown command %q", cmd)
 	}
@@ -62,12 +71,15 @@ func usage() {
 	fmt.Println(`tomobit — a living harness that grows with you
 
 usage:
+  tomobit          (no args) companion view — avatar, mood, a line, connections
   tomobit do       [--cap implement] [--timeout 0] [--permission-mode <mode>]
                    [--model qwen3:8b] [--url http://localhost:11434] "<prompt>"
   tomobit record   --session <id> --type <event.type> [--json '{...}']
   tomobit perceive [--model qwen3:8b] [--url http://localhost:11434]
   tomobit rebuild
-  tomobit status
+  tomobit status   same as no args
+
+companion markers: "?" = a connection is questioned / "z" = dormant (long quiet)
 
 common flags:
   --db <path>   database file (default ~/.tomobit/tomobit.db, or $TOMOBIT_DB)`)
@@ -93,6 +105,15 @@ func openStore(path string) (*store.Store, error) {
 		}
 	}
 	return store.Open(path)
+}
+
+// isTTY reports whether f is a character device (an interactive terminal),
+// not a pipe or redirected file. Shared by the Curiosity question (stdin,
+// ADR-0007) and the companion-view avatar (stdout, ADR-0008 Decision 4) so
+// both honor the same non-interactive detection.
+func isTTY(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
 func cmdRecord(args []string) error {
@@ -199,7 +220,56 @@ func cmdDo(args []string) error {
 	}
 
 	perceiveBestEffort(s, &perceive.Ollama{URL: *url, Model: *model})
+
+	// ADR-0007 lists the question right after the adoption prompt, but it runs
+	// here — after perception — so today's do is already folded into the Gap
+	// derivation. The interruption is still once per do at the same boundary,
+	// so the position ADR-0007 protects is unchanged.
+	askBestEffort(s, sid)
 	return nil
+}
+
+// askBestEffort runs the Curiosity question at the do boundary (ADR-0007).
+// Best-effort: any failure prints to stderr but never fails the do.
+func askBestEffort(s *store.Store, doSession string) {
+	askWithIO(s, doSession, os.Stdin, os.Stdout, isTTY(os.Stdin), time.Now().UnixMilli())
+}
+
+// askWithIO is askBestEffort's testable core (same split as
+// adoptionPayload): stdin/stdout/interactivity/clock are injected so the
+// budget check and the recording side effect can be exercised without a
+// real terminal.
+func askWithIO(s *store.Store, doSession string, in io.Reader, out io.Writer, interactive bool, now int64) {
+	// Non-interactive stdin has no human to interrupt, so we neither ask nor
+	// record: the budget guards interruption frequency, and recording a
+	// tomo.asked here would silently burn 24h of budget on a headless run that
+	// interrupted no one.
+	if !interactive {
+		return
+	}
+	ok, err := curiosity.HasBudget(s, now)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "curiosity: budget check failed:", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	gaps, err := curiosity.Gaps(s, now)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "curiosity: gap derivation failed:", err)
+		return
+	}
+	if len(gaps) == 0 {
+		return
+	}
+	gap := gaps[0]
+	fmt.Fprintln(out) // speaker separation: a blank line before Tomo's question
+	preferred, over, answered := curiosity.Ask(in, out, gap)
+	en := &core.Engine{Repo: s}
+	if err := curiosity.RecordAndPerceive(s, en, gap, preferred, over, answered, doSession, extractorVer, now); err != nil {
+		fmt.Fprintln(os.Stderr, "curiosity: recording failed:", err)
+	}
 }
 
 // providerErrorPayload decides whether the caller still needs to record its
@@ -246,6 +316,10 @@ func adoptionPayload(in io.Reader) map[string]any {
 
 // perceiveBestEffort mirrors cmdPerceive but never fails the run: if Ollama is
 // down the session stays pending (Deferred Perception, ADR-0006 Decision 5).
+//
+// Unlike cmdPerceive, the do user gets no per-experience machine log line —
+// the one spoken line (ADR-0009) replaces it, since a do session's user
+// wants to hear what Tomo learned, not read an extraction trace.
 func perceiveBestEffort(s *store.Store, extractor perceive.Extractor) {
 	p := &perceive.Perceiver{
 		Store:     s,
@@ -268,14 +342,30 @@ func perceiveBestEffort(s *store.Store, extractor perceive.Extractor) {
 		}
 		return exps[i].ID < exps[j].ID
 	})
+
+	now := time.Now().UnixMilli()
+	before, err := s.AllConnections()
+	if err != nil {
+		fmt.Printf("perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
+		return
+	}
+	stageBefore := face.Stage(before, now)
+
 	en := &core.Engine{Repo: s}
 	for _, e := range exps {
 		if err := en.Apply(e); err != nil {
 			fmt.Printf("perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
 			return
 		}
-		fmt.Printf("perceived %s: %s %s → %s\n",
-			e.SessionID, e.Kind, core.NewScope(e.Tokens()...).Key(), e.Target())
+	}
+
+	after, err := s.AllConnections()
+	if err != nil {
+		fmt.Printf("perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
+		return
+	}
+	if text, ok := voice.Perceive(stageBefore, face.Stage(after, now), voice.NewSplits(before, after), exps); ok {
+		fmt.Printf("\n「%s」\n", text) // speaker separation: a blank line before Tomo's line
 	}
 }
 
@@ -307,6 +397,14 @@ func cmdPerceive(args []string) error {
 			}
 			return exps[i].ID < exps[j].ID
 		})
+
+		now := time.Now().UnixMilli()
+		before, snapErr := s.AllConnections()
+		if snapErr != nil {
+			return snapErr
+		}
+		stageBefore := face.Stage(before, now)
+
 		en := &core.Engine{Repo: s}
 		for _, e := range exps {
 			if applyErr := en.Apply(e); applyErr != nil {
@@ -314,6 +412,16 @@ func cmdPerceive(args []string) error {
 			}
 			fmt.Printf("perceived %s: %s %s → %s\n",
 				e.SessionID, e.Kind, core.NewScope(e.Tokens()...).Key(), e.Target())
+		}
+
+		after, snapErr := s.AllConnections()
+		if snapErr != nil {
+			return snapErr
+		}
+		// The machine log lines above stay (this is the operational command,
+		// ADR-0009): the spoken line is an addition, not a replacement.
+		if text, ok := voice.Perceive(stageBefore, face.Stage(after, now), voice.NewSplits(before, after), exps); ok {
+			fmt.Printf("「%s」\n", text)
 		}
 	}
 	if err != nil {
@@ -346,6 +454,9 @@ func cmdRebuild(args []string) error {
 	return nil
 }
 
+// cmdStatus is the companion view (ADR-0008 Consequences): avatar, mood, one
+// spoken line, then the existing connections table. It backs both
+// `tomobit status` and bare `tomobit`.
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	db := dbFlag(fs)
@@ -360,23 +471,73 @@ func cmdStatus(args []string) error {
 	if err != nil {
 		return err
 	}
+	now := time.Now().UnixMilli()
+	stage := face.Stage(conns, now)
+
+	// A pipe or redirect wants the machine-readable table only — no avatar,
+	// no speech (ADR-0008 Decision 4: "the avatar only draws on a TTY").
+	tty := isTTY(os.Stdout)
+	if tty {
+		printAvatar(os.Stdout, stage)
+		fmt.Println() // speaker separation: a blank line before Tomo's own line
+	}
 	if len(conns) == 0 {
+		if tty {
+			fmt.Printf("Tomo · %s\n\n", face.StageName(stage))
+			fmt.Printf("%s\n\n", voice.FirstMeeting())
+		}
 		fmt.Println("no connections yet — record a session and run `tomobit perceive`")
 		return nil
 	}
+
 	en := &core.Engine{Repo: s}
-	now := time.Now().UnixMilli()
-	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "KIND\tSCOPE\tTARGET\tSTRENGTH\tCONF\tEVIDENCE\tSTATE")
-	for _, c := range conns {
+	cands := make([]voice.Candidate, len(conns))
+	for i, c := range conns {
 		sum, err := en.LedgerSum(c, now)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%.2f\t%.2f\t%.1f\t%s\n",
-			c.Kind, c.ScopeKey, c.Target,
-			c.Mean(now), c.Confidence(now), c.Evidence(now),
-			c.State(now, sum))
+		cands[i] = voice.Candidate{Conn: c, State: c.State(now, sum), LedgerSum: sum}
 	}
-	return w.Flush()
+
+	if tty {
+		states := make([]string, len(cands))
+		for i, c := range cands {
+			states[i] = c.State
+		}
+		_, marker := face.Mood(states)
+		fmt.Printf("Tomo · %s %s\n\n", face.StageName(stage), marker)
+		if text, ok := voice.Suggest(cands, now); ok {
+			fmt.Printf("「%s」\n\n", text)
+		}
+	}
+	return printConnections(os.Stdout, cands, now)
+}
+
+// printAvatar draws the sprite (ADR-0008 Decision 4): a short animation in
+// color, or a single static frame under NO_COLOR — never cursor-control
+// bytes on a terminal that was told not to expect color.
+func printAvatar(w io.Writer, stage int) {
+	// NO_COLOR is "present", not "non-empty" (https://no-color.org/): an
+	// empty NO_COLOR= must still disable color, so this checks presence via
+	// LookupEnv rather than Getenv's != "".
+	if _, noColor := os.LookupEnv("NO_COLOR"); noColor {
+		// 0 is face's first sprite frame (face.frameA is unexported).
+		io.WriteString(w, face.Render(stage, 0, face.Mono))
+		return
+	}
+	face.Animate(w, stage, face.Color256)
+}
+
+// printConnections renders the KIND/SCOPE/.../STATE table, unchanged across
+// TTY and piped output — only the avatar and speech above it are TTY-gated.
+func printConnections(w io.Writer, cands []voice.Candidate, now int64) error {
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "KIND\tSCOPE\tTARGET\tSTRENGTH\tCONF\tEVIDENCE\tSTATE")
+	for _, x := range cands {
+		c := x.Conn
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%.2f\t%.2f\t%.1f\t%s\n",
+			c.Kind, c.ScopeKey, c.Target, c.Mean(now), c.Confidence(now), c.Evidence(now), x.State)
+	}
+	return tw.Flush()
 }

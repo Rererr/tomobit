@@ -13,13 +13,13 @@ func almostEqual(t *testing.T, got, want, tol float64, msg string) {
 }
 
 func TestDecayFactorIsOneWhenNotAdvancing(t *testing.T) {
-	almostEqual(t, decayFactor(100, 100), 1, 1e-12, "to==from")
-	almostEqual(t, decayFactor(200, 100), 1, 1e-12, "to<from")
+	almostEqual(t, DecayFactor(100, 100), 1, 1e-12, "to==from")
+	almostEqual(t, DecayFactor(200, 100), 1, 1e-12, "to<from")
 }
 
 func TestDecayFactorHalvesEveryHalfLife(t *testing.T) {
-	almostEqual(t, decayFactor(0, HalfLifeMs), 0.5, 1e-12, "one half-life")
-	almostEqual(t, decayFactor(0, 2*HalfLifeMs), 0.25, 1e-12, "two half-lives")
+	almostEqual(t, DecayFactor(0, HalfLifeMs), 0.5, 1e-12, "one half-life")
+	almostEqual(t, DecayFactor(0, 2*HalfLifeMs), 0.25, 1e-12, "two half-lives")
 }
 
 func TestPosteriorAtLeavesCountsWhenNowEqualsLastUpdate(t *testing.T) {

@@ -34,22 +34,29 @@
 - [ADR-0005](docs/decisions/ADR-0005-perception-model-and-schema-boundary.md) — 知覚の実装（qwen3:8b確定 / schemaは「形」・プロンプトは「意味」）
 - [ADR-0006](docs/decisions/ADR-0006-executor-integration.md) — Executor統合（`tomobit do` / claude-code Adapter / ダイジェスト記帳 / 採用確認）
 - [ADR-0007](docs/decisions/ADR-0007-curiosity-question.md) — Curiosityの最初の器官（Preference GapはView / 質問予算はeventsから導出 / doの区切りでTomoの質問）
+- [ADR-0008](docs/decisions/ADR-0008-appearance.md) — Tomoの姿（成長ステージはView / ドット絵＝半ブロック＋ANSI / 依存ゼロ）
+- [ADR-0009](docs/decisions/ADR-0009-voice.md) — Tomoの声（発話＝Viewの写像 / LLM不使用 / 語調は確信度のView）
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。
 
 ## Status
 
-最小コア実装済み（記帳 → 知覚 → Connection更新 → rebuild）。
+最小コア（記帳 → 知覚 → Connection更新 → rebuild）に加え、相棒の器官を実装済み:
+**姿**（ドット絵アバター・成長6ステージ・すべてConnectionからのView）、
+**声**（つぶやき・成長報告・提案 — 全発話が決定的導出）、
+**質問**（Preference Gap導出・予算1問/24h — ADR-0007）。
 
-Stack: **Go / SQLite / Ollama**（完全ローカル）
+Stack: **Go / SQLite / Ollama**（完全ローカル・外部依存ゼロのターミナルUI）
 
 ```
-tomobit do [--cap <capability>] "<prompt>"   # 実行→記帳→採用確認→best-effort知覚
+tomobit            # 相棒ビュー（アバター・発話・Connection一覧）
+tomobit do [--cap <capability>] "<prompt>"
+                   # 実行→記帳→採用確認→best-effort知覚→（予算とGapがあれば）Tomoの質問
 tomobit record  --session <id> --type <event.type> [--json '{...}']
 tomobit perceive   # 未知覚セッションをOllama(qwen3:8b)で経験化しConnectionへ反映
-tomobit rebuild    # 射影を破棄しexperiencesから再構築（決定的）
-tomobit status     # Connection一覧（強度・確信度・状態）
+tomobit rebuild    # 射影を破棄しexperiencesから再構築（決定的 — 姿も再現される）
+tomobit status     # 相棒ビュー（無引数と同じ）
 ```
 
 DBは `~/.tomobit/tomobit.db`（`--db` / `$TOMOBIT_DB` で変更可）。

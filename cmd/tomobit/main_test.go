@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -97,6 +100,88 @@ func (f *fakePerceiveExtractor) ExtractContext([]*store.Event, map[string][]stri
 }
 func (f *fakePerceiveExtractor) Name() string { return "fake" }
 
+// growCapability seeds a scope+provider capability Connection with
+// nSuccess adoptions and nFail reverts, growing it exactly as production
+// would (mirrors internal/curiosity's own grow helper).
+func growCapability(t *testing.T, s *store.Store, en *core.Engine, scopeKey, provider string, ts int64, nSuccess, nFail int) {
+	t.Helper()
+	ctx := map[string]string{}
+	for _, tok := range core.ParseScopeKey(scopeKey) {
+		if k, v, ok := strings.Cut(tok, "="); ok {
+			ctx[k] = v
+		}
+	}
+	apply := func(seq int, o core.Outcome) {
+		e := &core.Experience{
+			ID:        fmt.Sprintf("%s-%s-%d", scopeKey, provider, seq),
+			SessionID: fmt.Sprintf("s-%s-%s-%d", scopeKey, provider, seq),
+			TS:        ts, Kind: core.KindExecution, ExtractorVer: extractorVer, ExtractorModel: "none",
+			Context: ctx, Provider: provider, Outcome: o, Source: "production",
+		}
+		if err := s.InsertExperience(e); err != nil {
+			t.Fatal(err)
+		}
+		if err := en.Apply(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seq := 0
+	for i := 0; i < nSuccess; i++ {
+		seq++
+		apply(seq, core.Outcome{Adopted: "as-is"})
+	}
+	for i := 0; i < nFail; i++ {
+		seq++
+		apply(seq, core.Outcome{Reverted: true})
+	}
+}
+
+// TestAskWithIONonInteractiveRecordsNothing guards ADR-0007 Decision 3: a
+// headless run has no human to interrupt, so it must not even reach the
+// budget check, let alone spend it recording a tomo.asked nobody answered.
+func TestAskWithIONonInteractiveRecordsNothing(t *testing.T) {
+	s := openTestStore(t)
+	en := &core.Engine{Repo: s}
+	growCapability(t, s, en, "lang=rust", "claude", 1000, 4, 1)
+	growCapability(t, s, en, "lang=rust", "codex", 1000, 4, 1)
+
+	askWithIO(s, "do-session", strings.NewReader("1\n"), &bytes.Buffer{}, false, 1000)
+
+	var total int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM events`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 {
+		t.Errorf("non-interactive must record no events at all, got %d", total)
+	}
+}
+
+// TestAskWithIOInteractiveRecordsTomoAsked exercises the reachable path an
+// interactive terminal takes when a Preference Gap is open: HasBudget
+// passes, a gap is found, and asking records tomo.asked.
+func TestAskWithIOInteractiveRecordsTomoAsked(t *testing.T) {
+	s := openTestStore(t)
+	en := &core.Engine{Repo: s}
+	growCapability(t, s, en, "lang=rust", "claude", 1000, 4, 1)
+	growCapability(t, s, en, "lang=rust", "codex", 1000, 4, 1)
+
+	var out bytes.Buffer
+	askWithIO(s, "do-session", strings.NewReader("1\n"), &out, true, 1000)
+
+	if n := countEventsOfType(t, s, "tomo.asked"); n != 1 {
+		t.Errorf("interactive with an open gap should record exactly one tomo.asked, got %d", n)
+	}
+}
+
+func countEventsOfType(t *testing.T, s *store.Store, typ string) int {
+	t.Helper()
+	var n int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM events WHERE type = ?`, typ).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func openTestStore(t *testing.T) *store.Store {
 	t.Helper()
 	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -170,5 +255,47 @@ func TestPerceiveBestEffortLeavesSessionPendingOnExtractorFailure(t *testing.T) 
 	}
 	if len(pending) != 1 || pending[0] != "sess" {
 		t.Errorf("session should stay pending after an extractor failure, got %v", pending)
+	}
+}
+
+// TestBareInvocationDoesNotError exercises the no-args path (ADR-0008
+// Consequences: bare `tomobit` is the companion view, not usage) against an
+// empty database, where the view has the least to work with.
+func TestBareInvocationDoesNotError(t *testing.T) {
+	t.Setenv("TOMOBIT_DB", filepath.Join(t.TempDir(), "test.db"))
+	if err := run(nil); err != nil {
+		t.Fatalf("bare invocation should not error, got %v", err)
+	}
+}
+
+// TestCompanionViewSkipsAvatarWhenStdoutIsNotATTY guards ADR-0008 Decision
+// 4: piped/redirected stdout must stay exactly the old machine-readable
+// output — no avatar escape codes, no spoken line.
+func TestCompanionViewSkipsAvatarWhenStdoutIsNotATTY(t *testing.T) {
+	t.Setenv("TOMOBIT_DB", filepath.Join(t.TempDir(), "test.db"))
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	statusErr := cmdStatus(nil)
+	os.Stdout = orig
+	w.Close()
+	if statusErr != nil {
+		t.Fatalf("cmdStatus: %v", statusErr)
+	}
+
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	if strings.Contains(got, "\x1b[") {
+		t.Errorf("non-TTY stdout must not carry avatar escape codes, got %q", got)
+	}
+	if want := "no connections yet — record a session and run `tomobit perceive`\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
