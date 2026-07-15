@@ -2,6 +2,7 @@ package perceive
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Rererr/tomobit/internal/core"
@@ -51,6 +52,23 @@ func TestParseDeterministic(t *testing.T) {
 	}
 	if d.preferences[1].Preferred != "axum" || d.preferences[1].Over != "actix" {
 		t.Errorf("preference[1]: got %+v", d.preferences[1])
+	}
+}
+
+// TestParseDeterministicStripsControlChars guards the terminal-escape entry
+// point at the event-payload boundary: a provider/model string carrying
+// ESC/BEL bytes must come out clean, same as core.CanonValue on its own.
+func TestParseDeterministicStripsControlChars(t *testing.T) {
+	d := parseDeterministic([]*store.Event{
+		ev("provider.selected", map[string]any{
+			"provider": "claude\x1b]0;pwned\x07", "model": "opus",
+		}),
+	})
+	if strings.ContainsAny(d.provider, "\x1b\x07") {
+		t.Errorf("control chars survived: %q", d.provider)
+	}
+	if want := "claude]0;pwned"; d.provider != want {
+		t.Errorf("got %q, want %q", d.provider, want)
 	}
 }
 

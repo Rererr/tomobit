@@ -20,8 +20,8 @@ const (
 	ThetaMerge = 0.0
 )
 
-// decayFactor returns 2^(-Δt/halflife); 1 when to <= from.
-func decayFactor(fromMs, toMs int64) float64 {
+// DecayFactor returns 2^(-Δt/halflife); 1 when to <= from.
+func DecayFactor(fromMs, toMs int64) float64 {
 	if toMs <= fromMs {
 		return 1
 	}
@@ -31,7 +31,7 @@ func decayFactor(fromMs, toMs int64) float64 {
 // PosteriorAt applies lazy decay: pseudo-counts shrink toward the prior.
 // The stored (alpha, beta) are raw values anchored at lastUpdate.
 func PosteriorAt(alpha, beta float64, lastUpdate, nowMs int64) (a, b float64) {
-	f := decayFactor(lastUpdate, nowMs)
+	f := DecayFactor(lastUpdate, nowMs)
 	return PriorAlpha + (alpha-PriorAlpha)*f, PriorBeta + (beta-PriorBeta)*f
 }
 

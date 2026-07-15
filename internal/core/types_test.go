@@ -2,6 +2,7 @@ package core
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -73,5 +74,29 @@ func TestTokensSkipsEmptyLowercasesAndSorts(t *testing.T) {
 func TestCanonTokenLowercasesAndTrims(t *testing.T) {
 	if got := CanonToken(" Lang ", " Rust "); got != "lang=rust" {
 		t.Errorf("got %q, want %q", got, "lang=rust")
+	}
+}
+
+// TestCanonValueStripsControlChars guards the terminal-escape entry point:
+// an LLM-extracted value carrying ESC/BEL bytes (e.g. an OSC "set title"
+// sequence) must never survive canonicalization, wherever it later gets
+// printed (SCHEMA.md D5).
+func TestCanonValueStripsControlChars(t *testing.T) {
+	got := CanonValue("rust\x1b]0;pwned\x07")
+	if strings.ContainsAny(got, "\x1b\x07") {
+		t.Errorf("control chars survived canonicalization: %q", got)
+	}
+	if want := "rust]0;pwned"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestCanonTokenStripsControlChars(t *testing.T) {
+	got := CanonToken("lang", "rust\x1b]0;pwned\x07")
+	if strings.ContainsAny(got, "\x1b\x07") {
+		t.Errorf("control chars survived canonicalization: %q", got)
+	}
+	if want := "lang=rust]0;pwned"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }

@@ -118,7 +118,7 @@ func (en *Engine) LedgerSum(c *Connection, nowMs int64) (float64, error) {
 	}
 	sum := 0.0
 	for _, e := range entries {
-		sum += e.SExcess * decayFactor(e.TS, nowMs)
+		sum += e.SExcess * DecayFactor(e.TS, nowMs)
 	}
 	return sum, nil
 }
@@ -260,7 +260,7 @@ func (en *Engine) tokenBF(kind, target string, scope Scope, token string, nowMs 
 		if !ok {
 			continue
 		}
-		w := decayFactor(e.TS, nowMs)
+		w := DecayFactor(e.TS, nowMs)
 		if NewScope(token).SubsetOf(e.Tokens()) {
 			kWith += w * y
 			nWith += w

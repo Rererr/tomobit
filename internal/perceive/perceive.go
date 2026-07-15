@@ -150,7 +150,7 @@ func parseDeterministic(events []*store.Event) deterministic {
 	d := deterministic{source: "production"}
 	str := func(m map[string]any, k string) string {
 		if v, ok := m[k].(string); ok {
-			return strings.TrimSpace(strings.ToLower(v))
+			return core.CanonValue(v)
 		}
 		return ""
 	}

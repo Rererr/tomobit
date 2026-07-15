@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS events (
   payload    TEXT    NOT NULL CHECK (json_valid(payload)),
   UNIQUE (session_id, seq)
 );
+CREATE INDEX IF NOT EXISTS events_by_type_ts ON events (type, ts);
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
   BEGIN SELECT RAISE(ABORT, 'events is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
@@ -149,6 +150,22 @@ func (s *Store) AppendEvent(sessionID, typ string, tsMs int64, payload map[strin
 		VALUES (?, (SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE session_id = ?), ?, ?, ?)`,
 		sessionID, sessionID, tsMs, typ, string(b))
 	return err
+}
+
+// LastEventTS returns the timestamp of the most recent event of the given
+// type. Derived from the append-only log, not a counter: the question budget
+// is a View over events (ADR-0007 Decision 3).
+func (s *Store) LastEventTS(eventType string) (tsMs int64, found bool, err error) {
+	err = s.DB.QueryRow(`
+		SELECT ts FROM events WHERE type = ? ORDER BY ts DESC LIMIT 1`,
+		eventType).Scan(&tsMs)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return tsMs, true, nil
 }
 
 func (s *Store) EventsBySession(sessionID string) ([]*Event, error) {

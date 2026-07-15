@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // Experience kinds (SCHEMA.md D7).
@@ -177,10 +178,24 @@ func MarshalOutcome(o Outcome) string {
 	return string(b)
 }
 
+// CanonValue canonicalizes a single attribute value: trim, lowercase, and
+// strip every Unicode control character (ESC/CSI/BEL and friends). Control
+// chars are stripped before trimming so a stray one doesn't hide whitespace
+// at the new edge. LLM-extracted values are the entry point for this — a
+// hostile "value" could otherwise carry a terminal escape sequence all the
+// way to a rendered scope (SCHEMA.md D5).
+func CanonValue(s string) string {
+	stripped := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+	return strings.ToLower(strings.TrimSpace(stripped))
+}
+
 // CanonToken canonicalizes a context attribute into "key=value"
 // (SCHEMA.md D5: lowercase, trimmed).
 func CanonToken(key, val string) string {
-	return fmt.Sprintf("%s=%s",
-		strings.ToLower(strings.TrimSpace(key)),
-		strings.ToLower(strings.TrimSpace(val)))
+	return fmt.Sprintf("%s=%s", CanonValue(key), CanonValue(val))
 }

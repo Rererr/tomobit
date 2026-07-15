@@ -88,6 +88,49 @@ func TestPendingSessionsRequiresExperienceAtOrAboveVersion(t *testing.T) {
 	}
 }
 
+func TestLastEventTSFiltersByType(t *testing.T) {
+	s := openTest(t)
+	mustAppend(t, s, "sess", "task.started", 100)
+	mustAppend(t, s, "sess", "tomo.asked", 200)
+	mustAppend(t, s, "sess", "task.finished", 300)
+
+	ts, found, err := s.LastEventTS("tomo.asked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || ts != 200 {
+		t.Errorf("got ts=%d found=%v, want ts=200 found=true (other types must not leak in)", ts, found)
+	}
+}
+
+func TestLastEventTSPicksMaxAcrossSessions(t *testing.T) {
+	s := openTest(t)
+	mustAppend(t, s, "a", "tomo.asked", 100)
+	mustAppend(t, s, "b", "tomo.asked", 300)
+	mustAppend(t, s, "c", "tomo.asked", 200)
+
+	ts, found, err := s.LastEventTS("tomo.asked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || ts != 300 {
+		t.Errorf("got ts=%d found=%v, want the max ts=300 across every tomo.asked", ts, found)
+	}
+}
+
+func TestLastEventTSNotFoundWhenTypeAbsent(t *testing.T) {
+	s := openTest(t)
+	mustAppend(t, s, "sess", "task.started", 100)
+
+	ts, found, err := s.LastEventTS("tomo.asked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found || ts != 0 {
+		t.Errorf("got ts=%d found=%v, want found=false for a type with no events", ts, found)
+	}
+}
+
 func TestExperiencesRejectUpdateAndDelete(t *testing.T) {
 	s := openTest(t)
 	insertExp(t, s, "e1", "sess", core.KindExecution, 1)
