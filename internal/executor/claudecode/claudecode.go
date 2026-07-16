@@ -69,6 +69,10 @@ type streamLine struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 			Name string `json:"name"`
+			// Input is the tool_use argument object. It never enters the
+			// payload (SCHEMA.md R3 keeps the tool name only); it is read
+			// solely to derive the view-only detail (ADR-0024 Decision 6).
+			Input map[string]any `json:"input"`
 		} `json:"content"`
 	} `json:"message"`
 
@@ -120,11 +124,18 @@ func (a *Adapter) Translate(line []byte) ([]executor.Event, error) {
 					})
 				}
 			case "tool_use":
-				// Only the tool name: tool inputs and results are the digest we
-				// deliberately drop (ADR-0006 Decision 3).
+				// The ledger keeps only the tool name (SCHEMA.md R3): inputs and
+				// results are the digest we deliberately drop (ADR-0006 Decision
+				// 3). A short summary of the input rides along as the view-only
+				// detail (ADR-0024 Decision 6) — the raw input still never lands
+				// in the payload.
+				p := map[string]any{"tool": c.Name}
+				if d := toolDetail(c.Input); d != "" {
+					p[executor.PayloadDetail] = d
+				}
 				out = append(out, executor.Event{
 					Type:    executor.EventProviderOutput,
-					Payload: map[string]any{"tool": c.Name},
+					Payload: p,
 				})
 			case "thinking":
 				// Deliberately dropped: extended thinking is not the answer the
@@ -162,6 +173,34 @@ func (a *Adapter) Translate(line []byte) ([]executor.Event, error) {
 		// surfaces dropped lines under Debug.
 		return nil, nil
 	}
+}
+
+// detailKeys are the tool_use input fields, in priority order, that answer
+// "what, where" for someone watching a turn: the path a file tool touched
+// (file_path across Edit/Write/Read/NotebookEdit, path for Glob/Grep), the
+// Bash command, the Glob/Grep pattern, the WebFetch url, the WebSearch query.
+// The first non-empty one wins; keys carrying content rather than a target
+// (old_string, new_string, prompt) are deliberately left out.
+var detailKeys = []string{"file_path", "path", "command", "pattern", "url", "query"}
+
+// toolDetail derives the view-only summary from a tool_use input, or "" when
+// none of the known keys carry a usable value.
+func toolDetail(input map[string]any) string {
+	for _, k := range detailKeys {
+		s, ok := input[k].(string)
+		if !ok {
+			continue
+		}
+		if k == "command" {
+			// Only the first line: a heredoc or a chained command would
+			// bury the intent under its body, and the view has one line.
+			s, _, _ = strings.Cut(s, "\n")
+		}
+		if d := executor.TruncateDetail(s, k == "file_path" || k == "path"); d != "" {
+			return d
+		}
+	}
+	return ""
 }
 
 func errorMessage(s streamLine) string {

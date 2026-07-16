@@ -39,8 +39,12 @@ func TestDecodeControlKeys(t *testing.T) {
 		{"\x05", KeyEnd},
 		{"\x0b", KeyKillToEnd},
 		{"\x0c", KeyClearScreen},
+		{"\x12", KeySearch},
 		{"\x15", KeyClearInput},
 		{"\x17", KeyKillWord},
+		{"\x19", KeyYank},
+		{"\x1a", KeySuspend},
+		{"\t", KeyTab},
 		{"\x7f", KeyBackspace},
 		{"\r", KeyEnter},
 		{"\n", KeyEnter},
@@ -105,6 +109,16 @@ func TestDecodeRunesIncludingMultibyte(t *testing.T) {
 func TestDecodeLoneEscapeIsNotASequence(t *testing.T) {
 	if got := decodeOne(t, "\x1b").Type; got != KeyUnknown {
 		t.Errorf("lone ESC: got %v, want KeyUnknown", got)
+	}
+}
+
+// A control byte right behind a bare Escape is the next keystroke, not part
+// of a sequence — aborting a search with Esc and hitting Ctrl-U in the same
+// instant must still clear the line, not vanish into the escape decoder.
+func TestDecodeEscapeDoesNotEatAControlKeyBehindIt(t *testing.T) {
+	keys := decodeAll(t, "\x1b\x15")
+	if len(keys) != 2 || keys[0].Type != KeyUnknown || keys[1].Type != KeyClearInput {
+		t.Errorf("ESC then Ctrl-U: got %+v, want [KeyUnknown KeyClearInput]", keys)
 	}
 }
 

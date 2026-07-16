@@ -138,3 +138,49 @@ func TestClearEmptiesEveryLineNotJustTheCurrentOne(t *testing.T) {
 		t.Error("buffer should report empty")
 	}
 }
+
+// The kill operations hand back what they removed so Ctrl-Y can put it back;
+// removing nothing returns "" so the slot is never clobbered with emptiness.
+func TestKillOperationsReturnWhatTheyRemoved(t *testing.T) {
+	if got := bufAt("one two", 7).killWord(); got != "two" {
+		t.Errorf("killWord: got %q", got)
+	}
+	if got := bufAt("one\ntwo", 1).killToEnd(); got != "ne" {
+		t.Errorf("killToEnd: got %q", got)
+	}
+	if got := bufAt("all\nof\nit", 4).clear(); got != "all\nof\nit" {
+		t.Errorf("clear returns every line: got %q", got)
+	}
+	if got := bufAt("word", 4).killToEnd(); got != "" {
+		t.Errorf("killToEnd at line end removed nothing: got %q", got)
+	}
+	if got := bufAt("", 0).clear(); got != "" {
+		t.Errorf("clear of an empty buffer: got %q", got)
+	}
+}
+
+// A killed run and a yank round-trip: what Ctrl-U removed comes back at the
+// cursor when Ctrl-Y inserts it (ADR-0024 Decision 3).
+func TestYankReinsertsAKilledLineAtTheCursor(t *testing.T) {
+	b := bufAt("keep this", 9)
+	killed := b.clear()
+	b.set("prefix ")
+	b.insert([]rune(killed)...)
+	if got := state(b); got != "prefix keep this|" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// Consecutive Ctrl-W stacks the earlier words in front (readline), so the slot
+// reads in order; a break in the run starts a fresh slot.
+func TestKillWordRunStacksInReadingOrder(t *testing.T) {
+	slot := stackKill("", "bug", false)
+	slot = stackKill(slot, "the", true)
+	slot = stackKill(slot, "fix", true)
+	if slot != "fixthebug" {
+		t.Errorf("stacked run: got %q", slot)
+	}
+	if got := stackKill("old", "new", false); got != "new" {
+		t.Errorf("a broken run starts over: got %q", got)
+	}
+}

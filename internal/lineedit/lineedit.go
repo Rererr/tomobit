@@ -27,9 +27,10 @@ import (
 // line", the other is "no more lines".
 var ErrInterrupt = errors.New("lineedit: interrupted")
 
-// maxHistory caps the in-process history ring. History is not persisted:
-// recalling what you typed a moment ago is the friction this editor exists
-// to remove; recalling last week's prompts is a different feature.
+// maxHistory caps the history ring, and the count kept when the on-disk file
+// is compacted (ADR-0024 Decision 1). Recalling a moment ago is the friction
+// this editor exists to remove; the persisted file just carries that reach
+// across process boundaries.
 const maxHistory = 200
 
 // Bracketed paste (DEC 2004). Without it a pasted multi-line task submits
@@ -46,6 +47,28 @@ type Editor struct {
 	out     *os.File
 	r       *bufio.Reader
 	history []string
+
+	// Completer, when set, drives Tab completion. Given the whole buffer and
+	// the cursor's rune index it returns the candidate replacements for the
+	// token at the cursor and the rune index where that token starts
+	// (start<0 or start>pos means "nothing to complete here"). The editor
+	// stays ignorant of what is being completed — the caller owns the
+	// vocabulary, the same boundary ADR-0022 Decision 3 drew for lineedit.
+	Completer func(text string, pos int) (candidates []string, start int)
+
+	// kill is the one-slot kill buffer Ctrl-U/K/W fill and Ctrl-Y empties
+	// (ADR-0024 Decision 3). It survives across lines, as readline's does.
+	kill string
+
+	// histPath is the file history is appended to; "" disables persistence.
+	// histWarn takes a one-line note the first time an append fails, so a
+	// read-only home does not silently drop history yet does not nag per line.
+	// histLines counts the file's entries so a long-lived process compacts
+	// in-flight instead of growing the file until its next restart.
+	histPath   string
+	histWarn   io.Writer
+	histWarned bool
+	histLines  int
 }
 
 func New(in, out *os.File) *Editor {
@@ -71,7 +94,9 @@ func (e *Editor) Interactive() bool {
 func (e *Editor) Reader() *bufio.Reader { return e.r }
 
 // AddHistory records a submitted line. Blank lines and an immediate repeat
-// are dropped — pressing Up should reach the last thing worth retyping.
+// are dropped — pressing Up should reach the last thing worth retyping. The
+// same line is appended to the history file if one is set, so the next process
+// starts where this one left off.
 func (e *Editor) AddHistory(s string) {
 	if strings.TrimSpace(s) == "" {
 		return
@@ -83,6 +108,7 @@ func (e *Editor) AddHistory(s string) {
 	if len(e.history) > maxHistory {
 		e.history = append([]string(nil), e.history[1:]...)
 	}
+	e.appendHistory(s)
 }
 
 // ReadLine prints prompt and returns the submitted line. It returns io.EOF
@@ -100,7 +126,7 @@ func (e *Editor) ReadLine(prompt string) (string, error) {
 	defer term.Restore(fd, old)
 	io.WriteString(e.out, pasteOn)
 	defer io.WriteString(e.out, pasteOff)
-	return e.readRaw(prompt)
+	return e.readRaw(prompt, fd, old)
 }
 
 func (e *Editor) readCooked(prompt string) (string, error) {
@@ -112,12 +138,18 @@ func (e *Editor) readCooked(prompt string) (string, error) {
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
-func (e *Editor) readRaw(prompt string) (string, error) {
+func (e *Editor) readRaw(prompt string, fd int, old *term.State) (string, error) {
 	var b buffer
 	// hist indexes history; len(history) means "the draft", so Down from the
 	// oldest recall walks back to what was actually being typed.
 	hist, draft := len(e.history), ""
 	p := paint{}
+	// pending replays the key that ended a reverse search as ordinary editing
+	// without touching the terminal — a one-slot pushback ahead of decode.
+	var pending *Key
+	// killAccum is true right after a word kill, so a run of Ctrl-W stacks into
+	// one slot (readline's behavior) but any other key breaks the run.
+	killAccum := false
 
 	redraw := func() {
 		s, np := draw(p, prompt, b.runes, b.pos, e.width())
@@ -127,17 +159,25 @@ func (e *Editor) readRaw(prompt string) (string, error) {
 	redraw()
 
 	for {
-		k, err := decode(e.r)
-		if err != nil {
-			// The terminal went away mid-line. EOF is the ordinary case
-			// (stdin closed) and means "no more lines"; anything else is a
-			// real fault and must not be dressed up as a clean exit.
-			e.finish(p)
-			if errors.Is(err, io.EOF) {
-				return "", io.EOF
+		var k Key
+		if pending != nil {
+			k, pending = *pending, nil
+		} else {
+			var err error
+			k, err = decode(e.r)
+			if err != nil {
+				// The terminal went away mid-line. EOF is the ordinary case
+				// (stdin closed) and means "no more lines"; anything else is a
+				// real fault and must not be dressed up as a clean exit.
+				e.finish(p)
+				if errors.Is(err, io.EOF) {
+					return "", io.EOF
+				}
+				return "", fmt.Errorf("lineedit: reading input: %w", err)
 			}
-			return "", fmt.Errorf("lineedit: reading input: %w", err)
 		}
+
+		wasKillWord := false
 		switch k.Type {
 		case KeyRune:
 			b.insert(k.Rune)
@@ -182,11 +222,42 @@ func (e *Editor) readRaw(prompt string) (string, error) {
 		case KeyEnd:
 			b.end()
 		case KeyKillToEnd:
-			b.killToEnd()
+			if s := b.killToEnd(); s != "" {
+				e.kill = s
+			}
 		case KeyClearInput:
-			b.clear()
+			if s := b.clear(); s != "" {
+				e.kill = s
+			}
 		case KeyKillWord:
-			b.killWord()
+			if s := b.killWord(); s != "" {
+				e.kill = stackKill(e.kill, s, killAccum)
+				wasKillWord = true
+			}
+		case KeyYank:
+			if e.kill != "" {
+				b.insert([]rune(e.kill)...)
+			}
+		case KeyTab:
+			e.complete(&b, &p)
+		case KeySearch:
+			submit, next, serr := e.reverseSearch(&b, &p)
+			if serr != nil {
+				e.finish(p)
+				if errors.Is(serr, io.EOF) {
+					return "", io.EOF
+				}
+				return "", fmt.Errorf("lineedit: reading input: %w", serr)
+			}
+			if submit {
+				e.finish(p)
+				return b.String(), nil
+			}
+			if next.Type != KeyUnknown {
+				pending = &next
+			}
+		case KeySuspend:
+			e.suspend(fd, old, &p)
 		case KeyUp:
 			// Inside a pasted block Up is movement; only at the top line does
 			// it mean history.
@@ -218,8 +289,33 @@ func (e *Editor) readRaw(prompt string) (string, error) {
 			io.WriteString(e.out, "\x1b[H\x1b[2J")
 			p = paint{}
 		}
+		killAccum = wasKillWord
 		redraw()
 	}
+}
+
+// suspend hands the terminal back cooked, stops this process group, and on
+// resume reclaims raw mode and forces a full repaint (ADR-0024 Decision 7).
+// Off unix raiseSIGTSTP is a no-op and this returns without disturbing the
+// line — Ctrl-Z there is simply ignored rather than half-toggling the terminal.
+func (e *Editor) suspend(fd int, old *term.State, p *paint) {
+	if !suspendSupported {
+		return
+	}
+	// Step past the block before stopping. After SIGCONT the cursor sits
+	// wherever the shell's job-control chatter left it, which is unknowable —
+	// and a fresh paint{} anchors the repaint at the cursor's row, so on a
+	// wrapped block resumed in place the stale rows above it would survive.
+	// Stopping below the block instead makes every resume start from a clean
+	// line: the suspended draft stays in the scrollback and the resumed one
+	// is drawn anew, which is also what a shell's own editor does.
+	e.finish(*p)
+	io.WriteString(e.out, pasteOff)
+	term.Restore(fd, old)
+	raiseSIGTSTP()
+	term.MakeRaw(fd)
+	io.WriteString(e.out, pasteOn)
+	*p = paint{}
 }
 
 // finish steps the cursor past the input block, so whatever prints next

@@ -26,10 +26,14 @@ const (
 	KeyKillToEnd
 	KeyClearInput
 	KeyKillWord
+	KeyYank        // Ctrl-Y: put the kill slot back at the cursor
 	KeyClearScreen
-	KeyInterrupt // Ctrl-C
-	KeyEOT       // Ctrl-D: end of input on an empty buffer, delete otherwise
-	KeyPaste     // Text holds the whole bracketed-paste block
+	KeyTab         // completion
+	KeySearch      // Ctrl-R: reverse incremental history search
+	KeySuspend     // Ctrl-Z: hand the terminal back and stop (unix only)
+	KeyInterrupt   // Ctrl-C
+	KeyEOT         // Ctrl-D: end of input on an empty buffer, delete otherwise
+	KeyPaste       // Text holds the whole bracketed-paste block
 )
 
 // Key is a decoded keypress. Rune is set for KeyRune, Text for KeyPaste.
@@ -61,6 +65,8 @@ func decode(r *bufio.Reader) (Key, error) {
 		return Key{Type: KeyRight}, nil
 	case 0x08, 0x7f:
 		return Key{Type: KeyBackspace}, nil
+	case '\t':
+		return Key{Type: KeyTab}, nil
 	case '\r', '\n':
 		return Key{Type: KeyEnter}, nil
 	case 0x0b:
@@ -71,10 +77,16 @@ func decode(r *bufio.Reader) (Key, error) {
 		return Key{Type: KeyDown}, nil
 	case 0x10:
 		return Key{Type: KeyUp}, nil
+	case 0x12:
+		return Key{Type: KeySearch}, nil
 	case 0x15:
 		return Key{Type: KeyClearInput}, nil
 	case 0x17:
 		return Key{Type: KeyKillWord}, nil
+	case 0x19:
+		return Key{Type: KeyYank}, nil
+	case 0x1a:
+		return Key{Type: KeySuspend}, nil
 	case 0x1b:
 		return decodeEscape(r)
 	}
@@ -129,6 +141,14 @@ func decodeEscape(r *bufio.Reader) (Key, error) {
 		return Key{Type: KeyKillWord}, nil
 	case '\r', '\n':
 		return Key{Type: KeyNewline}, nil
+	}
+	if c < 0x20 {
+		// A control byte cannot open an escape sequence (CSI/SS3 introducers
+		// and Alt-letter payloads are printable), so this is the Escape key
+		// with the next keystroke arriving in the same read — rapid typing,
+		// not a sequence. Put the key back rather than eating it; Escape
+		// itself stays unbound.
+		r.UnreadRune()
 	}
 	return Key{Type: KeyUnknown}, nil
 }

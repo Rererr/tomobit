@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/Rererr/tomobit/internal/executor"
 )
@@ -54,11 +55,7 @@ type streamLine struct {
 	ThreadID string `json:"thread_id"`
 
 	// item.completed
-	Item struct {
-		Type    string `json:"type"`
-		Text    string `json:"text"`
-		Message string `json:"message"`
-	} `json:"item"`
+	Item item `json:"item"`
 
 	// turn.failed
 	Error struct {
@@ -71,6 +68,23 @@ type streamLine struct {
 		CachedInputTokens int64 `json:"cached_input_tokens"`
 		OutputTokens      int64 `json:"output_tokens"`
 	} `json:"usage"`
+}
+
+// item is one item.completed's item. Text/Message drive the events; the
+// remaining fields (command, query, changes) never enter the payload — like
+// claude-code's tool inputs they are the digest SCHEMA.md R3 drops, read only
+// to derive the view-only detail (ADR-0024 Decision 6).
+type item struct {
+	Type    string `json:"type"`
+	Text    string `json:"text"`
+	Message string `json:"message"`
+
+	Command string `json:"command"`
+	Query   string `json:"query"`
+	Changes []struct {
+		Path string `json:"path"`
+		Kind string `json:"kind"`
+	} `json:"changes"`
 }
 
 func (a *Adapter) Translate(line []byte) ([]executor.Event, error) {
@@ -97,7 +111,7 @@ func (a *Adapter) Translate(line []byte) ([]executor.Event, error) {
 		}}, nil
 
 	case "item.completed":
-		return translateItem(s.Item.Type, s.Item.Text, s.Item.Message), nil
+		return translateItem(s.Item), nil
 
 	case "turn.completed":
 		return []executor.Event{{
@@ -127,25 +141,29 @@ func (a *Adapter) Translate(line []byte) ([]executor.Event, error) {
 }
 
 // translateItem maps one item.completed's item to zero or one events.
-func translateItem(itemType, text, message string) []executor.Event {
-	switch itemType {
+func translateItem(it item) []executor.Event {
+	switch it.Type {
 	case "agent_message":
-		if text == "" {
+		if it.Text == "" {
 			return nil
 		}
 		return []executor.Event{{
 			Type:    executor.EventProviderOutput,
-			Payload: map[string]any{"text": text},
+			Payload: map[string]any{"text": it.Text},
 		}}
 	case "command_execution", "file_change", "mcp_tool_call", "web_search":
-		return []executor.Event{{
-			Type:    executor.EventProviderOutput,
-			Payload: map[string]any{"tool": itemType},
-		}}
+		// The ledger keeps only the tool name (SCHEMA.md R3); a summary of
+		// what it did rides along as the view-only detail (ADR-0024 Decision
+		// 6), symmetric with claude-code's tool_use.
+		p := map[string]any{"tool": it.Type}
+		if d := itemDetail(it); d != "" {
+			p[executor.PayloadDetail] = d
+		}
+		return []executor.Event{{Type: executor.EventProviderOutput, Payload: p}}
 	case "error":
 		return []executor.Event{{
 			Type:    executor.EventProviderError,
-			Payload: map[string]any{"message": message},
+			Payload: map[string]any{"message": it.Message},
 		}}
 	default:
 		// reasoning / todo_list dropped here too: same digest policy as
@@ -153,4 +171,24 @@ func translateItem(itemType, text, message string) []executor.Event {
 		// artifact the user judges for adoption.
 		return nil
 	}
+}
+
+// itemDetail derives the view-only summary from a tool item, or "" when the
+// item carries nothing worth showing (e.g. an mcp_tool_call, whose fields the
+// stream does not name in a stable way, is left summary-less).
+func itemDetail(it item) string {
+	switch it.Type {
+	case "command_execution":
+		// Only the first line: the rest is the command's body, and the view
+		// has one line — same rule as claude-code's Bash command.
+		first, _, _ := strings.Cut(it.Command, "\n")
+		return executor.TruncateDetail(first, false)
+	case "file_change":
+		if len(it.Changes) > 0 {
+			return executor.TruncateDetail(it.Changes[0].Path, true)
+		}
+	case "web_search":
+		return executor.TruncateDetail(it.Query, false)
+	}
+	return ""
 }

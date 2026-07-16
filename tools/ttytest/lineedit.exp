@@ -1,15 +1,16 @@
 #!/usr/bin/expect -f
-# The line editor on a real pty (ADR-0022 Decision 3).
+# The line editor on a real pty (ADR-0022 Decision 3, ADR-0024 input系).
 #
-# The unit tests cover the buffer, the key decoder and the renderer; only this
-# exercises raw mode itself — the wiring where every real bug so far has been.
-# script fails loudly — a timeout that falls through proves nothing.
+# The unit tests cover the buffer, the key decoder, the renderer, the search
+# state machine and the completion logic; only this exercises raw mode itself —
+# the wiring where every real bug so far has been. Every expect must match; a
+# timeout that falls through proves nothing.
 # usage: expect tools/ttytest/lineedit.exp <tomobit binary> [db]
 set bin [lindex $argv 0]
 if {$bin eq ""} { puts "usage: expect lineedit.exp <tomobit binary> \[db\]"; exit 2 }
 set db [lindex $argv 1]
 if {$db eq ""} { set db "/tmp/tomobit-ttytest.db" }
-file delete $db $db-wal $db-shm
+file delete $db $db-wal $db-shm $db.history
 
 set timeout 8
 log_user 0
@@ -50,7 +51,44 @@ send "\033\[A"
 check "history up" "❯ /help"
 send "\025"
 
-# 5. full-width japanese: two columns per rune, arrows step over them.
+# 5. Ctrl-U kills a line, Ctrl-Y yanks it back after fresh text (ADR-0024 D3).
+# "BBByankme" can only appear if the kill slot held what Ctrl-U removed.
+send "yankme"
+sleep 0.3
+send "\025"
+send "BBB"
+send "\031"
+check "ctrl-y restores killed text" "BBByankme"
+send "\025"
+
+# 6. Ctrl-R finds a past command; Enter submits the match (ADR-0024 D2).
+send "\022"
+send "hel"
+sleep 0.3
+check "reverse search prompt" "reverse-i-search"
+send "\r"
+check "search submits match" "実行中の Ctrl-C はそのターンの中断"
+
+# 7. Tab completes the unique command and adds a space (ADR-0024 D4).
+send "/pro\t"
+sleep 0.3
+check "tab completes command" "/provider "
+send "\025"
+
+# 7b. Rapid keys behind a search-cancelling Escape: ESC and Ctrl-U land in one
+# pty write, and the control byte must be the next key, not sequence fodder —
+# the draft restored by Esc still gets cleared, so only "quokka" is typed.
+send "zebra9"
+sleep 0.3
+send "\022"
+sleep 0.3
+send "\033\025"
+sleep 0.3
+send "quokka"
+check "escape does not eat the key behind it" "❯ quokka"
+send "\025"
+
+# 8. full-width japanese: two columns per rune, arrows step over them.
 # 7 runes = 14 columns + 2 for the prompt; each arrow steps back 2 columns.
 send "日本語のタスク"
 check "japanese width" "日本語のタスク\r\x1b\\\[16C"
@@ -60,26 +98,40 @@ send "い"
 check "insert mid-string" "日本語のタいスク\r\x1b\\\[14C"
 send "\025"
 
-# 6. bracketed paste keeps a multi-line block as one input
+# 9. bracketed paste keeps a multi-line block as one input
 send "\033\[200~一行目\n二行目\033\[201~"
 check "bracketed paste" "一行目"
 send "\025"
 
-# 7. a line longer than 40 columns wraps and still edits
+# 10. a line longer than 40 columns wraps and still edits
 send "0123456789012345678901234567890123456789012345"
 sleep 0.4
 send "\177\177\177"
 check "wrapped edit" "012345678901234567890123456789012"
 send "\025"
 
-# 8. unknown command is answered, chat survives
+# 11. unknown command is answered, chat survives
 send "/nope\r"
 check "unknown command" "知らないコマンド"
 
-# 9. Ctrl-D on an empty line exits
+# 12. Ctrl-D on an empty line exits
 send "\004"
 expect {
     eof     { puts "PASS: ctrl-d exit" }
     timeout { puts "FAIL: ctrl-d did not exit"; exit 1 }
 }
+
+# 13. a second process over the same db recalls the first one's history
+# (ADR-0024 D1): the last command typed above was /nope.
+spawn $bin chat --db $db --provider human
+check "prompt again" "話しかけて"
+send "\033\[A"
+check "history persists across processes" "❯ /nope"
+send "\025"
+send "\004"
+expect {
+    eof     { puts "PASS: second ctrl-d exit" }
+    timeout { puts "FAIL: second process did not exit"; exit 1 }
+}
+
 puts "ALL PASS"

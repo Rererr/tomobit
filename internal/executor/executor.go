@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -29,12 +30,76 @@ const (
 	EventProviderError    = "provider.error"
 )
 
+// PayloadDetail is a view-only payload key (ADR-0024 Decision 6): a short,
+// human-readable summary of a tool_use — the file it touched, the command it
+// ran — that an Adapter may attach so a turn view can show "what, where", not
+// just the tool name. It never reaches the ledger: the recorded event keeps
+// the tool name only (SCHEMA.md R3), because a summary in the digest would
+// pressure maxEventChars/maxSessionChars and force an extractor_ver bump.
+const PayloadDetail = "detail"
+
+// viewOnlyKeys are the payload keys that exist only for display. A Sink must
+// drop them before recording (StripViewOnly); the vocabulary lives here, with
+// the event types, so an adapter cannot invent a display key the store side
+// silently persists.
+var viewOnlyKeys = []string{PayloadDetail}
+
 // Event is one canonical event: an R4 type plus its payload. Adapters produce
 // these as pure data from a single stream line; the Executor assigns ts and
 // the Sink assigns seq (store side).
 type Event struct {
 	Type    string
 	Payload map[string]any
+}
+
+// StripViewOnly returns payload without its view-only keys (PayloadDetail),
+// the form a Sink records. It never mutates the input and returns a copy only
+// when there is something to strip: a chat's sink shows the event first and
+// records it after, so the shown map must keep its detail regardless of call
+// order, and events without a detail (the common case) allocate nothing.
+func StripViewOnly(payload map[string]any) map[string]any {
+	hasViewOnly := false
+	for _, k := range viewOnlyKeys {
+		if _, ok := payload[k]; ok {
+			hasViewOnly = true
+			break
+		}
+	}
+	if !hasViewOnly {
+		return payload
+	}
+	out := make(map[string]any, len(payload))
+	for k, v := range payload {
+		out[k] = v
+	}
+	for _, k := range viewOnlyKeys {
+		delete(out, k)
+	}
+	return out
+}
+
+// TruncateDetail trims a candidate view-only summary and caps it at 60 runes
+// (not bytes, so a Japanese path is measured by characters), ending the cut
+// side with an ellipsis. A path keeps its tail — the filename answers
+// "where", and a deep absolute path cut from the right shows only the prefix
+// every path shares (measured on a real turn: the view showed
+// ~/.claude-personal/projects/… with the filename gone). Everything else
+// keeps its head. A blank value returns "" so an adapter can fall through to
+// its next candidate. The ruler lives here beside PayloadDetail: two adapters
+// measuring the same channel differently would be a drift bug waiting.
+func TruncateDetail(s string, keepTail bool) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= 60 {
+		return s
+	}
+	if keepTail {
+		return "…" + string(r[len(r)-59:])
+	}
+	return string(r[:59]) + "…"
 }
 
 // Request describes a single execution. The Adapter turns it into a launch

@@ -37,6 +37,9 @@ func (a *threadAdapter) Translate(line []byte) ([]executor.Event, error) {
 		return []executor.Event{{Type: executor.EventProviderSelected, Payload: map[string]any{
 			"provider": "fake", "provider_session_id": "th-1",
 		}}}, nil
+	case "TOOLDETAIL":
+		return []executor.Event{{Type: executor.EventProviderOutput,
+			Payload: map[string]any{"tool": "Edit", executor.PayloadDetail: "cmd/x.go"}}}, nil
 	default:
 		return []executor.Event{{Type: executor.EventProviderOutput,
 			Payload: map[string]any{"text": s}}}, nil
@@ -384,6 +387,83 @@ func TestChatProviderSwitchRejectsAnUnknownName(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "gemni") {
 		t.Errorf("the refusal should name what was typed: %q", out.String())
+	}
+}
+
+// Tab completes the leading slash command and the argument vocabulary of
+// /provider and /size, and declines everywhere else (ADR-0024 Decision 4).
+func TestChatCompleterOffersCommandsAndArgVocab(t *testing.T) {
+	c := &chat{}
+	for _, tc := range []struct {
+		name  string
+		text  string
+		pos   int
+		want  []string
+		start int
+	}{
+		{"command prefix", "/pro", 4, []string{"/provider"}, 0},
+		{"ambiguous command", "/s", 2, []string{"/size", "/status"}, 0},
+		{"provider values", "/provider ", 10, []string{"claude-code", "codex", "human", "auto"}, 10},
+		{"provider prefix", "/provider c", 11, []string{"claude-code", "codex"}, 10},
+		{"size values", "/size ", 6, []string{"small", "medium", "large"}, 6},
+		{"free text declines", "implement it", 12, nil, -1},
+		{"third token declines", "/provider codex now", 19, nil, -1},
+		{"unknown command arg declines", "/help x", 7, nil, -1},
+	} {
+		got, start := c.complete(tc.text, tc.pos)
+		if !equalStrings(got, tc.want) {
+			t.Errorf("%s: candidates got %v, want %v", tc.name, got, tc.want)
+		}
+		if start != tc.start {
+			t.Errorf("%s: start got %d, want %d", tc.name, start, tc.start)
+		}
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// ADR-0024 Decision 6: tool detail reaches the human but never the ledger —
+// the recorded provider.output keeps the shape R3 fixed (tool name only),
+// no matter what the adapter attached for display.
+func TestChatSinkShowsToolDetailButRecordsToolNameOnly(t *testing.T) {
+	s := openTestStore(t)
+	c, out := newTestChat(t, s, &threadAdapter{}, "")
+
+	if err := c.turn("TOOLDETAIL"); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(out.String(), "· Edit cmd/x.go") {
+		t.Errorf("the view must show the detail, got %q", out.String())
+	}
+	p := payloadOf(t, s, "provider.output")
+	if p["tool"] != "Edit" {
+		t.Errorf("tool name is the record: got %v", p)
+	}
+	if _, ok := p["detail"]; ok {
+		t.Errorf("view-only detail must not be recorded: %v", p)
+	}
+}
+
+// ADR-0024 Decision 5: markdown-lite is decoration for a human's terminal.
+// Piped/test stdout is not a terminal, so provider text passes through raw.
+func TestTurnViewLeavesMarkdownRawWhenPiped(t *testing.T) {
+	out := &bytes.Buffer{}
+	v := newTurnView(out, "fake")
+	v.show(executor.Event{Type: executor.EventProviderOutput,
+		Payload: map[string]any{"text": "**bold** and `code`"}})
+	if got := out.String(); got != "**bold** and `code`\n" {
+		t.Errorf("piped text must be untouched: %q", got)
 	}
 }
 

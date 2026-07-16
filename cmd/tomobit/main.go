@@ -444,7 +444,10 @@ func providerSink(s *store.Store, sid string, out io.Writer, collect *[]string) 
 				}
 			}
 		}
-		return s.AppendEvent(sid, ev.Type, ts, ev.Payload)
+		// View-only keys (tool detail) stay out of the ledger here too
+		// (ADR-0024 Decision 6) — both sinks must strip, or `do` and chat
+		// would record different shapes for the same provider stream.
+		return s.AppendEvent(sid, ev.Type, ts, executor.StripViewOnly(ev.Payload))
 	}
 }
 
