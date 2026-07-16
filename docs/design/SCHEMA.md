@@ -271,6 +271,11 @@ R4. eventsのtype初期カタログ（14種で確定）
       payload = {type, scope, provider, other, text, seed, after}
     - tomo.greeted（ADR-0019 D2）: おかえりを言った事実。同じ帰還への
       重複挨拶の抑止用。payload = {absent_ms}
+    - task.turn（ADR-0022）: 対話セッションの2ターン目以降の依頼。
+      payload = {intent, n}。1セッション=1タスクのまま、その中の往復を残す
+      （task.startedのintentはタスクの最初の依頼＝そのタスクの意図）。
+      決定的属性を持たないためparseDeterministicは読まない。抽出プロンプト/
+      schemaは不変なのでextractor_verのバンプは不要（ADR-0006と同じ理屈）
     - plan.selected（ADR-0014）: 採用したPlanの記帳（知覚の決定的抽出元 —
       experiences.plan列へ）。payload = {plan, cap, size, seed, n, q,
       fallback} または手動指定時 {plan, cap, manual: true}
