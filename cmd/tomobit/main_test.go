@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/Rererr/tomobit/internal/core"
 	"github.com/Rererr/tomobit/internal/executor"
 	"github.com/Rererr/tomobit/internal/store"
+	"github.com/Rererr/tomobit/internal/subtask"
 )
 
 func TestAdoptionPayloadEnterMeansAsIs(t *testing.T) {
@@ -578,6 +580,293 @@ func TestEnsureClaudeProfileGatesAutoButNotOtherProviders(t *testing.T) {
 	for _, name := range []string{"codex", "human"} {
 		if err := ensureClaudeProfileIO(bufio.NewReader(strings.NewReader("")), &out, name, false); err != nil {
 			t.Errorf("%s needs no claude profile: %v", name, err)
+		}
+	}
+}
+
+// TestSplitFlagRejectsPlanCombination and TestSplitFlagRejectsHumanProvider
+// guard ADR-0023 Decision 3's mutually-exclusive combinations. cmdDo checks
+// these before the store is even opened, so a plain function call — no flag
+// parsing, no DB — is enough to exercise the same condition it evaluates.
+func TestSplitFlagRejectsPlanCombination(t *testing.T) {
+	if err := splitCombinationError(true, "auto", "full"); err == nil {
+		t.Error("--split with --plan should be rejected")
+	}
+	if err := splitCombinationError(true, "auto", ""); err != nil {
+		t.Errorf("--split alone should be fine, got %v", err)
+	}
+}
+
+func TestSplitFlagRejectsHumanProvider(t *testing.T) {
+	if err := splitCombinationError(true, "human", ""); err == nil {
+		t.Error("--split with --provider human should be rejected")
+	}
+	if err := splitCombinationError(true, "claude-code", ""); err != nil {
+		t.Errorf("--split with an explicit non-human provider should be fine, got %v", err)
+	}
+}
+
+// fakeSplitAdapter is a test-only executor.Adapter: Command launches a real
+// but trivial child (`sh -c`) so the Executor's actual process lifecycle
+// runs, and Translate maps every stdout line straight to a provider.output.
+// exitCode lets a test simulate a subtask that runs and then fails, without
+// touching any real provider CLI.
+type fakeSplitAdapter struct {
+	name     string
+	line     string
+	exitCode int
+}
+
+func (f *fakeSplitAdapter) Name() string { return f.name }
+
+func (f *fakeSplitAdapter) Command(executor.Request) (string, []string, []string) {
+	script := fmt.Sprintf("echo %s; exit %d", shellQuote(f.line), f.exitCode)
+	return "sh", []string{"-c", script}, nil
+}
+
+func (f *fakeSplitAdapter) Translate(line []byte) ([]executor.Event, error) {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return nil, nil
+	}
+	return []executor.Event{{
+		Type:    executor.EventProviderOutput,
+		Payload: map[string]any{"text": string(line)},
+	}}, nil
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// registerFakeProvider adds a test adapter to the live providers map for the
+// duration of the test — runSplit resolves an explicit --provider name
+// straight out of this package-level map — and restores it on cleanup so
+// TestAutoDecideRecordsReplayableSeed's len(providers) count is never left
+// stale for a later test.
+func registerFakeProvider(t *testing.T, name string, a executor.Adapter) {
+	t.Helper()
+	providers[name] = a
+	t.Cleanup(func() { delete(providers, name) })
+}
+
+// subtaskSessionIDs returns the distinct session ids whose task.started names
+// parentSID as parent, in the order they were recorded.
+func subtaskSessionIDs(t *testing.T, s *store.Store, parentSID string) []string {
+	t.Helper()
+	rows, err := s.DB.Query(`
+		SELECT session_id FROM events
+		WHERE type = 'task.started' AND json_extract(payload, '$.parent') = ?
+		ORDER BY id`, parentSID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+func countEventsOfTypeInSession(t *testing.T, s *store.Store, sid, typ string) int {
+	t.Helper()
+	var n int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM events WHERE session_id = ? AND type = ?`,
+		sid, typ).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestProviderSinkCollectsTextAcrossEventsForSplitParsing exercises the
+// cmdDo seam runSplit's tests cannot reach: provider.output text is gathered
+// event by event (tool-only outputs skipped), and the "\n"-joined result is
+// what subtask.Parse reads a proposal from — prose in one event, the fenced
+// marker in another.
+func TestProviderSinkCollectsTextAcrossEventsForSplitParsing(t *testing.T) {
+	s := openTestStore(t)
+	var texts []string
+	sink := providerSink(s, "sess", io.Discard, &texts)
+
+	events := []executor.Event{
+		{Type: executor.EventProviderOutput, Payload: map[string]any{"text": "分割を提案する。"}},
+		{Type: executor.EventProviderOutput, Payload: map[string]any{"tool": "Bash"}},
+		{Type: executor.EventProviderOutput, Payload: map[string]any{"text": "```json\n{\"tomobit_split\": [\"part one\", \"part two\"]}\n```"}},
+	}
+	for i, ev := range events {
+		if err := sink(ev, int64(1000+i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if len(texts) != 2 {
+		t.Fatalf("only text-bearing outputs should be collected, got %d: %v", len(texts), texts)
+	}
+	subs, err := subtask.Parse(strings.Join(texts, "\n"))
+	if err != nil {
+		t.Fatalf("joined collection should parse as a proposal: %v", err)
+	}
+	if len(subs) != 2 || subs[0] != "part one" {
+		t.Fatalf("got %v, want the proposed subtasks", subs)
+	}
+	if n := countEventsOfTypeInSession(t, s, "sess", "provider.output"); n != 3 {
+		t.Errorf("every event must still be recorded regardless of collection, got %d", n)
+	}
+}
+
+// TestRunSplitNormalFlowRecordsParentAndPerSubtaskLedger exercises the happy
+// path (ADR-0023 Decision 5): the parent gets task.split and an
+// adoption-free task.finished, while each subtask is its own session, linked
+// to the parent, with its own adoption confirmation.
+func TestRunSplitNormalFlowRecordsParentAndPerSubtaskLedger(t *testing.T) {
+	s := openTestStore(t)
+	registerFakeProvider(t, "fake-split", &fakeSplitAdapter{name: "fake-split", line: "done"})
+
+	const parentSID = "parent-ok"
+	if err := s.AppendEvent(parentSID, "task.started", 1000,
+		map[string]any{"intent": "big task", "source": "production"}); err != nil {
+		t.Fatal(err)
+	}
+
+	subs := []string{"subtask A", "subtask B"}
+	in := bufio.NewReader(strings.NewReader("\n\n")) // adoption Enter, twice
+	var out bytes.Buffer
+	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
+
+	err := runSplit(context.Background(), s, parentSID, subs, "big task", "fake-split",
+		"implement", "", "", 0, in, &out, extractor)
+	if err != nil {
+		t.Fatalf("runSplit: %v", err)
+	}
+
+	if n := countEventsOfTypeInSession(t, s, parentSID, "task.split"); n != 1 {
+		t.Errorf("parent should record exactly one task.split, got %d", n)
+	}
+	parentEvs, err := s.EventsBySession(parentSID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parentFinished map[string]any
+	var sawParentFinished bool
+	for _, e := range parentEvs {
+		if e.Type == "task.finished" {
+			sawParentFinished = true
+			parentFinished = e.Payload
+		}
+	}
+	if !sawParentFinished || len(parentFinished) != 0 {
+		t.Errorf("parent task.finished should carry no adoption key (the artifact was the proposal, not work to judge), got %v", parentFinished)
+	}
+
+	subSIDs := subtaskSessionIDs(t, s, parentSID)
+	if len(subSIDs) != 2 {
+		t.Fatalf("expected 2 subtask sessions, got %d", len(subSIDs))
+	}
+	for i, sid := range subSIDs {
+		evs, err := s.EventsBySession(sid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var started, finished map[string]any
+		for _, e := range evs {
+			switch e.Type {
+			case "task.started":
+				started = e.Payload
+			case "task.finished":
+				finished = e.Payload
+			}
+		}
+		if started == nil || started["parent"] != parentSID {
+			t.Errorf("subtask %d task.started.parent = %v, want %q", i, started["parent"], parentSID)
+		}
+		if finished == nil || finished["adopted"] != "as-is" {
+			t.Errorf("subtask %d task.finished.adopted = %v, want \"as-is\"", i, finished["adopted"])
+		}
+	}
+}
+
+// TestRunSplitStopsAfterAFailedSubtask guards ADR-0023 Decision 4: a failed
+// subtask records provider.error and the loop stops before opening the next
+// subtask's session — a task that never started must never appear in the
+// ledger.
+func TestRunSplitStopsAfterAFailedSubtask(t *testing.T) {
+	s := openTestStore(t)
+	registerFakeProvider(t, "fail-split", &fakeSplitAdapter{name: "fail-split", line: "broken", exitCode: 3})
+
+	const parentSID = "parent-fail"
+	if err := s.AppendEvent(parentSID, "task.started", 1000,
+		map[string]any{"intent": "big task", "source": "production"}); err != nil {
+		t.Fatal(err)
+	}
+
+	subs := []string{"subtask A", "subtask B"}
+	in := bufio.NewReader(strings.NewReader("\n\n"))
+	var out bytes.Buffer
+	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
+
+	err := runSplit(context.Background(), s, parentSID, subs, "big task", "fail-split",
+		"implement", "", "", 0, in, &out, extractor)
+	if err != nil {
+		t.Fatalf("runSplit: %v", err)
+	}
+
+	subSIDs := subtaskSessionIDs(t, s, parentSID)
+	if len(subSIDs) != 1 {
+		t.Fatalf("only the first subtask should ever start, got %d sessions: %v", len(subSIDs), subSIDs)
+	}
+	if n := countEventsOfTypeInSession(t, s, subSIDs[0], "provider.error"); n != 1 {
+		t.Errorf("the failed subtask should record provider.error, got %d", n)
+	}
+}
+
+// TestRunSplitAutoInheritsDecisionEnginePerSubtask guards ADR-0023 Decision
+// 3: a parent run with --provider auto has each subtask decided separately.
+// The candidate pool is swapped to adapters this test controls — real
+// claude-code/codex adapters must never be launched by a unit test — so
+// whichever candidate wins, the run stays safe to finish; only the recorded
+// tomo.decided is asserted, not who won.
+func TestRunSplitAutoInheritsDecisionEnginePerSubtask(t *testing.T) {
+	s := openTestStore(t)
+
+	saved := providers
+	providers = map[string]executor.Adapter{
+		"fake-a": &fakeSplitAdapter{name: "fake-a", line: "did a"},
+		"fake-b": &fakeSplitAdapter{name: "fake-b", line: "did b"},
+	}
+	t.Cleanup(func() { providers = saved })
+
+	const parentSID = "parent-auto"
+	if err := s.AppendEvent(parentSID, "task.started", 1000,
+		map[string]any{"intent": "big task", "source": "production"}); err != nil {
+		t.Fatal(err)
+	}
+
+	subs := []string{"subtask A", "subtask B"}
+	// Enough lines to cover runHuman (1 line) + adoptionPayload (1 line) for
+	// both subtasks, in case auto ever routes either one to the human
+	// candidate — that must not stop the run.
+	in := bufio.NewReader(strings.NewReader(strings.Repeat("\n", 8)))
+	var out bytes.Buffer
+	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
+
+	err := runSplit(context.Background(), s, parentSID, subs, "big task", "auto",
+		"implement", "", "", 0, in, &out, extractor)
+	if err != nil {
+		t.Fatalf("runSplit: %v", err)
+	}
+
+	subSIDs := subtaskSessionIDs(t, s, parentSID)
+	if len(subSIDs) != 2 {
+		t.Fatalf("expected 2 subtask sessions, got %d", len(subSIDs))
+	}
+	for i, sid := range subSIDs {
+		if n := countEventsOfTypeInSession(t, s, sid, "tomo.decided"); n != 1 {
+			t.Errorf("subtask %d should record tomo.decided under --provider auto, got %d", i, n)
 		}
 	}
 }
