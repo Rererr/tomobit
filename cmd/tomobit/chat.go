@@ -432,7 +432,7 @@ func chatUsage(w io.Writer) {
 
 入力  ↑↓ 履歴 / Ctrl-R 履歴検索 / Tab 補完 / Ctrl-A,E 行頭・行末
       Ctrl-W 単語削除 / Ctrl-K 行末まで削除 / Ctrl-U 全消し / Ctrl-Y 戻す
-      Ctrl-Z 中断 / \ + Enter で改行(貼り付けの改行はそのまま入る)
+      Ctrl-Z 中断 / Shift+Enter か \ + Enter で改行(貼り付けの改行はそのまま入る)
 実行中の Ctrl-C はそのターンの中断 — タスクは続く
 `)
 }

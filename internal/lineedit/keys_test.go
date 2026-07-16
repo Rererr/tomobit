@@ -91,6 +91,33 @@ func TestDecodeModifiedArrowsMoveByWord(t *testing.T) {
 	}
 }
 
+// Enter with a modifier held means "newline, don't submit", whichever of the
+// three encodings the terminal picked: Ghostty/foot send the xterm
+// modifyOtherKeys form for Shift+Enter with nothing negotiated, kitty-family
+// terminals the CSI u form, and Alt+Enter arrives as ESC CR.
+func TestDecodeModifiedEnterInsertsNewline(t *testing.T) {
+	for _, in := range []string{
+		"\x1b[27;2;13~", // Shift+Enter, modifyOtherKeys form
+		"\x1b[27;5;13~", // Ctrl+Enter
+		"\x1b[13;2u",    // Shift+Enter, CSI u form
+		"\x1b\r",        // Alt+Enter
+	} {
+		if got := decodeOne(t, in).Type; got != KeyNewline {
+			t.Errorf("%q: got %v, want KeyNewline", in, got)
+		}
+	}
+}
+
+// A CSI u Enter with no modifier (or the explicit "none" modifier 1) is a
+// plain Enter and submits.
+func TestDecodeCSIUPlainEnterSubmits(t *testing.T) {
+	for _, in := range []string{"\x1b[13u", "\x1b[13;1u"} {
+		if got := decodeOne(t, in).Type; got != KeyEnter {
+			t.Errorf("%q: got %v, want KeyEnter", in, got)
+		}
+	}
+}
+
 func TestDecodeRunesIncludingMultibyte(t *testing.T) {
 	keys := decodeAll(t, "a日")
 	if len(keys) != 2 {

@@ -184,9 +184,10 @@ func (e *Editor) readRaw(prompt string, fd int, old *term.State) (string, error)
 		case KeyPaste:
 			b.insert([]rune(k.Text)...)
 		case KeyEnter:
-			// A trailing backslash means "not done yet". Terminals send
-			// nothing distinct for Shift+Enter, so this is the one keystroke
-			// for a newline that works everywhere.
+			// A trailing backslash means "not done yet". Shift+Enter only
+			// arrives distinctly from terminals that encode a modified Enter
+			// (Ghostty, foot, kitty family — see csiKey); this is the newline
+			// keystroke that works everywhere else.
 			if b.pos == len(b.runes) && strings.HasSuffix(b.String(), "\\") {
 				b.backspace()
 				b.insert('\n')

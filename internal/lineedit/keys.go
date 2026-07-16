@@ -12,7 +12,7 @@ const (
 	KeyUnknown KeyType = iota
 	KeyRune
 	KeyEnter
-	KeyNewline // insert a literal newline (Alt+Enter, or `\` before Enter)
+	KeyNewline // insert a literal newline (Shift/Alt+Enter, or `\` before Enter)
 	KeyBackspace
 	KeyDelete
 	KeyLeft
@@ -204,6 +204,27 @@ func csiKey(params string, final rune, r *bufio.Reader) (Key, error) {
 			return Key{Type: KeyEnd}, nil
 		case "200":
 			return readPaste(r)
+		}
+		// "27;<mod>;13" is a modified Enter in xterm's modifyOtherKeys
+		// form. Ghostty and foot send it for Shift+Enter with nothing
+		// negotiated, which is what lets Shift+Enter insert a newline
+		// without pushing a keyboard protocol that would re-encode every
+		// other key this decoder speaks. As with modified(), the exact
+		// modifier does not change the intent: Enter plus anything held
+		// down means "newline, don't submit".
+		if rest, ok := strings.CutPrefix(params, "27;"); ok && strings.HasSuffix(rest, ";13") {
+			return Key{Type: KeyNewline}, nil
+		}
+	case 'u':
+		// The same modified Enter in CSI u (fixterms/kitty) form, from
+		// terminals that encode it this way unprompted. Modifier "1"
+		// means none held: that is a plain Enter from a pushed keyboard
+		// protocol, not a request for a newline.
+		if code, mod, _ := strings.Cut(params, ";"); code == "13" {
+			if mod == "" || mod == "1" {
+				return Key{Type: KeyEnter}, nil
+			}
+			return Key{Type: KeyNewline}, nil
 		}
 	}
 	return Key{Type: KeyUnknown}, nil
