@@ -1,0 +1,40 @@
+#!/usr/bin/expect -f
+# The whole conversational flow on a real terminal, against the real claude
+# CLI and the real ollama: two turns on one thread, then the boundary organs.
+# usage: expect tools/ttytest/flow.exp <tomobit binary> [db]
+# Needs: a claude-code profile (TOMOBIT_CLAUDE_CONFIG_DIR or config.json),
+# the claude CLI, and ollama with the perception model — it is the real thing
+# on purpose. Costs a few cents; TOMOBIT_CLAUDE_ARGS="--model haiku" is enough.
+set bin [lindex $argv 0]
+if {$bin eq ""} { puts "usage: expect flow.exp <tomobit binary> \[db\]"; exit 2 }
+set db [lindex $argv 1]
+if {$db eq ""} { set db "/tmp/tomobit-flowtest.db" }
+file delete $db $db-wal $db-shm
+
+set timeout 180
+log_user 1
+
+proc check {name pattern} {
+    expect {
+        -re $pattern { puts "\n>>> PASS: $name" }
+        timeout      { puts "\n>>> FAIL: $name (timeout)"; exit 1 }
+        eof          { puts "\n>>> FAIL: $name (eof)"; exit 1 }
+    }
+}
+
+spawn $bin chat --db $db
+check "companion view" "話しかけて"
+
+send "私の好きな数字は4219です。OKとだけ答えて。\r"
+check "turn 1 answered" "OK"
+
+send "私の好きな数字は何でしたか。数字だけ答えて。\r"
+check "turn 2 resumed the thread" "4219"
+
+send "/exit\r"
+check "adoption question at the boundary" "採用\\?"
+send "\r"
+check "perception ran" "perceived|perception pending|「"
+
+expect eof
+puts ">>> ALL PASS"

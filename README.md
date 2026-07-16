@@ -49,6 +49,7 @@
 - [ADR-0019](docs/decisions/ADR-0019-companionship-is-derived.md) — 相棒らしさは導出される（感情・儀式・個性は台帳のView）
 - [ADR-0020](docs/decisions/ADR-0020-face-window.md) — Tomoの顔窓（窓は第二のレンダラである）
 - [ADR-0021](docs/decisions/ADR-0021-onboarding.md) — 初期導入（配線は経験ではない / config.json / `tomobit setup`）
+- [ADR-0022](docs/decisions/ADR-0022-chat-session.md) — 対話セッション（会話は入力の器・タスクは記帳の単位 / ターンはスレッドを継ぐ / インラインの自前ラインエディタ）
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。
@@ -58,19 +59,29 @@
 最小コア（記帳 → 知覚 → Connection更新 → rebuild）に加え、相棒の器官を実装済み:
 **姿**（ドット絵アバター・成長6ステージ・すべてConnectionからのView）、
 **声**（つぶやき・成長報告・提案 — 全発話が決定的導出）、
-**質問**（Preference Gap導出・予算1問/24h — ADR-0007）。
+**質問**（Preference Gap導出・予算1問/24h — ADR-0007）、
+**対話**（チャット形式のセッション・ターンは同じスレッドを継ぐ — ADR-0022）。
 
-Stack: **Go / SQLite / Ollama**（完全ローカル・外部依存ゼロのターミナルUI）
+Stack: **Go / SQLite / Ollama**（完全ローカル・ターミナルUI。依存は端末の物理のみ —
+raw modeに `x/term`、表示幅に `uniseg`）
 
 ```
-tomobit            # 相棒ビュー（アバター・発話・Connection一覧）
+tomobit            # 相棒ビュー（アバター・発話・Connection一覧）→ そのまま対話へ
+                   # パイプ・リダイレクトなら見せて終わる
+tomobit chat [--provider claude-code|codex|human|auto] [--cap <capability>] ["<prompt>"]
+                   # 対話セッション。1つの会話 = 1つのタスク = 1つの経験。
+                   # /new か /exit で区切ると 採用確認→知覚→Tomoの質問→鏡 が走る
 tomobit do [--provider claude-code|codex] [--cap <capability>] "<prompt>"
-                   # 実行→記帳→採用確認→best-effort知覚→（予算とGapがあれば）Tomoの質問
+                   # 非対話の一発（スクリプト向け）。区切りの器官はchatと同じ
 tomobit record  --session <id> --type <event.type> [--json '{...}']
 tomobit perceive   # 未知覚セッションをOllama(qwen3:8b)で経験化しConnectionへ反映
 tomobit rebuild    # 射影を破棄しexperiencesから再構築（決定的 — 姿も再現される）
-tomobit status     # 相棒ビュー（無引数と同じ）
+tomobit status     # 相棒ビュー（見て終わる）
 ```
+
+チャットの中では `/new`（区切って次のタスク）・`/provider`・`/cap`・`/size`・`/status`・`/help`・`/exit`。
+入力は ↑↓履歴・Ctrl-A/E/W/U・複数行貼り付け（そのまま1つの依頼になる）・`\`+Enterで改行。
+実行中の Ctrl-C はそのターンの中断で、タスクは続く。
 
 DBは `~/.tomobit/tomobit.db`（`--db` / `$TOMOBIT_DB` で変更可）。
 実装時ノブ: 減衰半減期・事前分布の継承・backoffブレンド → [CONNECTION_ENGINE.md の Open Questions](docs/core/CONNECTION_ENGINE.md#open-questions)

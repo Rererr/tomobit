@@ -1,0 +1,39 @@
+#!/usr/bin/expect -f
+# Ctrl-C during a turn must cancel the turn, not the task: the conversation
+# stays open and the next turn continues the same provider thread.
+# usage: expect tools/ttytest/cancel.exp <tomobit binary> [db]
+# Needs the real claude CLI: what is under test is SIGINT reaching a live
+# child and the chat surviving it.
+set bin [lindex $argv 0]
+if {$bin eq ""} { puts "usage: expect cancel.exp <tomobit binary> \[db\]"; exit 2 }
+set db [lindex $argv 1]
+if {$db eq ""} { set db "/tmp/tomobit-cancel.db" }
+file delete $db $db-wal $db-shm
+set timeout 60
+
+proc check {name pattern} {
+    expect {
+        -re $pattern { puts "\n>>> PASS: $name" }
+        timeout      { puts "\n>>> FAIL: $name (timeout)"; exit 1 }
+        eof          { puts "\n>>> FAIL: $name (eof)"; exit 1 }
+    }
+}
+
+spawn $bin chat --db $db
+check "prompt" "話しかけて"
+
+# A turn slow enough to interrupt.
+send "1から30まで、一行ずつゆっくり数えて。\r"
+sleep 6
+send "\003"
+check "the turn was interrupted" "中断"
+
+# The chat is still alive and the task is still open.
+send "やめてよかった。「はい」とだけ答えて。\r"
+check "the conversation continues" "はい"
+
+send "/exit\r"
+check "the task reaches its boundary" "採用\\?"
+send "s\r"
+expect eof
+puts ">>> ALL PASS"
