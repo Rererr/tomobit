@@ -133,3 +133,24 @@ doの成否は知覚の成否に依存しない（Deferred Perceptionをその�
   extractor_verのバンプは不要
 - 実装時ノブ: 権限フラグの透過（headless実行の許可モード）、タイムアウト、
   採用プロンプトのUX、ダイジェストに含めるassistantテキストの上限
+
+---
+
+## 実装追記（2026-07-16）: 起動プロファイルもAdapterの責務
+
+`Adapter.Command` は `(name, args, extraEnv)` を返す形に拡張した。起動環境も
+「CLIを知っている」ことの一部であり、プロファイル選択（どのアカウント・設定で
+走るか）をtomobitの外側のshell alias/direnvに漏らさないため。
+
+- claude-code: `Adapter.ConfigDir` → 子プロセスの `CLAUDE_CONFIG_DIR`、
+  `Adapter.ExtraArgs` → 毎回の起動に追記するフラグ。配線は `cmd/tomobit` が持ち、
+  **env必須方式**（本人指示でハードコード既定を撤回）: `TOMOBIT_CLAUDE_CONFIG_DIR`
+  未設定なら claude-code/auto の `do` は記帳前に明示エラーで拒否する。
+  shellがたまたま持っているプロファイルを黙って継承する事故こそ防ぎたいものなので、
+  継承したい場合も「空文字を明示的に設定」させる。`TOMOBIT_CLAUDE_ARGS` は任意
+  （未設定=フラグなし）。その後 [ADR-0021](ADR-0021-onboarding.md) で解決は
+  env > config（`~/.tomobit/config.json`、`tomobit setup`が書く）に拡張。
+  「どこにも選択がなければ拒否」は不変、端末上では欠けた選択がその場の質問になる
+- Provider名は道具名のみ（SCHEMA.md R3）のまま: プロファイルは「誰でログインして
+  いるか」を変えるだけで、どの道具が走ったかは変えない
+- codex: extraEnv=nil（変更なし）

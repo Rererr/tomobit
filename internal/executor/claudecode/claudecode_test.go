@@ -16,7 +16,10 @@ func translate(t *testing.T, line string) []executor.Event {
 }
 
 func TestCommandBuildsHeadlessStreamJSON(t *testing.T) {
-	name, args := New().Command(executor.Request{Prompt: "fix the bug"})
+	name, args, env := New().Command(executor.Request{Prompt: "fix the bug"})
+	if len(env) != 0 {
+		t.Errorf("no extra env expected when ConfigDir is unset: %v", env)
+	}
 	if name != "claude" {
 		t.Errorf("executable: got %q, want claude", name)
 	}
@@ -36,9 +39,22 @@ func TestCommandBuildsHeadlessStreamJSON(t *testing.T) {
 }
 
 func TestCommandPassesPermissionModeThrough(t *testing.T) {
-	_, args := New().Command(executor.Request{Prompt: "p", PermissionMode: "acceptEdits"})
+	_, args, _ := New().Command(executor.Request{Prompt: "p", PermissionMode: "acceptEdits"})
 	if !contains(args, "--permission-mode") || !contains(args, "acceptEdits") {
 		t.Errorf("permission mode should be forwarded: %v", args)
+	}
+}
+
+func TestCommandInjectsProfileAndExtraArgs(t *testing.T) {
+	a := New()
+	a.ConfigDir = "/home/u/.claude-personal"
+	a.ExtraArgs = []string{"--exclude-dynamic-system-prompt-sections"}
+	_, args, env := a.Command(executor.Request{Prompt: "p"})
+	if !contains(args, "--exclude-dynamic-system-prompt-sections") {
+		t.Errorf("extra args should be appended: %v", args)
+	}
+	if len(env) != 1 || env[0] != "CLAUDE_CONFIG_DIR=/home/u/.claude-personal" {
+		t.Errorf("ConfigDir should become CLAUDE_CONFIG_DIR: %v", env)
 	}
 }
 
