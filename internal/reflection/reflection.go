@@ -356,9 +356,9 @@ func mirrorWeight(o core.Outcome) (float64, bool) {
 
 // Ask prints the telling and reads the reaction. Anything but 1/2/3
 // (including EOF) is a free skip.
-func Ask(in io.Reader, out io.Writer, text string) (reaction string) {
+func Ask(in *bufio.Reader, out io.Writer, text string) (reaction string) {
 	fmt.Fprintf(out, "\n「%s」\n%s", text, voice.ReflectPrompt())
-	line, _ := bufio.NewReader(in).ReadString('\n')
+	line, _ := in.ReadString('\n')
 	switch strings.TrimSpace(line) {
 	case "1":
 		return ReactionUnexpected

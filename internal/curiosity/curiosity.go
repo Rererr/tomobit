@@ -201,10 +201,10 @@ func HasBudget(s *store.Store, nowMs int64) (bool, error) {
 // Ask prints the one fixed question (ADR-0007 Decision 4: a Go template, no
 // LLM) and maps the reply: "1" -> A wins, "2" -> B wins, anything else
 // (including EOF) is a skip.
-func Ask(in io.Reader, out io.Writer, gap Gap) (preferred, over string, answered bool) {
+func Ask(in *bufio.Reader, out io.Writer, gap Gap) (preferred, over string, answered bool) {
 	fmt.Fprintf(out, "「%s」 [1=%s / 2=%s / Enter=スキップ] ",
 		voice.Asked(gap.Scope, gap.A, gap.B), gap.A, gap.B)
-	line, _ := bufio.NewReader(in).ReadString('\n')
+	line, _ := in.ReadString('\n')
 	switch strings.TrimSpace(line) {
 	case "1":
 		return gap.A, gap.B, true

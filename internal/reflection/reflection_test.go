@@ -1,6 +1,7 @@
 package reflection
 
 import (
+	"bufio"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -324,7 +325,7 @@ func TestAskMapsReactions(t *testing.T) {
 	for input, want := range map[string]string{
 		"1\n": ReactionUnexpected, "2\n": ReactionKnown, "3\n": ReactionWrong, "\n": "", "x\n": "",
 	} {
-		if got := Ask(strings.NewReader(input), &out, "line"); got != want {
+		if got := Ask(bufio.NewReader(strings.NewReader(input)), &out, "line"); got != want {
 			t.Errorf("Ask(%q) = %q, want %q", input, got, want)
 		}
 	}
