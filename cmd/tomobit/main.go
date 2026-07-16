@@ -29,6 +29,7 @@ import (
 	"github.com/Rererr/tomobit/internal/plan"
 	"github.com/Rererr/tomobit/internal/reflection"
 	"github.com/Rererr/tomobit/internal/store"
+	"github.com/Rererr/tomobit/internal/subtask"
 	"github.com/Rererr/tomobit/internal/voice"
 	"golang.org/x/term"
 )
@@ -179,11 +180,13 @@ usage:
   tomobit do       [--cap implement] [--timeout 0] [--permission-mode <mode>]
                    [--provider claude-code|codex|human|auto]
                    [--plan auto|full|direct|quick|<steps>] [--size small|medium|large]
-                   [--model qwen3:8b] [--url http://localhost:11434] "<prompt>"
+                   [--model qwen3:8b] [--url http://localhost:11434] [--split] "<prompt>"
                    --provider auto: 決定エンジン(ADR-0012)が能力ゲート+TSで選ぶ
                    （humanも候補 — ADR-0018）。--provider human: 自分でやって
                    同じ台帳に乗せる。--plan auto: 手順も台帳が選ぶ(ADR-0014、
                    例 analyze>implement>test)。--size は判断の温度 n(stakes)
+                   --split: providerが分割すべきと判断したら提案を受けて
+                   サブタスクを逐次実行する(ADR-0023、--plan・humanとは併用不可)
   tomobit record   --session <id> --type <event.type> [--json '{...}']
   tomobit perceive [--model qwen3:8b] [--url http://localhost:11434]
   tomobit rebuild
@@ -278,11 +281,17 @@ func cmdDo(args []string) error {
 	size := fs.String("size", "", "task size for decision stakes: small|medium|large (--provider auto)")
 	model := fs.String("model", ollamaModelDefault(), "ollama model for best-effort perception")
 	url := fs.String("url", cfg.OllamaURL, "ollama base url (default http://localhost:11434)")
+	split := fs.Bool("split", false, "let the provider propose subtasks instead of doing a too-large task (ADR-0023)")
 	fs.Parse(args)
 
 	prompt := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if prompt == "" {
 		return fmt.Errorf("do: a prompt is required")
+	}
+	// Checked before anything is recorded (ADR-0023 Decision 3): a rejected
+	// combination must leave no trace in the ledger.
+	if err := splitCombinationError(*split, *providerName, *planArg); err != nil {
+		return err
 	}
 	// A named provider fails fast, before the store is even opened.
 	if *providerName != "auto" && *providerName != "human" {
@@ -320,28 +329,33 @@ func cmdDo(args []string) error {
 
 	var result executor.Result
 	var runErr error
+	var texts []string
 	if human {
 		result, runErr = runHuman(s, sid, stdin)
 		if runErr != nil {
 			return runErr
 		}
 	} else {
-		sink := func(ev executor.Event, ts int64) error {
-			// The user must read the result to judge adoption, so assistant text
-			// is echoed to the terminal, not just recorded.
-			if ev.Type == executor.EventProviderOutput {
-				if text, ok := ev.Payload["text"].(string); ok && text != "" {
-					fmt.Println(text)
-				}
-			}
-			return s.AppendEvent(sid, ev.Type, ts, ev.Payload)
+		var collect *[]string
+		if *split {
+			collect = &texts
 		}
+		sink := providerSink(s, sid, os.Stdout, collect)
 
 		// Warn (malformed stream lines) is always visible; Debug (recognised,
 		// intentionally dropped lines) only under TOMOBIT_DEBUG.
 		ex := &executor.Executor{Adapter: adapter, Stderr: os.Stderr, Warn: os.Stderr}
 		if os.Getenv("TOMOBIT_DEBUG") != "" {
 			ex.Debug = os.Stderr
+		}
+
+		// The split protocol text only goes on the harness's own prompt, never
+		// a plan step's (mutually exclusive with --plan, checked above) and
+		// never a subtask's (runSplit frames those with subtask.Prompt instead
+		// — ADR-0023 Decision 4: depth stays 1).
+		runPrompt := prompt
+		if *split {
+			runPrompt = subtask.Instruction(prompt)
 		}
 
 		// One provider run per plan step (ADR-0014); no plan = one plain
@@ -356,7 +370,7 @@ func cmdDo(args []string) error {
 				fmt.Printf("-- plan %d/%d: %s --\n", i+1, len(steps), step)
 			}
 			result, runErr = ex.Run(ctx, executor.Request{
-				Prompt: stepPrompt(prompt, step, i, len(steps)), PermissionMode: *permMode, Timeout: *timeout,
+				Prompt: stepPrompt(runPrompt, step, i, len(steps)), PermissionMode: *permMode, Timeout: *timeout,
 			}, sink)
 			if ctx.Err() != nil || runErr != nil || result.ExitCode != 0 {
 				break
@@ -377,7 +391,175 @@ func cmdDo(args []string) error {
 		}
 	}
 
-	return finishTask(s, sid, stdin, os.Stdout, result.Started, &perceive.Ollama{URL: *url, Model: *model})
+	extractor := &perceive.Ollama{URL: *url, Model: *model}
+
+	// A clean run's output is read for a split proposal (ADR-0023 Decision
+	// 1): a broken run (runErr, non-zero exit, already excluded by ctx.Err()
+	// above) never reaches here, so its output is never trusted as one. The
+	// "\n" join assumes adapters emit message-level text (both current ones
+	// do): a token-delta adapter could split the marker key across events,
+	// and the joined text would no longer contain it.
+	if *split && runErr == nil && result.ExitCode == 0 {
+		subs, parseErr := subtask.Parse(strings.Join(texts, "\n"))
+		if parseErr != nil {
+			fmt.Fprintln(os.Stderr, "split: proposal ignored —", parseErr)
+		} else if subs != nil {
+			return runSplit(ctx, s, sid, subs, prompt, *providerName, *capability, *size,
+				*permMode, *timeout, stdin, os.Stdout, extractor)
+		}
+	}
+
+	return finishTask(s, sid, stdin, os.Stdout, result.Started, extractor)
+}
+
+// splitCombinationError rejects the two --split combinations ADR-0023
+// Decision 3 calls ambiguous or pointless: a plan step's output is not
+// unambiguously "the proposal", and a human run has no provider stream to
+// read one from.
+func splitCombinationError(split bool, providerName, planArg string) error {
+	if !split {
+		return nil
+	}
+	if planArg != "" {
+		return fmt.Errorf("do: --split and --plan are mutually exclusive — which step's output would count as the proposal is ambiguous")
+	}
+	if providerName == "human" {
+		return fmt.Errorf("do: --split has no effect with --provider human — a human has no proposal stream to read")
+	}
+	return nil
+}
+
+// providerSink builds the Executor Sink shared by a plain `do` run and each
+// ADR-0023 subtask run: assistant text is echoed to out so the user (or, for
+// --split, subtask.Parse) can read it, and every event lands in sid in
+// stream order. collect, when non-nil, also gathers the echoed text — the
+// concatenation a --split run hands to subtask.Parse.
+func providerSink(s *store.Store, sid string, out io.Writer, collect *[]string) executor.Sink {
+	return func(ev executor.Event, ts int64) error {
+		if ev.Type == executor.EventProviderOutput {
+			if text, ok := ev.Payload["text"].(string); ok && text != "" {
+				fmt.Fprintln(out, text)
+				if collect != nil {
+					*collect = append(*collect, text)
+				}
+			}
+		}
+		return s.AppendEvent(sid, ev.Type, ts, ev.Payload)
+	}
+}
+
+// openSubtask opens one split subtask's own task session (ADR-0023 Decision
+// 2): the same task.started/capability.started shape openTask writes for a
+// top-level do, plus the parent link. A small helper of its own rather than
+// a reuse of openTask — that one resolves --provider human by itself and
+// returns nothing to link a parent, both wrong for a subtask.
+//
+// Provider resolution keeps openTask's ordering discipline: an explicit
+// provider is already a validated name (the same one the parent run resolved
+// before recording anything), so it needs no second check; auto is resolved
+// after task.started/capability.started are recorded, exactly like a
+// top-level do, so its decision lands in the session it decided for.
+func openSubtask(s *store.Store, providerName, capability, size, sub, parentSID string) (subSID string, adapter executor.Adapter, human bool, err error) {
+	now := time.Now().UnixMilli()
+	subSID = store.NewID(now)
+	if err = s.AppendEvent(subSID, "task.started", now,
+		map[string]any{"intent": sub, "source": "production", "parent": parentSID}); err != nil {
+		return "", nil, false, err
+	}
+	if err = s.AppendEvent(subSID, "capability.started", now,
+		map[string]any{"capability": capability}); err != nil {
+		return "", nil, false, err
+	}
+
+	if providerName != "auto" {
+		return subSID, providers[providerName], false, nil
+	}
+	dec, err := autoDecide(s, subSID, capability, size)
+	if err != nil {
+		return "", nil, false, err
+	}
+	if dec.Provider == "human" {
+		return subSID, nil, true, nil
+	}
+	return subSID, providers[dec.Provider], false, nil
+}
+
+// runSplit executes an accepted split proposal (ADR-0023): each subtask
+// becomes its own task session — same ledger, same gate, same rehabilitation
+// as any other task — run in the proposed order. A subtask's failure (runErr
+// or a non-zero exit) stops the loop before the next one opens: an
+// unopened session leaves no half-started task in the ledger, and the
+// proposal's full text already lives in task.split, so nothing is lost
+// (Decision 4).
+//
+// judged=false on the closing finishTask: the parent's own artifact was the
+// split proposal itself, not something to adopt — each subtask already got
+// its own adoption question.
+func runSplit(ctx context.Context, s *store.Store, parentSID string, subs []string,
+	parentIntent, providerName, capability, size, permMode string, timeout time.Duration,
+	in *bufio.Reader, out io.Writer, extractor perceive.Extractor) error {
+	if err := s.AppendEvent(parentSID, "task.split", time.Now().UnixMilli(),
+		map[string]any{"subtasks": subs}); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "split: %d個のサブタスクとして実行\n", len(subs))
+
+	for i, sub := range subs {
+		fmt.Fprintf(out, "-- subtask %d/%d: %s --\n", i+1, len(subs), truncate(sub, 60))
+
+		subSID, adapter, human, err := openSubtask(s, providerName, capability, size, sub, parentSID)
+		if err != nil {
+			return err
+		}
+
+		subtaskPrompt := subtask.Prompt(parentIntent, sub, i, len(subs))
+		var result executor.Result
+		var runErr error
+		if human {
+			fmt.Fprintln(out, subtaskPrompt)
+			result, runErr = runHuman(s, subSID, in)
+			if runErr != nil {
+				return runErr
+			}
+		} else {
+			sink := providerSink(s, subSID, out, nil)
+			ex := &executor.Executor{Adapter: adapter, Stderr: os.Stderr, Warn: os.Stderr}
+			if os.Getenv("TOMOBIT_DEBUG") != "" {
+				ex.Debug = os.Stderr
+			}
+			result, runErr = ex.Run(ctx, executor.Request{
+				Prompt: subtaskPrompt, PermissionMode: permMode, Timeout: timeout,
+			}, sink)
+		}
+
+		if ctx.Err() != nil {
+			if err := s.AppendEvent(subSID, "task.cancelled", time.Now().UnixMilli(), nil); err != nil {
+				return err
+			}
+			return s.AppendEvent(parentSID, "task.cancelled", time.Now().UnixMilli(), nil)
+		}
+
+		if payload, need := providerErrorPayload(runErr, result); need {
+			if err := s.AppendEvent(subSID, "provider.error", time.Now().UnixMilli(), payload); err != nil {
+				return err
+			}
+		}
+
+		payload := map[string]any{}
+		if result.Started {
+			payload = adoptionPayload(in, out)
+		}
+		if err := s.AppendEvent(subSID, "task.finished", time.Now().UnixMilli(), payload); err != nil {
+			return err
+		}
+
+		if runErr != nil || result.ExitCode != 0 {
+			fmt.Fprintf(out, "split: subtask %d/%d failed — remaining subtasks not started\n", i+1, len(subs))
+			break
+		}
+	}
+
+	return finishTask(s, parentSID, in, out, false, extractor)
 }
 
 // finishTask is the tail every task boundary shares (ADR-0022 Decision 1):

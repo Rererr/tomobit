@@ -50,6 +50,7 @@
 - [ADR-0020](docs/decisions/ADR-0020-face-window.md) — Tomoの顔窓（窓は第二のレンダラである）
 - [ADR-0021](docs/decisions/ADR-0021-onboarding.md) — 初期導入（配線は経験ではない / config.json / `tomobit setup`）
 - [ADR-0022](docs/decisions/ADR-0022-chat-session.md) — 対話セッション（会話は入力の器・タスクは記帳の単位 / ターンはスレッドを継ぐ / インラインの自前ラインエディタ）
+- [ADR-0023](docs/decisions/ADR-0023-task-split.md) — タスク分割（Providerの分割提案はプロトコル / サブタスクは独立タスク / 実行者は親の選択方法を継ぐ — autoなら台帳が分配）
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。
@@ -71,8 +72,10 @@ tomobit            # 相棒ビュー（アバター・発話・Connection一覧�
 tomobit chat [--provider claude-code|codex|human|auto] [--cap <capability>] ["<prompt>"]
                    # 対話セッション。1つの会話 = 1つのタスク = 1つの経験。
                    # /new か /exit で区切ると 採用確認→知覚→Tomoの質問→鏡 が走る
-tomobit do [--provider claude-code|codex] [--cap <capability>] "<prompt>"
-                   # 非対話の一発（スクリプト向け）。区切りの器官はchatと同じ
+tomobit do [--provider claude-code|codex] [--cap <capability>] [--split] "<prompt>"
+                   # 非対話の一発（スクリプト向け）。区切りの器官はchatと同じ。
+                   # --split: Providerが「難しすぎる/分割すべき」と提案したら
+                   # サブタスク群として実行（autoなら実行者は台帳が選ぶ — ADR-0023）
 tomobit record  --session <id> --type <event.type> [--json '{...}']
 tomobit perceive   # 未知覚セッションをOllama(qwen3:8b)で経験化しConnectionへ反映
 tomobit rebuild    # 射影を破棄しexperiencesから再構築（決定的 — 姿も再現される）

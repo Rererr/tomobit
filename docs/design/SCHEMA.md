@@ -279,6 +279,10 @@ R4. eventsのtype初期カタログ（14種で確定）
     - plan.selected（ADR-0014）: 採用したPlanの記帳（知覚の決定的抽出元 —
       experiences.plan列へ）。payload = {plan, cap, size, seed, n, q,
       fallback} または手動指定時 {plan, cap, manual: true}
+    - task.split（ADR-0023）: 受理した分割提案の記帳。payload = {subtasks: [...]}。
+      サブタスクは独立セッションで、その task.started は payload に
+      parent: <親session_id> を持つ（source は production のまま —
+      知覚schemaは不変なので extractor_ver のバンプ不要）
     （plan.generated は初期カタログ14種に含まれる。ADR-0014の提案記帳:
       payload = {cap, plan, parent, op} — メニューの生存はこのイベントから
       導出されるため rebuild で消えない）
