@@ -1,0 +1,85 @@
+#!/usr/bin/expect -f
+# The line editor on a real pty (ADR-0022 Decision 3).
+#
+# The unit tests cover the buffer, the key decoder and the renderer; only this
+# exercises raw mode itself — the wiring where every real bug so far has been.
+# script fails loudly — a timeout that falls through proves nothing.
+# usage: expect tools/ttytest/lineedit.exp <tomobit binary> [db]
+set bin [lindex $argv 0]
+if {$bin eq ""} { puts "usage: expect lineedit.exp <tomobit binary> \[db\]"; exit 2 }
+set db [lindex $argv 1]
+if {$db eq ""} { set db "/tmp/tomobit-ttytest.db" }
+file delete $db $db-wal $db-shm
+
+set timeout 8
+log_user 0
+
+proc check {name pattern} {
+    expect {
+        -re $pattern { puts "PASS: $name" }
+        timeout      { puts "FAIL: $name (timeout waiting for $pattern)"; exit 1 }
+        eof          { puts "FAIL: $name (eof)"; exit 1 }
+    }
+}
+
+# A narrow terminal, so wrapping is exercised rather than assumed.
+set stty_init "columns 40 rows 20"
+spawn $bin chat --db $db --provider human
+check "prompt" "話しかけて"
+
+# 1. typo, then fix it with backspace
+send "helo"
+sleep 0.3
+send "\177\177llo"
+check "backspace edit" "hello\[^\r\n\]*"
+
+# 2. Ctrl-A to line start, insert, Ctrl-E to end
+send "\001X"
+check "ctrl-a + insert" "Xhello"
+send "\005!"
+check "ctrl-e + append" "Xhello!"
+
+# 3. Ctrl-U from the end clears the whole line
+send "\025"
+sleep 0.3
+send "/help\r"
+check "/help" "実行中の Ctrl-C はそのターンの中断"
+
+# 4. history recalls the command that was just typed
+send "\033\[A"
+check "history up" "❯ /help"
+send "\025"
+
+# 5. full-width japanese: two columns per rune, arrows step over them.
+# 7 runes = 14 columns + 2 for the prompt; each arrow steps back 2 columns.
+send "日本語のタスク"
+check "japanese width" "日本語のタスク\r\x1b\\\[16C"
+send "\033\[D\033\[D"
+check "arrows step whole runes" "\x1b\\\[12C"
+send "い"
+check "insert mid-string" "日本語のタいスク\r\x1b\\\[14C"
+send "\025"
+
+# 6. bracketed paste keeps a multi-line block as one input
+send "\033\[200~一行目\n二行目\033\[201~"
+check "bracketed paste" "一行目"
+send "\025"
+
+# 7. a line longer than 40 columns wraps and still edits
+send "0123456789012345678901234567890123456789012345"
+sleep 0.4
+send "\177\177\177"
+check "wrapped edit" "012345678901234567890123456789012"
+send "\025"
+
+# 8. unknown command is answered, chat survives
+send "/nope\r"
+check "unknown command" "知らないコマンド"
+
+# 9. Ctrl-D on an empty line exits
+send "\004"
+expect {
+    eof     { puts "PASS: ctrl-d exit" }
+    timeout { puts "FAIL: ctrl-d did not exit"; exit 1 }
+}
+puts "ALL PASS"
