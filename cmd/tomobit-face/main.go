@@ -29,6 +29,7 @@ func run(args []string) error {
 	scale := fs.Int("scale", 4, "integer pixel scale (sprite is 32px square)")
 	plain := fs.Bool("plain", false, "ordinary decorated window (no transparency / always-on-top)")
 	fontPath := fs.String("font", "", "font file for the bubble (.ttf/.otf/.ttc; default: system Japanese font)")
+	debug := fs.Bool("debug", false, "keep raw stderr (macOS system noise included — needed to see panics)")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), `tomobit-face — Tomoのマスコット窓（表示専用・DBは読み取りのみ）
 
@@ -36,6 +37,14 @@ func run(args []string) error {
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)
+
+	// Before anything can print: our own writers follow the os.Stderr var,
+	// so the font fallback warning and exit errors survive the rerouting.
+	if !*debug {
+		if err := silenceSystemStderr(); err != nil {
+			fmt.Fprintln(os.Stderr, "stderr rerouting failed (continuing loud):", err)
+		}
+	}
 
 	breed, ok := facewin.ParseBreed(*breedName)
 	if !ok {
