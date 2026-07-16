@@ -1,6 +1,7 @@
 package curiosity
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"path/filepath"
@@ -242,7 +243,7 @@ func TestAskMapsReplies(t *testing.T) {
 	}
 	for _, tt := range tests {
 		var out bytes.Buffer
-		preferred, over, answered := Ask(strings.NewReader(tt.in), &out, gap)
+		preferred, over, answered := Ask(bufio.NewReader(strings.NewReader(tt.in)), &out, gap)
 		if preferred != tt.wantPreferred || over != tt.wantOver || answered != tt.wantAnswered {
 			t.Errorf("Ask(%q) = (%q,%q,%v), want (%q,%q,%v)",
 				tt.in, preferred, over, answered, tt.wantPreferred, tt.wantOver, tt.wantAnswered)
@@ -266,7 +267,7 @@ func TestAnswerBirthsPreferenceConnectionAndSurvivesRebuild(t *testing.T) {
 	grow(t, s, en, "lang=rust", "codex", 4, 1)
 
 	gap := gapsAt(t, s)[0]
-	preferred, over, answered := Ask(strings.NewReader("1\n"), &bytes.Buffer{}, gap)
+	preferred, over, answered := Ask(bufio.NewReader(strings.NewReader("1\n")), &bytes.Buffer{}, gap)
 	if err := RecordAndPerceive(s, en, gap, preferred, over, answered, "do-session", 3, now); err != nil {
 		t.Fatal(err)
 	}
