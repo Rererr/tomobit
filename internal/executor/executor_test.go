@@ -273,3 +273,24 @@ func TestRunNeverPanicsWithNoWarnOrDebugWriters(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestRunGivesTheChildNoStdin guards a property a chat depends on (ADR-0022):
+// the user types the next turn on the same terminal while a provider runs, and
+// a child wired to the parent's stdin would consume it (codex appends whatever
+// stdin offers to its prompt). The child must see an immediate EOF instead.
+func TestRunGivesTheChildNoStdin(t *testing.T) {
+	var got []recorded
+	// cat echoes whatever it reads from stdin; anything it emits would be
+	// input this process was meant to keep.
+	ex := &Executor{Adapter: &fakeAdapter{cmd: "cat", args: nil}}
+	res, err := ex.Run(context.Background(), Request{Prompt: "p"}, collect(&got))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("cat should read EOF and exit cleanly, got exit %d", res.ExitCode)
+	}
+	if len(got) != 0 {
+		t.Errorf("the child must see an empty stdin, got %v", got)
+	}
+}

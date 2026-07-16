@@ -40,7 +40,12 @@ type Event struct {
 // Request describes a single execution. The Adapter turns it into a launch
 // command; the Executor enforces the timeout.
 type Request struct {
-	Prompt         string
+	Prompt string
+	// ResumeID continues a provider thread instead of starting one
+	// (ADR-0022 Decision 2): the provider_session_id an earlier run of the
+	// same session reported. Empty starts a fresh thread. How to continue —
+	// or that the CLI cannot — is the Adapter's to know.
+	ResumeID       string
 	PermissionMode string
 	Timeout        time.Duration // 0 = no limit
 }
@@ -124,6 +129,11 @@ func (e *Executor) Run(ctx context.Context, req Request, emit Sink) (Result, err
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}
 	cmd.Stderr = e.Stderr
+	// Stdin is deliberately left unset, which hands the child os.DevNull.
+	// Never wire the parent's stdin in: a chat (ADR-0022) reads the next turn
+	// from that same terminal while a provider is running, and codex for one
+	// reads whatever stdin offers and appends it to the prompt — the child
+	// would eat the user's next task and answer it as part of this one.
 	// Forward SIGINT rather than the default SIGKILL, so the child CLI can
 	// flush its final result line before exiting.
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }

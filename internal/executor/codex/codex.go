@@ -28,8 +28,17 @@ func (a *Adapter) Name() string { return providerName }
 // --ephemeral is deliberately not used (ADR-0010 Decision 2): keeping the
 // thread means provider_session_id (thread_id) still points at Codex's own
 // session log, the original-reference pattern claude-code already uses
-// (ADR-0006 Decision 3).
+// (ADR-0006 Decision 3). ADR-0022 turns that kept thread into the chat's
+// continuity: `exec resume <id> <prompt>`.
+//
+// A resumed turn carries no --sandbox: measured on codex 0.144.4, `exec
+// resume` has no such flag — the thread keeps the sandbox it was started
+// with. Dropping it is the truthful mapping, not a silent downgrade.
 func (a *Adapter) Command(req executor.Request) (string, []string, []string) {
+	if req.ResumeID != "" {
+		return "codex", []string{"exec", "resume", req.ResumeID, req.Prompt,
+			"--json", "--skip-git-repo-check"}, nil
+	}
 	args := []string{"exec", "--json", "--skip-git-repo-check"}
 	if req.PermissionMode != "" {
 		args = append(args, "--sandbox", req.PermissionMode)

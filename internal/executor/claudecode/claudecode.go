@@ -33,8 +33,15 @@ func (a *Adapter) Name() string { return providerName }
 
 // Command builds the headless launch. stream-json requires --verbose in print
 // mode, or the CLI refuses to emit the stream.
+//
+// --resume continues the thread (ADR-0022 Decision 2). Measured on claude
+// 2.1.210: the resumed run replays no earlier turn — only the new one
+// streams — so a chat's later turns add nothing to the ledger twice.
 func (a *Adapter) Command(req executor.Request) (string, []string, []string) {
 	args := []string{"-p", req.Prompt, "--output-format", "stream-json", "--verbose"}
+	if req.ResumeID != "" {
+		args = append(args, "--resume", req.ResumeID)
+	}
 	if req.PermissionMode != "" {
 		args = append(args, "--permission-mode", req.PermissionMode)
 	}
@@ -88,9 +95,17 @@ func (a *Adapter) Translate(line []byte) ([]executor.Event, error) {
 		if s.Subtype != "init" {
 			return nil, nil
 		}
+		// provider_session_id is carried here as well as on provider.finished
+		// (codex has always done so on thread.started — the two adapters are
+		// symmetric now): the init line is the only place a run that is later
+		// cancelled ever names its thread, and a chat must be able to resume
+		// the turn the user just interrupted (ADR-0022 Decision 2).
 		return []executor.Event{{
-			Type:    executor.EventProviderSelected,
-			Payload: map[string]any{"provider": providerName, "model": s.Model},
+			Type: executor.EventProviderSelected,
+			Payload: map[string]any{
+				"provider": providerName, "model": s.Model,
+				"provider_session_id": s.SessionID,
+			},
 		}}, nil
 
 	case "assistant":
