@@ -5,11 +5,11 @@ import "testing"
 func TestRenderMonoGoldenEggFrameA(t *testing.T) {
 	want := "" +
 		"                \n" +
-		"      ▄▄▄▄      \n" +
-		"    ▄██████▄    \n" +
 		"   ▄████████▄   \n" +
-		"   ██████████   \n" +
-		"    ▀██████▀    \n"
+		"  ████████████  \n" +
+		"  ████████████  \n" +
+		"  ████████████  \n" +
+		"   ▀████████▀   \n"
 	if got := Render(StageEgg, frameA, Mono); got != want {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)
 	}
