@@ -23,7 +23,7 @@ func TestGrowthBackward(t *testing.T) {
 	if !ok {
 		t.Fatal("a stage change should speak, including regression")
 	}
-	if want := "……なんだか、少し縮んだ気がする。いまはひよこだよ"; text != want {
+	if want := "……なんだか、少し縮んだ気がする。いまはあかちゃんだよ"; text != want {
 		t.Errorf("got %q, want %q", text, want)
 	}
 }

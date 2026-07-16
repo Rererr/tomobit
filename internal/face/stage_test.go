@@ -101,14 +101,14 @@ func stageOf(t *testing.T, r *stageRepo) int {
 func TestStageLadder(t *testing.T) {
 	t.Run("S0 empty network", func(t *testing.T) {
 		if got := stageOf(t, &stageRepo{}); got != StageEgg {
-			t.Errorf("got %s, want たまご", StageName(got))
+			t.Errorf("got %s, want 毛玉", StageName(got))
 		}
 	})
 
 	t.Run("S1 below the S2 evidence gate", func(t *testing.T) {
 		r := &stageRepo{conns: []*core.Connection{capConn("cap=impl", "claude", 2, 1)}}
 		if got := stageOf(t, r); got != StageChick {
-			t.Errorf("got %s, want ひよこ", StageName(got))
+			t.Errorf("got %s, want あかちゃん", StageName(got))
 		}
 	})
 

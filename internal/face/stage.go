@@ -19,9 +19,12 @@ const (
 	StagePartner
 )
 
+// The Go constants keep their v1 bird names (StageEgg, StageChick) — they
+// are internal identifiers. The labels follow the v2 dog design
+// (SPRITES-WINDOW.md: たまご改め毛玉).
 var stageNames = [...]string{
-	StageEgg:     "たまご",
-	StageChick:   "ひよこ",
+	StageEgg:     "毛玉",
+	StageChick:   "あかちゃん",
 	StageChild:   "こども",
 	StageYouth:   "わかもの",
 	StageAdult:   "おとな",
