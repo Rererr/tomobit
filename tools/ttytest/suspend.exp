@@ -1,0 +1,49 @@
+#!/usr/bin/expect -f
+# Ctrl-Z on a real pty (ADR-0024 Decision 7), run as a shell job.
+#
+# A directly spawned binary is a session leader whose orphaned process group
+# discards stop signals (the kernel's rule, not ours), so the editor must sit
+# under an interactive shell for SIGTSTP to mean anything — which is exactly
+# the user's setup. The draft is longer than the terminal is wide, so resume
+# also exercises the repaint of a wrapped block: the case a resume-in-place
+# repaint got wrong (stale rows above the cursor survived).
+# usage: expect tools/ttytest/suspend.exp <tomobit binary> [db]
+set bin [lindex $argv 0]
+if {$bin eq ""} { puts "usage: expect suspend.exp <tomobit binary> \[db\]"; exit 2 }
+set db [lindex $argv 1]
+if {$db eq ""} { set db "/tmp/tomobit-suspend.db" }
+file delete $db $db-wal $db-shm "$db.history"
+
+set timeout 8
+log_user 0
+
+proc check {name pattern} {
+    expect {
+        -re $pattern { puts "PASS: $name" }
+        timeout      { puts "FAIL: $name (timeout waiting for $pattern)"; exit 1 }
+        eof          { puts "FAIL: $name (eof)"; exit 1 }
+    }
+}
+
+set stty_init "columns 40 rows 20"
+spawn /bin/zsh -f -i
+send "PS1='SH-> '\r"
+check "shell prompt" "SH->"
+send "$bin chat --db $db --provider human\r"
+check "chat under a shell" "話しかけて"
+
+# 2 (prompt) + 50 runes on a 40-column terminal: the block wraps to two rows.
+send [string repeat "a" 25]
+send [string repeat "b" 25]
+sleep 0.3
+send "\x1a"
+check "the job suspends" "suspended"
+send "fg\r"
+check "the wrapped draft is repainted on resume" "b{12}"
+send "!"
+check "editable after resume" "b+!"
+send "\x15"
+send "\x04"
+check "chat exits back to the shell" "SH->"
+send "exit\r"
+puts "ALL PASS"

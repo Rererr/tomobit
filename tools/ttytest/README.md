@@ -16,6 +16,11 @@ go build -o /tmp/tomobit ./cmd/tomobit
 # ラインエディタ（外部サービス不要・数秒）
 expect tools/ttytest/lineedit.exp /tmp/tomobit
 
+# Ctrl-Zサスペンド（外部サービス不要・数秒）。バイナリ直spawnはセッションリーダーになり
+# orphaned process groupへの停止シグナルをカーネルが破棄するため、対話シェルを挟んで
+# 実ユーザーと同じ「シェルのジョブ」として検証する
+expect tools/ttytest/suspend.exp /tmp/tomobit
+
 # 対話フロー全体（実claude・実ollamaを叩く。数十秒・数セント）
 export TOMOBIT_CLAUDE_ARGS="--model haiku"
 expect tools/ttytest/flow.exp /tmp/tomobit

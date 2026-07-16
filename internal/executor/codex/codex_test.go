@@ -16,6 +16,7 @@ package codex
 import (
 	"bufio"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/Rererr/tomobit/internal/executor"
@@ -188,6 +189,70 @@ func TestTranslateToolItemsKeepOnlyTheToolName(t *testing.T) {
 		}
 		if evs[0].Payload["tool"] != tool {
 			t.Errorf("%s: tool name: got %v", tool, evs[0].Payload["tool"])
+		}
+	}
+}
+
+func TestTranslateToolItemsAttachDetail(t *testing.T) {
+	cases := []struct {
+		name string
+		item string
+		want string
+	}{
+		{"command_execution", `{"type":"command_execution","command":"go build ./..."}`, "go build ./..."},
+		{"file_change", `{"type":"file_change","changes":[{"path":"internal/x.go","kind":"update"}]}`, "internal/x.go"},
+		{"web_search", `{"type":"web_search","query":"golang json stream"}`, "golang json stream"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			evs := translate(t, `{"type":"item.completed","item":`+c.item+`}`)
+			if len(evs) != 1 {
+				t.Fatalf("expected one event, got %v", evs)
+			}
+			if evs[0].Payload[executor.PayloadDetail] != c.want {
+				t.Errorf("detail: got %v, want %q", evs[0].Payload[executor.PayloadDetail], c.want)
+			}
+		})
+	}
+}
+
+// TestTranslateCommandDetailIsFirstLine keeps a multi-line command from
+// spilling past the single line the view has, symmetric with claude-code.
+func TestTranslateCommandDetailIsFirstLine(t *testing.T) {
+	evs := translate(t, `{"type":"item.completed","item":{"type":"command_execution","command":"cd /tmp\nrm -rf x"}}`)
+	if evs[0].Payload[executor.PayloadDetail] != "cd /tmp" {
+		t.Errorf("only the first command line should show: got %v", evs[0].Payload[executor.PayloadDetail])
+	}
+}
+
+// TestTranslateFileChangeDetailTruncatesPathKeepingTail caps a long path at
+// 60 runes counted as characters (a multibyte path is not cut mid-rune), and
+// keeps the tail — the filename is the information, same rule as claude-code.
+func TestTranslateFileChangeDetailTruncatesPathKeepingTail(t *testing.T) {
+	long := "internal/日本語/" + strings.Repeat("x", 76) + "file.go"
+	evs := translate(t, `{"type":"item.completed","item":{"type":"file_change","changes":[{"path":"`+long+`","kind":"add"}]}}`)
+	got, _ := evs[0].Payload[executor.PayloadDetail].(string)
+	r := []rune(got)
+	if len(r) != 60 || r[0] != '…' {
+		t.Errorf("a cut path should be 60 runes starting with an ellipsis: got %q (%d runes)", got, len(r))
+	}
+	if !strings.HasSuffix(got, "file.go") {
+		t.Errorf("the filename must survive the cut: got %q", got)
+	}
+}
+
+// TestTranslateToolItemWithoutDetailFieldsHasNoDetail pins that an item type
+// whose stream fields are absent (or an mcp_tool_call, left summary-less)
+// stays name-only — the raw item never leaks into the payload.
+func TestTranslateToolItemWithoutDetailFieldsHasNoDetail(t *testing.T) {
+	for _, item := range []string{
+		`{"type":"command_execution"}`,
+		`{"type":"file_change"}`,
+		`{"type":"mcp_tool_call","server":"fs","tool":"read"}`,
+	} {
+		evs := translate(t, `{"type":"item.completed","item":`+item+`}`)
+		if _, ok := evs[0].Payload[executor.PayloadDetail]; ok {
+			t.Errorf("%s: no detail expected, got %v", item, evs[0].Payload)
 		}
 	}
 }

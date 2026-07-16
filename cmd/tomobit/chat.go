@@ -21,6 +21,7 @@ import (
 
 	"github.com/Rererr/tomobit/internal/executor"
 	"github.com/Rererr/tomobit/internal/lineedit"
+	"github.com/Rererr/tomobit/internal/mdlite"
 	"github.com/Rererr/tomobit/internal/perceive"
 	"github.com/Rererr/tomobit/internal/store"
 	"github.com/Rererr/tomobit/internal/voice"
@@ -85,12 +86,20 @@ func cmdChat(args []string) error {
 	}
 	defer s.Close()
 
+	// History lives next to the db (ADR-0024 Decision 1), so `--db` isolates it
+	// the same way it isolates the ledger — tests never touch the real one. A
+	// read failure warns once and the chat opens anyway.
+	if err := ed.SetHistoryFile(*db+".history", os.Stderr); err != nil {
+		fmt.Fprintln(os.Stderr, "warning:", err)
+	}
+
 	c := &chat{
 		s: s, ed: ed, in: ed.Reader(), out: os.Stdout,
 		providerName: *providerName, capability: *capability,
 		permMode: *permMode, timeout: *timeout, size: *size,
 		extractor: &perceive.Ollama{URL: *url, Model: *model},
 	}
+	ed.Completer = c.complete
 	// The first screen is the companion view (ADR-0008), and its next line is
 	// the prompt (ADR-0022 Decision 4): you meet Tomo and you can talk.
 	if isTTY(os.Stdout) {
@@ -198,6 +207,76 @@ func (c *chat) command(line string) (done bool, err error) {
 	return false, nil
 }
 
+// completableCommands are what Tab completes for the leading token. /quit is
+// an alias of /exit and stays out — completing to one spelling is enough, and
+// two candidates for the same action would only block the unique-commit path.
+var completableCommands = []string{"/new", "/provider", "/cap", "/size", "/status", "/help", "/exit"}
+
+// complete is the editor's Completer (ADR-0024 Decision 4): the leading token
+// completes to a command, and the second token of /provider or /size to that
+// command's argument vocabulary — the words openTask/decide.Draws actually
+// read. Anywhere else it declines, because free-text tasks are the provider's
+// to parse, not the chat's to guess.
+func (c *chat) complete(text string, pos int) ([]string, int) {
+	r := []rune(text)
+	if pos < 0 || pos > len(r) {
+		return nil, -1
+	}
+	start := pos
+	for start > 0 && r[start-1] != ' ' {
+		start--
+	}
+	tokenIdx := 0
+	for i := 0; i < start; i++ {
+		if r[i] != ' ' && (i == 0 || r[i-1] == ' ') {
+			tokenIdx++
+		}
+	}
+	token := string(r[start:pos])
+	switch tokenIdx {
+	case 0:
+		if !strings.HasPrefix(token, "/") {
+			return nil, -1
+		}
+		return matchPrefix(completableCommands, token), start
+	case 1:
+		var vocab []string
+		switch firstWord(r) {
+		case "/provider":
+			vocab = []string{"claude-code", "codex", "human", "auto"}
+		case "/size":
+			vocab = []string{"small", "medium", "large"}
+		default:
+			return nil, -1
+		}
+		return matchPrefix(vocab, token), start
+	default:
+		return nil, -1
+	}
+}
+
+func firstWord(r []rune) string {
+	i := 0
+	for i < len(r) && r[i] == ' ' {
+		i++
+	}
+	j := i
+	for j < len(r) && r[j] != ' ' {
+		j++
+	}
+	return string(r[i:j])
+}
+
+func matchPrefix(vocab []string, prefix string) []string {
+	var out []string
+	for _, v := range vocab {
+		if strings.HasPrefix(v, prefix) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // setWiring changes one of the per-task choices. Mid-task it refuses: an
 // experience carries one provider and one capability for the whole session
 // (SCHEMA.md), so swapping either halfway would record a task that never
@@ -285,7 +364,10 @@ func (c *chat) run(prompt string) error {
 			c.threadID = id
 		}
 		v.show(ev)
-		return c.s.AppendEvent(c.sid, ev.Type, ts, ev.Payload)
+		// The ledger gets the payload without its view-only keys (ADR-0024
+		// Decision 6): tool detail is for the human watching, and recording it
+		// would spend the perception digest budget on what R3 already excludes.
+		return c.s.AppendEvent(c.sid, ev.Type, ts, executor.StripViewOnly(ev.Payload))
 	}
 
 	ex := &executor.Executor{Adapter: c.adapter, Stderr: os.Stderr, Warn: os.Stderr}
@@ -348,8 +430,9 @@ func chatUsage(w io.Writer) {
 /help             これ
 /exit             終了 (Ctrl-D も同じ)
 
-入力  ↑↓ 履歴 / Ctrl-A,E 行頭・行末 / Ctrl-W 単語削除 / Ctrl-U 全消し
-      \ + Enter で改行(貼り付けの改行はそのまま入る)
+入力  ↑↓ 履歴 / Ctrl-R 履歴検索 / Tab 補完 / Ctrl-A,E 行頭・行末
+      Ctrl-W 単語削除 / Ctrl-K 行末まで削除 / Ctrl-U 全消し / Ctrl-Y 戻す
+      Ctrl-Z 中断 / \ + Enter で改行(貼り付けの改行はそのまま入る)
 実行中の Ctrl-C はそのターンの中断 — タスクは続く
 `)
 }
@@ -443,11 +526,21 @@ func (v *turnView) show(ev executor.Event) {
 	switch ev.Type {
 	case executor.EventProviderOutput:
 		if text, ok := ev.Payload["text"].(string); ok && text != "" {
+			// Markdown-lite is display only (ADR-0024 Decision 5): the ledger
+			// records the raw text, and a pipe gets it untouched — same gate
+			// as dim, for the same reason.
+			if styled() {
+				text = mdlite.Render(text)
+			}
 			v.line(text)
 			return
 		}
 		if tool, ok := ev.Payload["tool"].(string); ok && tool != "" {
-			v.line(dim("  · " + tool))
+			s := "  · " + tool
+			if d, ok := ev.Payload[executor.PayloadDetail].(string); ok && d != "" {
+				s += " " + d
+			}
+			v.line(dim(s))
 		}
 	case executor.EventProviderFinished:
 		if c, ok := ev.Payload["cost_usd"].(float64); ok {
@@ -485,8 +578,13 @@ func (v *turnView) end(result executor.Result) {
 // (https://no-color.org/), and both are read per call — a test's stdout is not
 // a terminal, and neither is the pipe the chat's own scripted path runs in.
 func dim(s string) string {
-	if _, noColor := os.LookupEnv("NO_COLOR"); noColor || !isTTY(os.Stdout) {
+	if !styled() {
 		return s
 	}
 	return "\x1b[2m" + s + "\x1b[0m"
+}
+
+func styled() bool {
+	_, noColor := os.LookupEnv("NO_COLOR")
+	return !noColor && isTTY(os.Stdout)
 }

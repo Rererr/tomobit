@@ -1,6 +1,7 @@
 package claudecode
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Rererr/tomobit/internal/executor"
@@ -103,6 +104,106 @@ func TestTranslateToolUseKeepsOnlyTheName(t *testing.T) {
 	}
 	if _, ok := evs[0].Payload["input"]; ok {
 		t.Errorf("tool input must be dropped (digest policy): got %v", evs[0].Payload)
+	}
+}
+
+func TestTranslateToolUseAttachesDetailFromKnownInputKey(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"file_path", `{"file_path":"/src/main.go"}`, "/src/main.go"},
+		{"path", `{"path":"/src"}`, "/src"},
+		{"command", `{"command":"go test ./..."}`, "go test ./..."},
+		{"pattern", `{"pattern":"*.go"}`, "*.go"},
+		{"url", `{"url":"https://example.com"}`, "https://example.com"},
+		{"query", `{"query":"how to parse json"}`, "how to parse json"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			evs := translate(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"T","input":`+c.input+`}]}}`)
+			if len(evs) != 1 {
+				t.Fatalf("expected one event, got %v", evs)
+			}
+			if evs[0].Payload[executor.PayloadDetail] != c.want {
+				t.Errorf("detail: got %v, want %q", evs[0].Payload[executor.PayloadDetail], c.want)
+			}
+		})
+	}
+}
+
+// TestTranslateToolUseDetailPrefersFilePathOverCommand pins the priority order:
+// a tool carrying both a target path and a command shows the path.
+func TestTranslateToolUseDetailPrefersFilePathOverCommand(t *testing.T) {
+	evs := translate(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"T","input":{"command":"cat x","file_path":"/x"}}]}}`)
+	if evs[0].Payload[executor.PayloadDetail] != "/x" {
+		t.Errorf("file_path should win over command: got %v", evs[0].Payload[executor.PayloadDetail])
+	}
+}
+
+// TestTranslateToolUseDetailIsFirstLineOfCommand keeps a heredoc or a chained
+// command from spilling past the single line the view has.
+func TestTranslateToolUseDetailIsFirstLineOfCommand(t *testing.T) {
+	evs := translate(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"echo hi\nrm -rf /tmp/x"}}]}}`)
+	if evs[0].Payload[executor.PayloadDetail] != "echo hi" {
+		t.Errorf("only the first command line should show: got %v", evs[0].Payload[executor.PayloadDetail])
+	}
+}
+
+// TestTranslateToolUseDetailTruncatesPathKeepingTail caps a long path at 60
+// runes counted as characters (a multibyte path is not cut mid-rune), and
+// keeps the tail: the filename answers "where", the shared prefix of a deep
+// absolute path answers nothing.
+func TestTranslateToolUseDetailTruncatesPathKeepingTail(t *testing.T) {
+	long := "/very/long/日本語/" + strings.Repeat("x", 76) + "file.go"
+	evs := translate(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"T","input":{"file_path":"`+long+`"}}]}}`)
+	got, _ := evs[0].Payload[executor.PayloadDetail].(string)
+	r := []rune(got)
+	if len(r) != 60 || r[0] != '…' {
+		t.Errorf("a cut path should be 60 runes starting with an ellipsis: got %q (%d runes)", got, len(r))
+	}
+	if !strings.HasSuffix(got, "file.go") {
+		t.Errorf("the filename must survive the cut: got %q", got)
+	}
+}
+
+// TestTranslateToolUseDetailTruncatesCommandKeepingHead pins the other
+// direction: a command's intent is its verb, so the head survives.
+func TestTranslateToolUseDetailTruncatesCommandKeepingHead(t *testing.T) {
+	long := "git log --oneline " + strings.Repeat("x", 80)
+	evs := translate(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"`+long+`"}}]}}`)
+	got, _ := evs[0].Payload[executor.PayloadDetail].(string)
+	r := []rune(got)
+	if len(r) != 60 || r[59] != '…' {
+		t.Errorf("a cut command should be 60 runes ending in an ellipsis: got %q (%d runes)", got, len(r))
+	}
+	if !strings.HasPrefix(got, "git log --oneline") {
+		t.Errorf("the command's head must survive the cut: got %q", got)
+	}
+}
+
+func TestTranslateToolUseWithoutKnownKeyHasNoDetail(t *testing.T) {
+	evs := translate(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"T","input":{"old_string":"a","new_string":"b"}}]}}`)
+	if _, ok := evs[0].Payload[executor.PayloadDetail]; ok {
+		t.Errorf("unknown input keys should not produce a detail: got %v", evs[0].Payload)
+	}
+}
+
+// TestTranslateToolUseDetailNeverCarriesRawInput keeps ADR-0024's promise that
+// only the derived summary is added — the raw input object is still dropped
+// even when a detail is attached (SCHEMA.md R3 digest policy, unchanged).
+func TestTranslateToolUseDetailNeverCarriesRawInput(t *testing.T) {
+	evs := translate(t, `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/x","old_string":"secret"}}]}}`)
+	p := evs[0].Payload
+	if _, ok := p["input"]; ok {
+		t.Errorf("raw input must be dropped: got %v", p)
+	}
+	if _, ok := p["old_string"]; ok {
+		t.Errorf("no input field other than the derived detail may appear: got %v", p)
+	}
+	if p[executor.PayloadDetail] != "/x" {
+		t.Errorf("detail should carry only the target: got %v", p[executor.PayloadDetail])
 	}
 }
 

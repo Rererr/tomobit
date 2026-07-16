@@ -136,31 +136,54 @@ func (b *buffer) wordRight() {
 }
 
 // killToEnd deletes to the end of the current line, matching Ctrl-K in a
-// shell: on a multi-line buffer it clears the line, not everything below.
-func (b *buffer) killToEnd() {
+// shell: on a multi-line buffer it clears the line, not everything below. It
+// returns the removed text so the caller can hold it for a later yank; an
+// empty return means nothing was removed and the kill slot must stay as it was.
+func (b *buffer) killToEnd() string {
 	end := b.lineEnd(b.pos)
 	if end == b.pos {
-		return
+		return ""
 	}
+	killed := string(b.runes[b.pos:end])
 	b.runes = append(b.runes[:b.pos], b.runes[end:]...)
+	return killed
 }
 
 // clear throws the whole input away, every line of it — what Ctrl-U means in
 // zsh (kill-whole-line) and in the chat this editor imitates. Readline's
 // "kill to the start of the line" is the other reading, but after a pasted
 // multi-line block it leaves the earlier lines with no key that can finish
-// them off. Ctrl-W is still there for taking back one word at a time.
-func (b *buffer) clear() {
+// them off. Ctrl-W is still there for taking back one word at a time. The
+// removed text is returned for the yank slot, as killToEnd does.
+func (b *buffer) clear() string {
+	if len(b.runes) == 0 {
+		return ""
+	}
+	killed := string(b.runes)
 	b.runes, b.pos = nil, 0
+	return killed
 }
 
-func (b *buffer) killWord() {
+func (b *buffer) killWord() string {
 	start := b.wordLeftFrom(b.pos)
 	if start == b.pos {
-		return
+		return ""
 	}
+	killed := string(b.runes[start:b.pos])
 	b.runes = append(b.runes[:start], b.runes[b.pos:]...)
 	b.pos = start
+	return killed
+}
+
+// stackKill folds a freshly killed word into the kill slot. A backward kill
+// takes the word before the cursor, so a run of Ctrl-W (accum) prepends each
+// earlier word to keep the recovered text in reading order; a break in the run
+// starts the slot over.
+func stackKill(slot, killed string, accum bool) string {
+	if accum {
+		return killed + slot
+	}
+	return killed
 }
 
 func isSpace(r rune) bool { return unicode.IsSpace(r) }

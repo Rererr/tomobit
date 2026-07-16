@@ -719,6 +719,26 @@ func TestProviderSinkCollectsTextAcrossEventsForSplitParsing(t *testing.T) {
 	}
 }
 
+// ADR-0024 Decision 6: do's sink strips view-only keys the same way chat's
+// does — the two paths must record one shape for the same provider stream.
+func TestProviderSinkKeepsViewOnlyDetailOutOfTheLedger(t *testing.T) {
+	s := openTestStore(t)
+	sink := providerSink(s, "sess", io.Discard, nil)
+
+	if err := sink(executor.Event{Type: executor.EventProviderOutput,
+		Payload: map[string]any{"tool": "Bash", executor.PayloadDetail: "git status"}}, 1000); err != nil {
+		t.Fatal(err)
+	}
+
+	p := payloadOf(t, s, "provider.output")
+	if p["tool"] != "Bash" {
+		t.Errorf("tool name is the record: got %v", p)
+	}
+	if _, ok := p["detail"]; ok {
+		t.Errorf("view-only detail must not be recorded: %v", p)
+	}
+}
+
 // TestRunSplitNormalFlowRecordsParentAndPerSubtaskLedger exercises the happy
 // path (ADR-0023 Decision 5): the parent gets task.split and an
 // adoption-free task.finished, while each subtask is its own session, linked
