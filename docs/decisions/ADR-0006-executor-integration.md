@@ -128,6 +128,8 @@ doの成否は知覚の成否に依存しない（Deferred Perceptionをその�
 - Phase 1のdoは非対話（headless）。途中で人間の判断が要るタスクは向かず、
   最初のdogfood対象は**委任できる一発タスク**に限られる。
   対話パススルーはPhase 2以降の論点
+  → [ADR-0022](ADR-0022-chat-session.md) で回収（`tomobit chat`）。
+  この行が予告した摩擦は実使用で現れた。doは非対話の経路として残る
 - 2つ目のAdapter（codex）が入って初めてpreferenceが実データで育つ
 - doは新しいイベントを生むだけで抽出プロンプト/schemaは不変 →
   extractor_verのバンプは不要
