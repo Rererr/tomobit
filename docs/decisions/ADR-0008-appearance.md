@@ -2,7 +2,9 @@
 
 - Status: **Accepted**（Decision 2のステージ関数は [ADR-0017](ADR-0017-stage-function-calibration.md) で置換。
   Decision 4の「常駐しない・16×12・256色」は [ADR-0020](ADR-0020-face-window.md) で
-  端末レンダラ限定に縮小 — 窓レンダラは32×32 truecolorで常駐する）
+  端末レンダラ限定に縮小 — 窓レンダラは32×32 truecolorで常駐する。
+  端末レンダラ自体は [ADR-0025](ADR-0025-face-autolaunch.md) で廃止 —
+  Decision 1〜3（姿=View）は窓で生き続け、Decision 4は歴史的記録）
 - Date: 2026-07-15
 - 関連: [VISION.md](../core/VISION.md)（Growth = Connectionの質）,
   [ADR-0007](ADR-0007-curiosity-question.md)（「保存された属性は嘘をつく」の先例）,

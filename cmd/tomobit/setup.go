@@ -52,6 +52,9 @@ func cmdSetup(args []string) error {
 	if err := askOllama(in, out, &c); err != nil {
 		return err
 	}
+	if err := askFaceAutoLaunch(in, out, &c); err != nil {
+		return err
+	}
 
 	if err := config.Save(c); err != nil {
 		return fmt.Errorf("setup: %w", err)
@@ -201,6 +204,39 @@ func askOllama(in *bufio.Reader, out io.Writer, c *config.Config) error {
 		fmt.Fprintf(out, "  ollama ✓ %s が居る\n", model)
 	default:
 		fmt.Fprintf(out, "  ollama ✗ %s が居ない → `ollama pull %s`\n", model, model)
+	}
+	return nil
+}
+
+// askFaceAutoLaunch asks whether the face window auto-spawns on interactive
+// commands (ADR-0025 Decision 2). "on" stores nil, not &true: absent already
+// means on (the default), so keeping it nil avoids pinning a value that only
+// restates the default. Current state is shown so Enter keeps it, like every
+// other setup question; an unrecognized answer keeps the current value rather
+// than aborting a setup whose earlier answers are not saved yet.
+func askFaceAutoLaunch(in *bufio.Reader, out io.Writer, c *config.Config) error {
+	cur := "on(既定)"
+	if c.FaceAutoLaunch != nil {
+		if *c.FaceAutoLaunch {
+			cur = "on"
+		} else {
+			cur = "off"
+		}
+	}
+	fmt.Fprintf(out, "\n顔窓(tomobit-face)を対話起動時に自動で開く? [on/off, 現在: %s / Enterで維持] > ", cur)
+	line, err := readLine(in)
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(line) {
+	case "":
+	case "on", "y", "yes":
+		c.FaceAutoLaunch = nil
+	case "off", "n", "no":
+		no := false
+		c.FaceAutoLaunch = &no
+	default:
+		fmt.Fprintf(out, "  on か off で — 現状(%s)を維持\n", cur)
 	}
 	return nil
 }

@@ -113,3 +113,35 @@ func TestAskProfileNumberPicksCandidateAndZeroMeansInherit(t *testing.T) {
 		t.Error("Enter with nothing configured must not silently choose")
 	}
 }
+
+func TestAskFaceAutoLaunch(t *testing.T) {
+	yes := true
+
+	// "off" stores an explicit false — the user turning the window off.
+	var c config.Config
+	if err := askFaceAutoLaunch(bufio.NewReader(strings.NewReader("off\n")), &bytes.Buffer{}, &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.FaceAutoLaunch == nil || *c.FaceAutoLaunch {
+		t.Errorf("off must store explicit false: %v", c.FaceAutoLaunch)
+	}
+
+	// "on" stores nil, not &true: absent already means on (the default).
+	c = config.Config{FaceAutoLaunch: &yes}
+	if err := askFaceAutoLaunch(bufio.NewReader(strings.NewReader("on\n")), &bytes.Buffer{}, &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.FaceAutoLaunch != nil {
+		t.Errorf("on must reset to nil (default on), not pin a value: %v", *c.FaceAutoLaunch)
+	}
+
+	// Enter keeps the current choice untouched.
+	no := false
+	c = config.Config{FaceAutoLaunch: &no}
+	if err := askFaceAutoLaunch(bufio.NewReader(strings.NewReader("\n")), &bytes.Buffer{}, &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.FaceAutoLaunch == nil || *c.FaceAutoLaunch {
+		t.Errorf("Enter must keep the current choice (off): %v", c.FaceAutoLaunch)
+	}
+}

@@ -1,7 +1,9 @@
-// Package face renders Tomo's growth stage, mood, and sprite as a View over
-// the Knowledge Network (ADR-0008). Nothing here is stored: the same
-// connections always reduce to the same stage and mood, and a changed world
-// can walk a stage back down — that is honesty, not a bug.
+// Package face derives Tomo's growth stage and mood as a View over the
+// Knowledge Network (ADR-0008). Nothing here is stored: the same connections
+// always reduce to the same stage and mood, and a changed world can walk a
+// stage back down — that is honesty, not a bug. The stage/mood these produce
+// feed both the terminal's `Tomo · <stage>` line and the desktop window's
+// sprite (ADR-0025); the terminal sprite that used to live here is gone.
 package face
 
 import (

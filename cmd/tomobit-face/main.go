@@ -4,14 +4,17 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/hajimehoshi/ebiten/v2"
 
 	"github.com/Rererr/tomobit/internal/config"
+	"github.com/Rererr/tomobit/internal/facelock"
 	"github.com/Rererr/tomobit/internal/facewin"
 )
 
@@ -37,6 +40,21 @@ func run(args []string) error {
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)
+
+	// One mascot per machine (ADR-0025 Decision 2): if another face already
+	// holds the lock, exit quietly — a manual second launch is a no-op, not an
+	// error to report. The lock stays held for this whole process (the OS frees
+	// it on exit or crash), so it is never released here.
+	lock, held := holdFaceLock(os.Stderr)
+	if held {
+		return nil
+	}
+	if lock != nil {
+		// Keep the reference alive for the process's life: dropping it would let
+		// the finalizer close the fd and silently drop the flock. The deferred
+		// Release both pins it and frees it explicitly when the window closes.
+		defer lock.Release()
+	}
 
 	// Before anything can print: our own writers follow the os.Stderr var,
 	// so the font fallback warning and exit errors survive the rerouting.
@@ -77,6 +95,29 @@ func run(args []string) error {
 	return ebiten.RunGameWithOptions(g, &ebiten.RunGameOptions{
 		ScreenTransparent: !*plain,
 	})
+}
+
+// holdFaceLock takes the machine-wide face lock (ADR-0025 Decision 2). The
+// returned Lock must stay referenced for the process's life — its fd holds the
+// flock. held=true means another face already owns the lock, so this one
+// should exit quietly. A non-held failure (a broken ~/.tomobit) is best-effort:
+// warn and run anyway, since the lock is a courtesy guard, not a gate on the
+// window ever opening.
+func holdFaceLock(warn io.Writer) (lock *facelock.Lock, held bool) {
+	path, err := facelock.DefaultPath()
+	if err != nil {
+		fmt.Fprintln(warn, "warning: face lock:", err)
+		return nil, false
+	}
+	lock, err = facelock.Acquire(path)
+	if err != nil {
+		if errors.Is(err, facelock.ErrHeld) {
+			return nil, true
+		}
+		fmt.Fprintln(warn, "warning: face lock:", err)
+		return nil, false
+	}
+	return lock, false
 }
 
 // defaultDB mirrors cmd/tomobit's --db default: $TOMOBIT_DB, then the

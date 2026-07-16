@@ -170,8 +170,10 @@ func usage() {
 	fmt.Println(`tomobit — a living harness that grows with you
 
 usage:
-  tomobit          (no args) 相棒ビュー(アバター・気分・一言・Connection)を出して
-                   そのまま対話に入る。パイプ・リダイレクトなら見せて終わる
+  tomobit          (no args) 相棒ビュー(ステージ・気分・一言・Connection)を出して
+                   そのまま対話に入る。対話起動時は顔窓(tomobit-face)も開く
+                   (config face_auto_launch / env TOMOBIT_FACE=0 で止める)。
+                   姿は窓、声とテキストは端末。パイプ・リダイレクトなら見せて終わる
   tomobit chat     [--cap implement] [--provider claude-code|codex|human|auto]
                    [--permission-mode <mode>] [--timeout 0] [--size ...] ["<prompt>"]
                    対話セッション(ADR-0022)。1つの会話 = 1つのタスク = 1つの経験。
@@ -191,7 +193,7 @@ usage:
   tomobit perceive [--model qwen3:8b] [--url http://localhost:11434]
   tomobit rebuild
   tomobit status   same as no args
-  tomobit setup    対話式でこの機械の配線を決める(claude profile / ollama)。
+  tomobit setup    対話式でこの機械の配線を決める(claude profile / ollama / 顔窓)。
                    再実行すれば診断を兼ねる。書き先は ~/.tomobit/config.json
 
 companion markers: "?" = a connection is questioned / "z" = dormant (long quiet)
@@ -200,7 +202,8 @@ common flags:
   --db <path>   database file (default ~/.tomobit/tomobit.db, or $TOMOBIT_DB)
 
 config precedence: flag > env > ~/.tomobit/config.json
-  env overrides: TOMOBIT_DB, TOMOBIT_CLAUDE_CONFIG_DIR, TOMOBIT_CLAUDE_ARGS`)
+  env overrides: TOMOBIT_DB, TOMOBIT_CLAUDE_CONFIG_DIR, TOMOBIT_CLAUDE_ARGS
+                 TOMOBIT_FACE=0|1 (顔窓の自動起動を止める / 強制する)`)
 }
 
 func dbFlag(fs *flag.FlagSet) *string {
@@ -299,6 +302,9 @@ func cmdDo(args []string) error {
 			return err
 		}
 	}
+	// After validation, like chat: a `do` that fails its args (bad provider,
+	// bad --split combo) must not leave a detached window behind.
+	maybeLaunchFace(*db)
 	stdin := bufio.NewReader(os.Stdin)
 	if err := ensureClaudeProfile(stdin, *providerName); err != nil {
 		return err
@@ -1148,13 +1154,15 @@ func cmdRebuild(args []string) error {
 	return nil
 }
 
-// cmdStatus is the companion view (ADR-0008 Consequences): avatar, mood, one
-// spoken line, then the existing connections table. It backs both
-// `tomobit status` and bare `tomobit`.
+// cmdStatus is the companion view (ADR-0008 Consequences): the `Tomo · <stage>`
+// line with its mood marker, one spoken line, then the connections table — the
+// avatar itself now lives in the desktop window (ADR-0025). It backs both
+// `tomobit status` and bare `tomobit`, and spawns the face window on a TTY.
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	db := dbFlag(fs)
 	fs.Parse(args)
+	maybeLaunchFace(*db)
 	s, err := openStore(*db)
 	if err != nil {
 		return err
@@ -1176,12 +1184,12 @@ func showStatus(s *store.Store) error {
 		return err
 	}
 
-	// A pipe or redirect wants the machine-readable table only — no avatar,
-	// no speech (ADR-0008 Decision 4: "the avatar only draws on a TTY").
+	// A pipe or redirect wants the machine-readable table only — no speech
+	// (ADR-0008 Decision 4). The avatar is gone (ADR-0025): the desktop window
+	// draws the face now, and the `Tomo · <stage>` text line below carries
+	// growth in the terminal.
 	tty := isTTY(os.Stdout)
 	if tty {
-		printAvatar(os.Stdout, stage)
-		fmt.Println() // speaker separation: a blank line before Tomo's own line
 		greetIfReturned(os.Stdout, s, conns, now)
 	}
 	if len(conns) == 0 {
@@ -1245,21 +1253,6 @@ func greetIfReturned(w io.Writer, s *store.Store, conns []*core.Connection, now 
 		map[string]any{"absent_ms": now - last}); err != nil {
 		fmt.Fprintln(os.Stderr, "okaeri: recording failed:", err)
 	}
-}
-
-// printAvatar draws the sprite (ADR-0008 Decision 4): a short animation in
-// color, or a single static frame under NO_COLOR — never cursor-control
-// bytes on a terminal that was told not to expect color.
-func printAvatar(w io.Writer, stage int) {
-	// NO_COLOR is "present", not "non-empty" (https://no-color.org/): an
-	// empty NO_COLOR= must still disable color, so this checks presence via
-	// LookupEnv rather than Getenv's != "".
-	if _, noColor := os.LookupEnv("NO_COLOR"); noColor {
-		// 0 is face's first sprite frame (face.frameA is unexported).
-		io.WriteString(w, face.Render(stage, 0, face.Mono))
-		return
-	}
-	face.Animate(w, stage, face.Color256)
 }
 
 // scopeColumnWidth and targetColumnWidth cap the TTY table's SCOPE/TARGET
