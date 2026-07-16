@@ -9,14 +9,19 @@ import (
 )
 
 // Perceive selects the one line for a perceive boundary (`do`'s end or
-// `tomobit perceive`), priority growth > insight > murmur — ADR-0009
-// Decision 3, "rarest and most informative first". Centralizing the branch
-// here keeps callers from re-deriving the priority themselves.
-func Perceive(stageBefore, stageAfter int, newSplits []*core.Connection, exps []*core.Experience) (text string, ok bool) {
+// `tomobit perceive`), priority growth > insight > miss-reaction > murmur —
+// ADR-0009 Decision 3, "rarest and most informative first", with ADR-0019
+// Decision 1's graded surprise slotted above the mere murmur. Centralizing
+// the branch here keeps callers from re-deriving the priority themselves.
+// maxExcess is the batch's sharpest recorded excess surprisal (0 = none).
+func Perceive(stageBefore, stageAfter int, newSplits []*core.Connection, exps []*core.Experience, maxExcess float64) (text string, ok bool) {
 	if text, ok := Growth(stageBefore, stageAfter); ok {
 		return text, ok
 	}
 	if text, ok := Insight(newSplits); ok {
+		return text, ok
+	}
+	if text, ok := Missed(maxExcess); ok {
 		return text, ok
 	}
 	return Murmur(exps)

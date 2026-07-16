@@ -366,3 +366,100 @@ func TestTruncateIsRuneSafeAcrossMultibyteCharacters(t *testing.T) {
 		t.Errorf("truncated string should end with an ellipsis: got %q", got)
 	}
 }
+
+// TestAutoDecideRecordsReplayableSeed (ADR-0012 Decision 5): the decision
+// audit lands in events with the seed as a string — UnixNano does not fit
+// JSON's exact float64 integers, and a rounded seed cannot replay.
+func TestAutoDecideRecordsReplayableSeed(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.AppendEvent("sess", "task.started", 1, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	dec, err := autoDecide(s, "sess", "implement", "large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := providers[dec.Provider]; !ok && dec.Provider != "human" {
+		t.Fatalf("decided unregistered provider %q", dec.Provider)
+	}
+	if dec.N != 5 {
+		t.Errorf("size=large should decide with n=5, got %d", dec.N)
+	}
+
+	evs, err := s.EventsBySession("sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decided map[string]any
+	for _, e := range evs {
+		if e.Type == "tomo.decided" {
+			decided = e.Payload
+		}
+	}
+	if decided == nil {
+		t.Fatal("no tomo.decided event recorded")
+	}
+	seed, ok := decided["seed"].(string)
+	if !ok || seed == "" {
+		t.Fatalf("seed must be a non-empty string, got %v", decided["seed"])
+	}
+	if decided["provider"] != dec.Provider {
+		t.Errorf("payload provider %v != decision %q", decided["provider"], dec.Provider)
+	}
+	// Every registered adapter plus human (ADR-0018 Decision 2) is audited.
+	if cands, ok := decided["candidates"].([]any); !ok || len(cands) != len(providers)+1 {
+		t.Errorf("payload should audit every candidate, got %v", decided["candidates"])
+	}
+}
+
+// TestGreetIfReturned (ADR-0019 Decision 2): three quiet days make a
+// return; the greeting names the island whose confidence faded the most,
+// and the recorded tomo.greeted closes the gap so one return greets once.
+func TestGreetIfReturned(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := int64(1_800_000_000_000)
+	last := now - 30*24*3600*1000 // a month of silence
+	if err := s.AppendEvent("old", "task.finished", last, nil); err != nil {
+		t.Fatal(err)
+	}
+	conns := []*core.Connection{{
+		Kind: core.ConnCapability, ScopeKey: "lang=go", Target: "claude",
+		Alpha: 11, Beta: 1, LastUpdate: last, BornTS: last,
+	}}
+
+	var out bytes.Buffer
+	greetIfReturned(&out, s, conns, now)
+	if !strings.Contains(out.String(), "おかえり") || !strings.Contains(out.String(), "go") {
+		t.Errorf("want an okaeri naming the faded island, got %q", out.String())
+	}
+
+	out.Reset()
+	greetIfReturned(&out, s, conns, now+1000)
+	if out.Len() != 0 {
+		t.Errorf("the same return must greet once, got %q", out.String())
+	}
+
+	// A short gap is not an absence.
+	s2, err := store.Open(filepath.Join(t.TempDir(), "t2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if err := s2.AppendEvent("x", "task.finished", now-3600*1000, nil); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	greetIfReturned(&out, s2, nil, now)
+	if out.Len() != 0 {
+		t.Errorf("an hour is no absence, got %q", out.String())
+	}
+}

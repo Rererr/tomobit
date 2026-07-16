@@ -298,6 +298,47 @@ func TestApplySplitsOnTheDistinguishingTokenAndBornsChildWithHistory(t *testing.
 	}
 }
 
+// TestSplitChildInheritsMeanOnlyPrior (ADR-0013 Decision 1): the child's
+// prior is Beta(μ·m₀, (1−μ)·m₀) — the parent's opinion at fixed baby mass.
+// 平均だけ継ぎ、確信は継がない。
+func TestSplitChildInheritsMeanOnlyPrior(t *testing.T) {
+	r := newFakeRepo()
+	en := &Engine{Repo: r}
+	childKey := NewScope("cap=impl", "lang=rust").Key()
+	parentKey := NewScope("cap=impl").Key()
+
+	var child *Connection
+	var triggerTS int64
+	for _, e := range splitScenario() {
+		r.exps = append(r.exps, e)
+		if err := en.Apply(e); err != nil {
+			t.Fatal(err)
+		}
+		if c, _ := r.GetConnection(ConnCapability, childKey, "claude"); c != nil {
+			child = c
+			triggerTS = e.TS
+			break
+		}
+	}
+	if child == nil {
+		t.Fatal("split never produced a child connection")
+	}
+
+	almostEqual(t, child.PriorA+child.PriorB, InheritM0, 1e-9,
+		"child prior mass is exactly m₀")
+	parent, _ := r.GetConnection(ConnCapability, parentKey, "claude")
+	mu := parent.Mean(triggerTS)
+	almostEqual(t, child.PriorA, mu*InheritM0, 1e-9,
+		"child prior mean is the parent's posterior mean at split time")
+	if mu <= 0.5 {
+		t.Fatalf("scenario broken: parent should still lean success, mean=%v", mu)
+	}
+	// Forgetting sinks the child back to the parent's opinion, not to 0.5
+	// (Decision 2: 継承こそがbackoff).
+	almostEqual(t, child.Mean(triggerTS+1000*HalfLifeMs), mu, 1e-9,
+		"fully decayed child returns to inherited μ")
+}
+
 func TestApplyDoesNotSplitWhenNoTokenJustifiesIt(t *testing.T) {
 	r := newFakeRepo()
 	en := &Engine{Repo: r}
@@ -542,4 +583,40 @@ func snapshotLedger(r *fakeRepo) map[string]LedgerEntry {
 		out[k] = *e
 	}
 	return out
+}
+
+// TestApplyFeedsBothBetTargets (ADR-0014 Decision 1): one execution
+// experience with a plan feeds two ledgers — the provider's and the plan's —
+// with the same birth, observation, and surprise machinery.
+func TestApplyFeedsBothBetTargets(t *testing.T) {
+	r := newFakeRepo()
+	en := &Engine{Repo: r}
+	exp := execExp("e1", 500, "claude", map[string]string{"cap": "impl"}, Outcome{Adopted: "as-is"})
+	exp.Plan = "implement>test"
+	r.exps = []*Experience{exp}
+	if err := en.Apply(exp); err != nil {
+		t.Fatal(err)
+	}
+
+	prov, _ := r.GetConnection(ConnCapability, "cap=impl", "claude")
+	if prov == nil {
+		t.Fatal("provider connection missing")
+	}
+	pl, _ := r.GetConnection(ConnPlan, "cap=impl", "implement>test")
+	if pl == nil {
+		t.Fatal("plan connection missing")
+	}
+	almostEqual(t, pl.Alpha, PriorAlpha+1.0, 1e-12, "plan observed the success")
+	if led, _ := r.LedgerFor(ConnPlan, "cap=impl", "implement>test"); len(led) != 1 {
+		t.Errorf("plan surprise ledger should have one entry, got %d", len(led))
+	}
+
+	// A plan-less experience touches only the provider side.
+	plain := execExp("e2", 600, "claude", map[string]string{"cap": "impl"}, Outcome{Adopted: "as-is"})
+	r.exps = append(r.exps, plain)
+	if err := en.Apply(plain); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := r.GetConnection(ConnPlan, "cap=impl", "implement>test")
+	almostEqual(t, got.Alpha, PriorAlpha+1.0, 1e-12, "plan posterior untouched by plan-less run")
 }

@@ -18,6 +18,12 @@ const (
 	// persistence is cheap).
 	ThetaSplit = 3.0
 	ThetaMerge = 0.0
+
+	// InheritM0: the fixed mass m₀ a split child's inherited prior carries
+	// (ADR-0013 Decision 1 — 「新入りの謙虚さ」の量). The parent may be a
+	// thousand-battle veteran; the child is born an m₀-baby whose first
+	// impression is the parent's opinion.
+	InheritM0 = 2.0
 )
 
 // DecayFactor returns 2^(-Δt/halflife); 1 when to <= from.
@@ -28,29 +34,33 @@ func DecayFactor(fromMs, toMs int64) float64 {
 	return math.Exp2(-float64(toMs-fromMs) / float64(HalfLifeMs))
 }
 
-// PosteriorAt applies lazy decay: pseudo-counts shrink toward the prior.
-// The stored (alpha, beta) are raw values anchored at lastUpdate.
-func PosteriorAt(alpha, beta float64, lastUpdate, nowMs int64) (a, b float64) {
-	f := DecayFactor(lastUpdate, nowMs)
-	return PriorAlpha + (alpha-PriorAlpha)*f, PriorBeta + (beta-PriorBeta)*f
+// PosteriorAt applies lazy decay: pseudo-counts shrink toward the
+// connection's own prior (ADR-0013: the sink is the family memory, not a
+// fixed Beta(1,1)). The stored (alpha, beta) are raw values anchored at
+// lastUpdate.
+func (c *Connection) PosteriorAt(nowMs int64) (a, b float64) {
+	pa, pb := c.Prior()
+	f := DecayFactor(c.LastUpdate, nowMs)
+	return pa + (c.Alpha-pa)*f, pb + (c.Beta-pb)*f
 }
 
 // Mean of the decayed posterior at nowMs.
 func (c *Connection) Mean(nowMs int64) float64 {
-	a, b := PosteriorAt(c.Alpha, c.Beta, c.LastUpdate, nowMs)
+	a, b := c.PosteriorAt(nowMs)
 	return a / (a + b)
 }
 
-// Evidence is the decayed pseudo-count in excess of the prior.
+// Evidence is the decayed pseudo-count in excess of the connection's prior.
 func (c *Connection) Evidence(nowMs int64) float64 {
-	a, b := PosteriorAt(c.Alpha, c.Beta, c.LastUpdate, nowMs)
-	return a + b - PriorAlpha - PriorBeta
+	pa, pb := c.Prior()
+	a, b := c.PosteriorAt(nowMs)
+	return a + b - pa - pb
 }
 
 // Observe folds one weighted outcome into the posterior: decay to ts,
 // then α += y, β += 1−y.
 func (c *Connection) Observe(y float64, tsMs int64) {
-	a, b := PosteriorAt(c.Alpha, c.Beta, c.LastUpdate, tsMs)
+	a, b := c.PosteriorAt(tsMs)
 	c.Alpha = a + y
 	c.Beta = b + (1 - y)
 	// LastUpdate is the decay anchor and must stay monotonic: an out-of-order

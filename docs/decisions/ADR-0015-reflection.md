@@ -86,3 +86,19 @@ Learning Realityとして記帳される（experiences kind='reflection'）。
 - 実装ノブ: 予算初期値（1日1つ）、逆転検出のヒステリシス幅、
   反応の選択肢の文言（voice管轄）
 - 残るOpen Question: 反応の入力UI（質問と同じCLI対話形か）
+- 実装追記（2026-07-16、`internal/reflection`）:
+  - 反応UIは質問と同じCLI対話形で確定（doとperceiveの境界、TTYのみ。
+    OQ解消）。逆転ヒステリシス幅=0.1（事後平均差）
+  - 語りの言語化はv1では**voiceの決定的テンプレート**。LLMの座席
+    （Decision 4）は予約のまま — 鏡がOllamaの起動に依存して黙るのは
+    器官として脆いため。LLMによる磨き上げは後続
+  - 反応の記帳形: `experiences kind='reflection'`、context=対象Connectionの
+    scope、outcomeに `insight`（型）と `reaction` を持つ。insightを
+    contextトークンにしない理由: Split判定の候補語彙に混入し、鏡の帳簿で
+    能力の世界が分割され得るため。Engine.Applyはreflection経験で
+    **Connectionを誕生させない**（既存の一致にのみ流れる）
+  - 選球眼の重み: 意外=1・それ違う=1（訂正を引き出したのは鏡の仕事 —
+    内容への罰はverdict経由で別に流れる）・知ってた=0
+  - 「それ違う」= `verdict: down` を同経験に載せ、通常のApply経路で
+    該当Connectionへ（ADR-0003 第2層と同重み・rebuild安全）
+  - トリガーは5種（ADR-0019 Decision 4の再知覚を含む）

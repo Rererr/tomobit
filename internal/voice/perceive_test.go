@@ -90,25 +90,25 @@ func TestPerceivePriority(t *testing.T) {
 	exp := &core.Experience{Context: map[string]string{"lang": "rust"}}
 
 	t.Run("growth outranks insight and murmur", func(t *testing.T) {
-		text, ok := Perceive(face.StageChick, face.StageChild, []*core.Connection{child}, []*core.Experience{exp})
+		text, ok := Perceive(face.StageChick, face.StageChild, []*core.Connection{child}, []*core.Experience{exp}, 0)
 		if !ok || !strings.Contains(text, "育った") {
 			t.Errorf("growth should win, got %q ok=%v", text, ok)
 		}
 	})
 	t.Run("insight outranks murmur", func(t *testing.T) {
-		text, ok := Perceive(face.StageChick, face.StageChick, []*core.Connection{child}, []*core.Experience{exp})
+		text, ok := Perceive(face.StageChick, face.StageChick, []*core.Connection{child}, []*core.Experience{exp}, 0)
 		if !ok || !strings.Contains(text, "勝手が違う") {
 			t.Errorf("insight should win, got %q ok=%v", text, ok)
 		}
 	})
 	t.Run("murmur is the fallback", func(t *testing.T) {
-		text, ok := Perceive(face.StageChick, face.StageChick, nil, []*core.Experience{exp})
+		text, ok := Perceive(face.StageChick, face.StageChick, nil, []*core.Experience{exp}, 0)
 		if !ok || !strings.Contains(text, "経験にしたよ") {
 			t.Errorf("murmur should win, got %q ok=%v", text, ok)
 		}
 	})
 	t.Run("no signal is silent", func(t *testing.T) {
-		if _, ok := Perceive(face.StageChick, face.StageChick, nil, nil); ok {
+		if _, ok := Perceive(face.StageChick, face.StageChick, nil, nil, 0); ok {
 			t.Error("no growth, insight, or murmur must not speak")
 		}
 	})
@@ -139,4 +139,28 @@ func TestNewSplitsIgnoresUnchangedConnections(t *testing.T) {
 	if splits := NewSplits(before, before); len(splits) != 0 {
 		t.Errorf("an unchanged snapshot must yield no splits, got %v", splits)
 	}
+}
+
+// TestPerceiveMissReaction (ADR-0019 Decision 1): the graded surprise line
+// outranks the murmur but yields to growth and insight.
+func TestPerceiveMissReaction(t *testing.T) {
+	exp := &core.Experience{Context: map[string]string{"lang": "rust"}}
+	t.Run("big miss speaks the rethink line", func(t *testing.T) {
+		text, ok := Perceive(face.StageChick, face.StageChick, nil, []*core.Experience{exp}, 1.5)
+		if !ok || !strings.Contains(text, "意外だった") {
+			t.Errorf("big surprise should speak, got %q ok=%v", text, ok)
+		}
+	})
+	t.Run("small miss shrugs", func(t *testing.T) {
+		text, ok := Perceive(face.StageChick, face.StageChick, nil, []*core.Experience{exp}, 0.4)
+		if !ok || !strings.Contains(text, "たまには") {
+			t.Errorf("small surprise should shrug, got %q ok=%v", text, ok)
+		}
+	})
+	t.Run("calibrated batch falls through to murmur", func(t *testing.T) {
+		text, ok := Perceive(face.StageChick, face.StageChick, nil, []*core.Experience{exp}, 0.05)
+		if !ok || !strings.Contains(text, "経験にしたよ") {
+			t.Errorf("no surprise should murmur, got %q ok=%v", text, ok)
+		}
+	})
 }

@@ -45,31 +45,57 @@ func (en *Engine) Apply(exp *Experience) error {
 	if !ok {
 		return nil // no outcome signal (e.g. cancelled) — nothing to learn
 	}
-	kind, target := exp.ConnKind(), exp.Target()
-	if target == "" || target == "~" {
-		return nil
-	}
 	tokens := exp.Tokens()
 	if len(tokens) == 0 {
 		return nil
 	}
 
-	// Born: coarse granularity only (ADR-0001) — one single-token
-	// connection per attribute. Finer scopes exist only through Split.
-	for _, t := range tokens {
-		key := NewScope(t).Key()
-		c, err := en.Repo.GetConnection(kind, key, target)
-		if err != nil {
+	// Second bet target (ADR-0014 Decision 1): the same experience also
+	// feeds the plan's ledger — same birth, same surprise, same judgment.
+	// The attribution blur between plan and provider is the ADR's
+	// documented weakness, kept small by the menu cap and decay.
+	if exp.Kind == KindExecution && exp.Plan != "" {
+		if err := en.applyTo(ConnPlan, exp.Plan, exp, y, tokens); err != nil {
 			return err
 		}
-		if c == nil {
-			c = &Connection{
-				Kind: kind, ScopeKey: key, Target: target,
-				Alpha: PriorAlpha, Beta: PriorBeta,
-				LastUpdate: exp.TS, BornTS: exp.TS,
-			}
-			if err := en.Repo.UpsertConnection(c); err != nil {
+	}
+
+	kind, target := exp.ConnKind(), exp.Target()
+	if target == "" || target == "~" {
+		return nil
+	}
+	return en.applyTo(kind, target, exp, y, tokens)
+}
+
+// applyTo folds one weighted outcome into every connection of one
+// (kind, target) bet: birth at granularity 1, surprise ledger, posterior
+// update, then judgment.
+func (en *Engine) applyTo(kind, target string, exp *Experience, y float64, tokens []string) error {
+
+	// Born: coarse granularity only (ADR-0001) — one single-token
+	// connection per attribute. Finer scopes exist only through Split. A
+	// reflection reaction (ADR-0015) skips this: 「それ違う」 is feedback on
+	// knowledge that already exists, and the mirror's bookkeeping must never
+	// birth capability structure of its own.
+	if exp.Kind != KindReflection {
+		for _, t := range tokens {
+			key := NewScope(t).Key()
+			c, err := en.Repo.GetConnection(kind, key, target)
+			if err != nil {
 				return err
+			}
+			if c == nil {
+				// Parentless birth: the prior is the blank Beta(1,1) (ADR-0003;
+				// ADR-0013 Decision 4 keeps it as the no-ancestor initial value).
+				c = &Connection{
+					Kind: kind, ScopeKey: key, Target: target,
+					Alpha: PriorAlpha, Beta: PriorBeta,
+					PriorA: PriorAlpha, PriorB: PriorBeta,
+					LastUpdate: exp.TS, BornTS: exp.TS,
+				}
+				if err := en.Repo.UpsertConnection(c); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -218,11 +244,23 @@ func (en *Engine) split(c *Connection, nowMs int64) error {
 			return nil
 		}
 
+		// Inherited prior (ADR-0013 Decision 1): the parent's posterior mean
+		// at split time, scaled to the fixed mass m₀ — 平均だけ継ぎ、確信は
+		// 継がない。質量は証拠が運ぶ. This is also the whole backoff story
+		// (Decision 2): coarse knowledge flows into the child exactly once,
+		// at birth, and decay later sinks the child back to this μ.
+		mu := c.Mean(nowMs)
+		priorA, priorB := mu*InheritM0, (1-mu)*InheritM0
+
 		// Born with History: replay every matching experience into the child
-		// (ADR-0001/0002). The child is born already knowing.
+		// (ADR-0001/0002). The child is born already knowing. Replay keeps
+		// the original timestamps (ADR-0013 Decision 3: 元の日付で数え直す)
+		// via Observe(y, e.TS) — the same arithmetic Rebuild runs, so the
+		// invariant "child (α,β) right after Split == rebuild from the same
+		// experiences" holds by construction.
 		child := &Connection{
 			Kind: c.Kind, ScopeKey: childScope.Key(), Target: c.Target,
-			Alpha: PriorAlpha, Beta: PriorBeta,
+			Alpha: priorA, Beta: priorB, PriorA: priorA, PriorB: priorB,
 			LastUpdate: 0, BornTS: nowMs, ParentKey: c.ScopeKey,
 		}
 		for _, e := range exps {
@@ -286,7 +324,7 @@ func (en *Engine) matchingExperiences(kind, target string, scope Scope, nowMs in
 		if e.TS > nowMs {
 			continue
 		}
-		if e.ConnKind() != kind || e.Target() != target {
+		if !experienceMatches(e, kind, target) {
 			continue
 		}
 		if scope.SubsetOf(e.Tokens()) {
@@ -294,6 +332,16 @@ func (en *Engine) matchingExperiences(kind, target string, scope Scope, nowMs in
 		}
 	}
 	return out, nil
+}
+
+// experienceMatches reports whether e is evidence for the (kind, target)
+// bet. Plan connections read the plan attribute (ADR-0014); everything else
+// keeps the ConnKind/Target mapping.
+func experienceMatches(e *Experience, kind, target string) bool {
+	if kind == ConnPlan {
+		return e.Kind == KindExecution && e.Plan == target
+	}
+	return e.ConnKind() == kind && e.Target() == target
 }
 
 // Rebuild wipes the projections and replays experiences_current in order —

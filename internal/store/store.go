@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 
@@ -38,7 +39,7 @@ CREATE TABLE IF NOT EXISTS experiences (
   id              TEXT    PRIMARY KEY,
   session_id      TEXT    NOT NULL,
   ts              INTEGER NOT NULL,
-  kind            TEXT    NOT NULL CHECK (kind IN ('execution','preference')),
+  kind            TEXT    NOT NULL CHECK (kind IN ('execution','preference','reflection')),
   extractor_ver   INTEGER NOT NULL,
   extractor_model TEXT    NOT NULL,
   context         TEXT    NOT NULL CHECK (json_valid(context)),
@@ -61,7 +62,7 @@ CREATE VIEW IF NOT EXISTS experiences_current AS
   );
 
 CREATE TABLE IF NOT EXISTS connections (
-  kind        TEXT    NOT NULL CHECK (kind IN ('capability','preference')),
+  kind        TEXT    NOT NULL CHECK (kind IN ('capability','preference','plan')),
   scope_key   TEXT    NOT NULL,
   target      TEXT    NOT NULL,
   alpha       REAL    NOT NULL,
@@ -69,6 +70,8 @@ CREATE TABLE IF NOT EXISTS connections (
   last_update INTEGER NOT NULL,
   born_ts     INTEGER NOT NULL,
   parent_key  TEXT,
+  prior_alpha REAL    NOT NULL DEFAULT 1,
+  prior_beta  REAL    NOT NULL DEFAULT 1,
   PRIMARY KEY (kind, scope_key, target)
 );
 
@@ -112,7 +115,131 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	// Widen pre-ADR-0013 databases in place: connections is a projection, so
+	// the DEFAULT 1 backfill is at worst stale until the next rebuild.
+	for _, col := range []string{"prior_alpha", "prior_beta"} {
+		if err := ensureColumn(db, "connections", col, "REAL NOT NULL DEFAULT 1"); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migrate %s: %w", col, err)
+		}
+	}
+	if err := ensureReflectionKind(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate experiences kind: %w", err)
+	}
+	if err := ensureColumn(db, "experiences", "plan", "TEXT"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate experiences plan: %w", err)
+	}
+	if err := ensurePlanKind(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate connections kind: %w", err)
+	}
+	// SQLite expands a view's SELECT * at creation time, so a view created
+	// before a column widening would hide the new column forever. Recreate.
+	if _, err := db.Exec(`DROP VIEW IF EXISTS experiences_current`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate view: %w", err)
+	}
+	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate view: %w", err)
+	}
 	return &Store{DB: db}, nil
+}
+
+// ensurePlanKind rebuilds a pre-ADR-0014 connections table whose CHECK
+// rejects kind='plan'. connections is a projection, so this could just drop
+// and rebuild — but copying keeps the live view warm until the next rebuild.
+func ensurePlanKind(db *sql.DB) error {
+	var ddl string
+	err := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='connections'`).Scan(&ddl)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(ddl, "'plan'") {
+		return nil
+	}
+	_, err = db.Exec(`
+		BEGIN IMMEDIATE;
+		CREATE TABLE connections_new (
+		  kind        TEXT    NOT NULL CHECK (kind IN ('capability','preference','plan')),
+		  scope_key   TEXT    NOT NULL,
+		  target      TEXT    NOT NULL,
+		  alpha       REAL    NOT NULL,
+		  beta        REAL    NOT NULL,
+		  last_update INTEGER NOT NULL,
+		  born_ts     INTEGER NOT NULL,
+		  parent_key  TEXT,
+		  prior_alpha REAL    NOT NULL DEFAULT 1,
+		  prior_beta  REAL    NOT NULL DEFAULT 1,
+		  PRIMARY KEY (kind, scope_key, target)
+		);
+		INSERT INTO connections_new SELECT * FROM connections;
+		DROP TABLE connections;
+		ALTER TABLE connections_new RENAME TO connections;
+		COMMIT;`)
+	return err
+}
+
+// ensureReflectionKind rebuilds a pre-ADR-0015 experiences table whose CHECK
+// still rejects kind='reflection'. SQLite cannot alter a CHECK in place, so
+// this is the copy-rename dance — run inside one transaction, with the
+// append-only triggers and the experiences_current view recreated after.
+// Truth rows are copied verbatim; nothing is reinterpreted.
+func ensureReflectionKind(db *sql.DB) error {
+	var ddl string
+	err := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='experiences'`).Scan(&ddl)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(ddl, "'reflection'") {
+		return nil
+	}
+	_, err = db.Exec(`
+		BEGIN IMMEDIATE;
+		DROP VIEW IF EXISTS experiences_current;
+		CREATE TABLE experiences_new (
+		  id              TEXT    PRIMARY KEY,
+		  session_id      TEXT    NOT NULL,
+		  ts              INTEGER NOT NULL,
+		  kind            TEXT    NOT NULL CHECK (kind IN ('execution','preference','reflection')),
+		  extractor_ver   INTEGER NOT NULL,
+		  extractor_model TEXT    NOT NULL,
+		  context         TEXT    NOT NULL CHECK (json_valid(context)),
+		  provider        TEXT,
+		  outcome         TEXT    NOT NULL CHECK (json_valid(outcome)),
+		  source          TEXT    NOT NULL DEFAULT 'production'
+		                  CHECK (source IN ('production','learning'))
+		);
+		INSERT INTO experiences_new SELECT * FROM experiences;
+		DROP TABLE experiences;
+		ALTER TABLE experiences_new RENAME TO experiences;
+		COMMIT;`)
+	if err != nil {
+		return err
+	}
+	// The index, triggers, and view come back via the idempotent schema.
+	_, err = db.Exec(schema)
+	return err
+}
+
+// ensureColumn adds a column when the table predates it — the whole
+// migration story for rebuildable projections.
+func ensureColumn(db *sql.DB, table, col, decl string) error {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`,
+		table, col).Scan(&n)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	_, err = db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, col, decl))
+	return err
 }
 
 func (s *Store) Close() error { return s.DB.Close() }
@@ -168,6 +295,37 @@ func (s *Store) LastEventTS(eventType string) (tsMs int64, found bool, err error
 	return tsMs, true, nil
 }
 
+// LatestEventTS returns the newest event timestamp of any type (0 when
+// empty) — the absence detector's anchor (ADR-0019 Decision 2:
+// 不在はeventsの空白から知覚できる).
+func (s *Store) LatestEventTS() (int64, error) {
+	var ts int64
+	err := s.DB.QueryRow(`SELECT COALESCE(MAX(ts),0) FROM events`).Scan(&ts)
+	return ts, err
+}
+
+// MaxEventID returns the id of the newest event, 0 when empty — where the
+// face window starts its tail poll so a fresh window never replays history
+// (ADR-0020 Decision 2).
+func (s *Store) MaxEventID() (int64, error) {
+	var id int64
+	err := s.DB.QueryRow(`SELECT COALESCE(MAX(id),0) FROM events`).Scan(&id)
+	return id, err
+}
+
+// EventsSince returns events with id > after, oldest first — the face
+// window's polling read (ADR-0020 Decision 2: events末尾の定期ポーリング).
+func (s *Store) EventsSince(after int64) ([]*Event, error) {
+	rows, err := s.DB.Query(`
+		SELECT id, session_id, seq, ts, v, type, payload
+		FROM events WHERE id > ? ORDER BY id`, after)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEvents(rows)
+}
+
 func (s *Store) EventsBySession(sessionID string) ([]*Event, error) {
 	rows, err := s.DB.Query(`
 		SELECT id, session_id, seq, ts, v, type, payload
@@ -176,6 +334,10 @@ func (s *Store) EventsBySession(sessionID string) ([]*Event, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanEvents(rows)
+}
+
+func scanEvents(rows *sql.Rows) ([]*Event, error) {
 	var out []*Event
 	for rows.Next() {
 		e := &Event{}
@@ -223,14 +385,15 @@ func (s *Store) PendingSessions(ver int) ([]string, error) {
 
 func (s *Store) InsertExperience(e *core.Experience) error {
 	provider := sql.NullString{String: e.Provider, Valid: e.Provider != ""}
+	plan := sql.NullString{String: e.Plan, Valid: e.Plan != ""}
 	_, err := s.DB.Exec(`
 		INSERT INTO experiences
 		  (id, session_id, ts, kind, extractor_ver, extractor_model,
-		   context, provider, outcome, source)
-		VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		   context, provider, outcome, source, plan)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		e.ID, e.SessionID, e.TS, e.Kind, e.ExtractorVer, e.ExtractorModel,
 		core.MarshalContext(e.Context), provider,
-		core.MarshalOutcome(e.Outcome), e.Source)
+		core.MarshalOutcome(e.Outcome), e.Source, plan)
 	return err
 }
 
@@ -247,8 +410,8 @@ func (s *Store) InsertExperiences(exps []*core.Experience) error {
 	stmt, err := tx.Prepare(`
 		INSERT INTO experiences
 		  (id, session_id, ts, kind, extractor_ver, extractor_model,
-		   context, provider, outcome, source)
-		VALUES (?,?,?,?,?,?,?,?,?,?)`)
+		   context, provider, outcome, source, plan)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -256,10 +419,11 @@ func (s *Store) InsertExperiences(exps []*core.Experience) error {
 	defer stmt.Close()
 	for i, e := range exps {
 		provider := sql.NullString{String: e.Provider, Valid: e.Provider != ""}
+		plan := sql.NullString{String: e.Plan, Valid: e.Plan != ""}
 		if _, err := stmt.Exec(
 			e.ID, e.SessionID, e.TS, e.Kind, e.ExtractorVer, e.ExtractorModel,
 			core.MarshalContext(e.Context), provider,
-			core.MarshalOutcome(e.Outcome), e.Source); err != nil {
+			core.MarshalOutcome(e.Outcome), e.Source, plan); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("insert experience %d/%d (id=%s): %w", i+1, len(exps), e.ID, err)
 		}
@@ -270,7 +434,7 @@ func (s *Store) InsertExperiences(exps []*core.Experience) error {
 func (s *Store) CurrentExperiences() ([]*core.Experience, error) {
 	rows, err := s.DB.Query(`
 		SELECT id, session_id, ts, kind, extractor_ver, extractor_model,
-		       context, provider, outcome, source
+		       context, provider, outcome, source, plan
 		FROM experiences_current ORDER BY ts, id`)
 	if err != nil {
 		return nil, err
@@ -280,12 +444,13 @@ func (s *Store) CurrentExperiences() ([]*core.Experience, error) {
 	for rows.Next() {
 		e := &core.Experience{}
 		var ctx, outcome string
-		var provider sql.NullString
+		var provider, plan sql.NullString
 		if err := rows.Scan(&e.ID, &e.SessionID, &e.TS, &e.Kind,
-			&e.ExtractorVer, &e.ExtractorModel, &ctx, &provider, &outcome, &e.Source); err != nil {
+			&e.ExtractorVer, &e.ExtractorModel, &ctx, &provider, &outcome, &e.Source, &plan); err != nil {
 			return nil, err
 		}
 		e.Provider = provider.String
+		e.Plan = plan.String
 		if err := json.Unmarshal([]byte(ctx), &e.Context); err != nil {
 			return nil, err
 		}
@@ -323,17 +488,37 @@ func (s *Store) KnownValues(key string) ([]string, error) {
 	return out, rows.Err()
 }
 
+// MaxExcess returns the largest excess surprisal recorded for any of the
+// given experience ids — the batch's sharpest miss, which grades Tomo's
+// reaction line (ADR-0019 Decision 1: 驚き＝ADR-0002の導出値の翻訳).
+func (s *Store) MaxExcess(expIDs []string) (float64, error) {
+	if len(expIDs) == 0 {
+		return 0, nil
+	}
+	args := make([]any, len(expIDs))
+	marks := make([]string, len(expIDs))
+	for i, id := range expIDs {
+		args[i] = id
+		marks[i] = "?"
+	}
+	var max float64
+	err := s.DB.QueryRow(`
+		SELECT COALESCE(MAX(s_excess), 0) FROM surprise_ledger
+		WHERE experience_id IN (`+strings.Join(marks, ",")+`)`, args...).Scan(&max)
+	return max, err
+}
+
 // ---- projections ----
 
 func (s *Store) GetConnection(kind, scopeKey, target string) (*core.Connection, error) {
 	row := s.DB.QueryRow(`
 		SELECT kind, scope_key, target, alpha, beta, last_update, born_ts,
-		       COALESCE(parent_key,'')
+		       COALESCE(parent_key,''), prior_alpha, prior_beta
 		FROM connections WHERE kind=? AND scope_key=? AND target=?`,
 		kind, scopeKey, target)
 	c := &core.Connection{}
 	err := row.Scan(&c.Kind, &c.ScopeKey, &c.Target, &c.Alpha, &c.Beta,
-		&c.LastUpdate, &c.BornTS, &c.ParentKey)
+		&c.LastUpdate, &c.BornTS, &c.ParentKey, &c.PriorA, &c.PriorB)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -345,14 +530,19 @@ func (s *Store) GetConnection(kind, scopeKey, target string) (*core.Connection, 
 
 func (s *Store) UpsertConnection(c *core.Connection) error {
 	parent := sql.NullString{String: c.ParentKey, Valid: c.ParentKey != ""}
+	pa, pb := c.Prior()
+	// The prior is set at birth and immutable afterwards (ADR-0013): the
+	// conflict branch deliberately leaves prior_alpha/prior_beta untouched.
 	_, err := s.DB.Exec(`
 		INSERT INTO connections
-		  (kind, scope_key, target, alpha, beta, last_update, born_ts, parent_key)
-		VALUES (?,?,?,?,?,?,?,?)
+		  (kind, scope_key, target, alpha, beta, last_update, born_ts, parent_key,
+		   prior_alpha, prior_beta)
+		VALUES (?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (kind, scope_key, target) DO UPDATE SET
 		  alpha=excluded.alpha, beta=excluded.beta,
 		  last_update=excluded.last_update`,
-		c.Kind, c.ScopeKey, c.Target, c.Alpha, c.Beta, c.LastUpdate, c.BornTS, parent)
+		c.Kind, c.ScopeKey, c.Target, c.Alpha, c.Beta, c.LastUpdate, c.BornTS, parent,
+		pa, pb)
 	return err
 }
 
@@ -365,14 +555,14 @@ func (s *Store) DeleteConnection(kind, scopeKey, target string) error {
 func (s *Store) ConnectionsFor(kind, target string) ([]*core.Connection, error) {
 	return s.queryConnections(`
 		SELECT kind, scope_key, target, alpha, beta, last_update, born_ts,
-		       COALESCE(parent_key,'')
+		       COALESCE(parent_key,''), prior_alpha, prior_beta
 		FROM connections WHERE kind=? AND target=? ORDER BY scope_key`, kind, target)
 }
 
 func (s *Store) AllConnections() ([]*core.Connection, error) {
 	return s.queryConnections(`
 		SELECT kind, scope_key, target, alpha, beta, last_update, born_ts,
-		       COALESCE(parent_key,'')
+		       COALESCE(parent_key,''), prior_alpha, prior_beta
 		FROM connections ORDER BY kind, scope_key, target`)
 }
 
@@ -386,7 +576,7 @@ func (s *Store) queryConnections(q string, args ...any) ([]*core.Connection, err
 	for rows.Next() {
 		c := &core.Connection{}
 		if err := rows.Scan(&c.Kind, &c.ScopeKey, &c.Target, &c.Alpha, &c.Beta,
-			&c.LastUpdate, &c.BornTS, &c.ParentKey); err != nil {
+			&c.LastUpdate, &c.BornTS, &c.ParentKey, &c.PriorA, &c.PriorB); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

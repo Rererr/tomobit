@@ -122,3 +122,28 @@ Planも生き物である。勝てないPlanは減衰しRetireへ
 - Plan選択も決定イベントとしてseed記帳(ADR-0012)
 - CURIOSITY_ENGINEのSignalにPlan提案を追加
 - 実装ノブ: 初期メニューの文面、K、変異優先度(VoI)、提案予算
+- 実装追記（2026-07-16、`internal/plan` + engine/decide/curiosity統合）:
+  - Planの正準名 = ステップを`>`で連結した文字列（`analyze>implement>test` —
+    識別子が手順そのものなのでProvider名と衝突しない）。ラベル full/direct/quick
+    は implement の初期メニューの別名
+  - connections に kind='plan' を追加。同じ経験が provider と plan の
+    **二つの賭け先**に流れる（experiences.plan 機械属性で結線 —
+    plan.selected イベントから知覚が決定的に抽出）
+  - 選択: `tomobit do --plan auto`（`decide.ChoosePlan` — 同じ悲観ゲート+TS+
+    n(stakes)）。実行はステップ列を同一Providerで逐次実行（最初の失敗で停止）。
+    ステップの枠付け文は決定的テンプレート（LLMはPlanを生成しない）
+  - **二段目の「ステップごとのProvider選択」はv1保留**: ステップ粒度のoutcomeが
+    未定義のため、1 doにつきProviderは1人。帰属の混濁の節が予告した通り、
+    分離が必要になったら plan= の文脈属性昇格と併せて扱う
+  - メニューの生存は plan.generated イベント（真実）から導出 — rebuildで
+    消えない。引退 = plan Connectionのdormant（Decision 5のライフサイクル）
+  - **Decision 4の誕生継承はv1では白紙誕生に緩和**: 提案時にConnectionを
+    直接産むと「rebuildが経験から再現できない状態」が生まれるため
+    （Split児の継承はReplay経由で再現可能だが、提案児の親μは経験に無い）。
+    白紙Beta(1,1)はゲート基準線上で通過し、TS+n(stakes)による保護
+    （新参の初陣は軽いタスク）はそのまま機能する。継承を真実に昇格する場合は
+    plan.generated のpayloadに事前を記帳し rebuild が再演する設計になる
+  - 変異優先度: 全候補が白紙で揺らぎ同値のため、VoIは分離できない —
+    決定的列挙順（drop→swap→insert、位置昇順・語彙順）で最初の新規合法変異。
+    提案予算は24hに1つ（質問予算の型）、メニュー空き（K=5未満）時のみ
+  - human実行のdoはPlan選択をスキップ（ハーネスが駆動できるステップ境界が無い）

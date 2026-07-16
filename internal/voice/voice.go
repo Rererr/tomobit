@@ -5,6 +5,7 @@
 package voice
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/Rererr/tomobit/internal/core"
@@ -31,4 +32,13 @@ func ScopeDisplay(scope core.Scope) string {
 // network would read as the companion's absence, not its honesty.
 func FirstMeeting() string {
 	return "「はじめまして。まだなにも知らないんだ」"
+}
+
+// Asked is the Curiosity question line (catalog #5, ADR-0007 Decision 4).
+// curiosity.Ask wraps it with the terminal's answer options; the face window
+// re-derives the same line from a tomo.asked event's payload (ADR-0020
+// Decision 2: 同じ声のもう一つのスピーカー — 回答チャネルは端末のまま).
+func Asked(scope core.Scope, a, b string) string {
+	return fmt.Sprintf("最近 %s で %s と %s 両方使ってるけど、どっちが好みだった?",
+		ScopeDisplay(scope), a, b)
 }

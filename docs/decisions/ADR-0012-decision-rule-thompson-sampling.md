@@ -127,6 +127,20 @@ Curiosity Never Blocks Production は能動探索にだけ効く。
 ## Consequences
 
 - Decision Engineが実装可能な解像度に到達。残る実装ノブ: 分位点q、n(stakes)の固定表
+- 実装追記（2026-07-16、`internal/decide`）:
+  - **ゲートの基準線は自己参照**: 通過 = `Quantile(q) ≥ q − margin`。
+    一様事前Beta(1,1)のq分位点はちょうどqなので、何も知らないProviderは
+    基準線の上に正確に乗って通過し、1敗（Beta(1,2)のq20≈0.106）で即座に落ちる。
+    第二のノブは生まれない。marginは0.02 — 減衰は事前の分位点へ**下から漸近**する
+    ため、margin=0だとDecision 3の名誉回復が文字通り永遠に完了しない。
+    0.02で新鮮な1敗は約3半減期（約9ヶ月）で再入場する — 忘却と同じ時計の寛容
+  - n(stakes)の固定表: size無指定/small=1、medium=3、large=5
+  - 読むConnectionは最細一致ひとつ（ADR-0013 Decision 2）。監査行にscope_keyを残す
+  - 全員がゲート落ちした場合は最も分位点が高い候補を決定的に選ぶ
+    （fallback明示 — Curiosity Never Blocks Productionの決定版）
+  - 配線: `tomobit do --provider auto`（明示オプトイン。既定は従来通り人間の
+    指名 — 空の台帳でautoにすると未導入Providerをコイントスで引き得るため）。
+    seed等の監査は `tomo.decided` イベント（SCHEMA.md R4追記）
 - CONNECTION_ENGINEのOpen Question 3（backoffブレンド）は本ADRでは閉じない —
   粗と細のどのConnectionからサンプルするかの問題として残り、事前分布の継承（OQ2）と
   同時に扱う
