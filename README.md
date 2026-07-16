@@ -84,7 +84,7 @@ tomobit status     # 相棒ビュー（見て終わる）
 ```
 
 チャットの中では `/new`（区切って次のタスク）・`/provider`・`/cap`・`/size`・`/status`・`/help`・`/exit`。
-入力は ↑↓履歴・Ctrl-A/E/W/U・複数行貼り付け（そのまま1つの依頼になる）・`\`+Enterで改行。
+入力は ↑↓履歴・Ctrl-A/E/W/U・複数行貼り付け（そのまま1つの依頼になる）・Shift+Enter か `\`+Enter で改行。
 実行中の Ctrl-C はそのターンの中断で、タスクは続く。
 
 DBは `~/.tomobit/tomobit.db`（`--db` / `$TOMOBIT_DB` で変更可）。

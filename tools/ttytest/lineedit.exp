@@ -103,6 +103,17 @@ send "\033\[200~一行目\n二行目\033\[201~"
 check "bracketed paste" "一行目"
 send "\025"
 
+# 9b. Shift+Enter as Ghostty encodes it (CSI 27;2;13~, sent with nothing
+# negotiated) inserts a newline instead of submitting: the draft keeps both
+# lines, and text typed after it lands on the continuation row.
+send "上段"
+sleep 0.3
+send "\033\[27;2;13~"
+sleep 0.3
+send "下段"
+check "shift+enter inserts newline" "上段\r\n下段"
+send "\025"
+
 # 10. a line longer than 40 columns wraps and still edits
 send "0123456789012345678901234567890123456789012345"
 sleep 0.4
