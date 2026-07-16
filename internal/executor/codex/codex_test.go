@@ -243,3 +243,32 @@ func TestTranslateMalformedJSONErrors(t *testing.T) {
 		t.Error("malformed JSON should return an error so the Executor can log it")
 	}
 }
+
+// TestCommandResumesTheThread pins ADR-0022 Decision 2 against the measured
+// CLI shape: `codex exec resume <id> <prompt>`.
+func TestCommandResumesTheThread(t *testing.T) {
+	name, args, _ := New().Command(executor.Request{Prompt: "and now fix it", ResumeID: "th-1"})
+	if name != "codex" {
+		t.Errorf("executable: got %q", name)
+	}
+	want := []string{"exec", "resume", "th-1", "and now fix it", "--json", "--skip-git-repo-check"}
+	if len(args) != len(want) {
+		t.Fatalf("args: got %v, want %v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args: got %v, want %v", args, want)
+		}
+	}
+}
+
+// A resumed turn carries no --sandbox: `codex exec resume` has no such flag
+// (measured on 0.144.4) — the thread keeps the sandbox it started with.
+func TestCommandResumeDropsTheSandboxFlag(t *testing.T) {
+	_, args, _ := New().Command(executor.Request{Prompt: "p", ResumeID: "th-1", PermissionMode: "workspace-write"})
+	for _, a := range args {
+		if a == "--sandbox" {
+			t.Errorf("resume has no --sandbox seat: %v", args)
+		}
+	}
+}

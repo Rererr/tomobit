@@ -202,3 +202,32 @@ func contains(xs []string, want string) bool {
 	}
 	return false
 }
+
+// TestCommandResumesTheThread pins ADR-0022 Decision 2: a chat's later turns
+// continue the provider's own session rather than starting a cold one.
+func TestCommandResumesTheThread(t *testing.T) {
+	_, args, _ := New().Command(executor.Request{Prompt: "and now fix it", ResumeID: "sess-1"})
+	if !contains(args, "--resume") || !contains(args, "sess-1") {
+		t.Errorf("resume id should be forwarded: %v", args)
+	}
+}
+
+func TestCommandWithoutResumeIDStartsAFreshThread(t *testing.T) {
+	_, args, _ := New().Command(executor.Request{Prompt: "p"})
+	if contains(args, "--resume") {
+		t.Errorf("no --resume without an id: %v", args)
+	}
+}
+
+// TestTranslateInitCarriesTheThreadID guards the chat's continuity: the init
+// line is the only place a run that is later cancelled ever names its
+// thread, so the id must not wait for the result line.
+func TestTranslateInitCarriesTheThreadID(t *testing.T) {
+	evs := translate(t, `{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-opus-4-8"}`)
+	if len(evs) != 1 {
+		t.Fatalf("got %v", evs)
+	}
+	if evs[0].Payload["provider_session_id"] != "sess-1" {
+		t.Errorf("provider_session_id from init: got %v", evs[0].Payload["provider_session_id"])
+	}
+}
