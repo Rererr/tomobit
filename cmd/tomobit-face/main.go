@@ -11,6 +11,7 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 
+	"github.com/Rererr/tomobit/internal/config"
 	"github.com/Rererr/tomobit/internal/facewin"
 )
 
@@ -69,11 +70,15 @@ func run(args []string) error {
 	})
 }
 
-// defaultDB mirrors cmd/tomobit's --db default: $TOMOBIT_DB, then
-// ~/.tomobit/tomobit.db — the two renderers must look at the same truth.
+// defaultDB mirrors cmd/tomobit's --db default: $TOMOBIT_DB, then the
+// config file, then ~/.tomobit/tomobit.db — the two renderers must look at
+// the same truth.
 func defaultDB() string {
 	if v := os.Getenv("TOMOBIT_DB"); v != "" {
 		return v
+	}
+	if c, err := config.Load(); err == nil && c.DB != "" {
+		return c.DB
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

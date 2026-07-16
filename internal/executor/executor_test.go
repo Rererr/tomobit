@@ -18,7 +18,7 @@ type fakeAdapter struct {
 
 func (f *fakeAdapter) Name() string { return "fake" }
 
-func (f *fakeAdapter) Command(Request) (string, []string) { return f.cmd, f.args }
+func (f *fakeAdapter) Command(Request) (string, []string, []string) { return f.cmd, f.args, nil }
 
 func (f *fakeAdapter) Translate(line []byte) ([]Event, error) {
 	switch s := strings.TrimSpace(string(line)); s {

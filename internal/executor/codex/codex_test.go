@@ -58,7 +58,7 @@ func contains(xs []string, want string) bool {
 }
 
 func TestCommandBuildsHeadlessJSONExec(t *testing.T) {
-	name, args := New().Command(executor.Request{Prompt: "fix the bug"})
+	name, args, _ := New().Command(executor.Request{Prompt: "fix the bug"})
 	if name != "codex" {
 		t.Errorf("executable: got %q, want codex", name)
 	}
@@ -76,7 +76,7 @@ func TestCommandBuildsHeadlessJSONExec(t *testing.T) {
 }
 
 func TestCommandPassesSandboxModeThrough(t *testing.T) {
-	_, args := New().Command(executor.Request{Prompt: "p", PermissionMode: "workspace-write"})
+	_, args, _ := New().Command(executor.Request{Prompt: "p", PermissionMode: "workspace-write"})
 	if !contains(args, "--sandbox") || !contains(args, "workspace-write") {
 		t.Errorf("permission mode should map to --sandbox: %v", args)
 	}

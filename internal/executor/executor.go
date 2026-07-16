@@ -70,8 +70,12 @@ type Adapter interface {
 	// Name is the canonical provider name recorded as the connection target
 	// (SCHEMA.md R3), e.g. "claude-code".
 	Name() string
-	// Command returns the executable and args to launch for req.
-	Command(req Request) (name string, args []string)
+	// Command returns the executable, args, and any extra environment
+	// entries ("KEY=value", appended to the parent's environment) to launch
+	// for req. The launch environment is part of knowing the CLI: a provider
+	// that selects a profile via an env var (e.g. CLAUDE_CONFIG_DIR) owns
+	// that here, not in shell aliases around tomobit.
+	Command(req Request) (name string, args []string, extraEnv []string)
 	// Translate maps one stream line to zero or more canonical events. Pure:
 	// no I/O and no state, so recorded fixtures can pin the mapping.
 	Translate(line []byte) ([]Event, error)
@@ -114,8 +118,11 @@ func (e *Executor) Run(ctx context.Context, req Request, emit Sink) (Result, err
 		defer cancel()
 	}
 
-	name, args := e.Adapter.Command(req)
+	name, args, extraEnv := e.Adapter.Command(req)
 	cmd := exec.CommandContext(runCtx, name, args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	cmd.Stderr = e.Stderr
 	// Forward SIGINT rather than the default SIGKILL, so the child CLI can
 	// flush its final result line before exiting.

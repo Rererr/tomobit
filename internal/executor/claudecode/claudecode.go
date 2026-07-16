@@ -16,7 +16,16 @@ import (
 // R3): the tool name only, never a model version.
 const providerName = "claude-code"
 
-type Adapter struct{}
+type Adapter struct {
+	// ConfigDir, when non-empty, launches claude under this
+	// CLAUDE_CONFIG_DIR, selecting which profile (account, settings,
+	// credentials) the run uses. Empty inherits the parent environment.
+	// The provider name stays "claude-code" either way (SCHEMA.md R3):
+	// the profile changes who is logged in, not which tool ran.
+	ConfigDir string
+	// ExtraArgs are appended to every launch, after the per-request flags.
+	ExtraArgs []string
+}
 
 func New() *Adapter { return &Adapter{} }
 
@@ -24,12 +33,17 @@ func (a *Adapter) Name() string { return providerName }
 
 // Command builds the headless launch. stream-json requires --verbose in print
 // mode, or the CLI refuses to emit the stream.
-func (a *Adapter) Command(req executor.Request) (string, []string) {
+func (a *Adapter) Command(req executor.Request) (string, []string, []string) {
 	args := []string{"-p", req.Prompt, "--output-format", "stream-json", "--verbose"}
 	if req.PermissionMode != "" {
 		args = append(args, "--permission-mode", req.PermissionMode)
 	}
-	return "claude", args
+	args = append(args, a.ExtraArgs...)
+	var env []string
+	if a.ConfigDir != "" {
+		env = append(env, "CLAUDE_CONFIG_DIR="+a.ConfigDir)
+	}
+	return "claude", args, env
 }
 
 // streamLine is the union of the stream-json envelopes this adapter reads.

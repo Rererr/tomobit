@@ -17,6 +17,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/Rererr/tomobit/internal/config"
 	"github.com/Rererr/tomobit/internal/core"
 	"github.com/Rererr/tomobit/internal/curiosity"
 	"github.com/Rererr/tomobit/internal/decide"
@@ -38,8 +39,55 @@ const extractorVer = 3 // bump when the extraction prompt/schema changes
 // the choice to the Decision Engine (ADR-0012: 悲観分位点ゲート + Thompson
 // Sampling), which records its seed to events so the lottery replays.
 var providers = map[string]executor.Adapter{
-	"claude-code": claudecode.New(),
+	"claude-code": newClaudeCode(),
 	"codex":       codex.New(),
+}
+
+// cfg is the machine-local wiring file (~/.tomobit/config.json, ADR-0021),
+// written by `tomobit setup`. A load error is stashed, not fatal: every
+// command still runs on env/flags, and run() warns once so a typo in the
+// file is never silent.
+var cfg, cfgErr = config.Load()
+
+// claudeProfileSet reports whether a claude-code profile was chosen at all —
+// via env (even empty = "explicitly inherit") or via config. claude-code
+// refuses to launch without a choice — see the gate in cmdDo.
+var claudeProfileSet bool
+
+var claudeAdapter = claudecode.New()
+
+// newClaudeCode wires the claude-code launch profile. No baked-in default:
+// which profile (account) a run uses must be an explicit choice, because
+// silently inheriting whatever the shell happens to have is exactly the
+// accident this exists to prevent. Resolution is env > config (a flag has
+// no seat here — the profile is not a per-run choice):
+// TOMOBIT_CLAUDE_CONFIG_DIR / config claude_config_dir select the profile
+// (empty value = explicitly inherit the parent env); TOMOBIT_CLAUDE_ARGS /
+// config claude_args add flags to every launch (optional).
+func newClaudeCode() *claudecode.Adapter {
+	wireClaude()
+	return claudeAdapter
+}
+
+// wireClaude (re)applies the env > config resolution to the shared adapter.
+// Called again after `tomobit setup` or the in-run profile question writes
+// a fresh config, so the current process picks the choice up immediately.
+func wireClaude() {
+	if dir, ok := os.LookupEnv("TOMOBIT_CLAUDE_CONFIG_DIR"); ok {
+		claudeProfileSet = true
+		claudeAdapter.ConfigDir = dir
+	} else if cfg.ClaudeConfigDir != nil {
+		claudeProfileSet = true
+		claudeAdapter.ConfigDir = *cfg.ClaudeConfigDir
+	} else {
+		claudeProfileSet = false
+		claudeAdapter.ConfigDir = ""
+	}
+	if v, ok := os.LookupEnv("TOMOBIT_CLAUDE_ARGS"); ok {
+		claudeAdapter.ExtraArgs = strings.Fields(v)
+	} else {
+		claudeAdapter.ExtraArgs = cfg.ClaudeArgs
+	}
 }
 
 func providerNames() []string {
@@ -69,6 +117,9 @@ func main() {
 }
 
 func run(args []string) error {
+	if cfgErr != nil {
+		fmt.Fprintln(os.Stderr, "warning: config ignored:", cfgErr, "— `tomobit setup` rewrites it")
+	}
 	if len(args) == 0 {
 		// ADR-0008 Consequences: the first screen is the companion view, not
 		// the manual — usage moved to `tomobit help`.
@@ -86,6 +137,8 @@ func run(args []string) error {
 		return cmdRebuild(rest)
 	case "status":
 		return cmdStatus(rest)
+	case "setup":
+		return cmdSetup(rest)
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -117,15 +170,23 @@ usage:
   tomobit perceive [--model qwen3:8b] [--url http://localhost:11434]
   tomobit rebuild
   tomobit status   same as no args
+  tomobit setup    対話式でこの機械の配線を決める(claude profile / ollama)。
+                   再実行すれば診断を兼ねる。書き先は ~/.tomobit/config.json
 
 companion markers: "?" = a connection is questioned / "z" = dormant (long quiet)
 
 common flags:
-  --db <path>   database file (default ~/.tomobit/tomobit.db, or $TOMOBIT_DB)`)
+  --db <path>   database file (default ~/.tomobit/tomobit.db, or $TOMOBIT_DB)
+
+config precedence: flag > env > ~/.tomobit/config.json
+  env overrides: TOMOBIT_DB, TOMOBIT_CLAUDE_CONFIG_DIR, TOMOBIT_CLAUDE_ARGS`)
 }
 
 func dbFlag(fs *flag.FlagSet) *string {
 	def := os.Getenv("TOMOBIT_DB")
+	if def == "" {
+		def = cfg.DB
+	}
 	if def == "" {
 		home, err := os.UserHomeDir()
 		if err == nil {
@@ -135,6 +196,15 @@ func dbFlag(fs *flag.FlagSet) *string {
 		}
 	}
 	return fs.String("db", def, "database file")
+}
+
+// ollamaModelDefault is the --model default: config, then the ADR-0005
+// measured pick.
+func ollamaModelDefault() string {
+	if cfg.OllamaModel != "" {
+		return cfg.OllamaModel
+	}
+	return "qwen3:8b"
 }
 
 func openStore(path string) (*store.Store, error) {
@@ -186,8 +256,8 @@ func cmdDo(args []string) error {
 	providerName := fs.String("provider", "claude-code", "adapter to run: claude-code|codex|auto")
 	planArg := fs.String("plan", "", "plan: auto, a label (full|direct|quick), or steps like analyze>implement>test")
 	size := fs.String("size", "", "task size for decision stakes: small|medium|large (--provider auto)")
-	model := fs.String("model", "qwen3:8b", "ollama model for best-effort perception")
-	url := fs.String("url", "", "ollama base url (default http://localhost:11434)")
+	model := fs.String("model", ollamaModelDefault(), "ollama model for best-effort perception")
+	url := fs.String("url", cfg.OllamaURL, "ollama base url (default http://localhost:11434)")
 	fs.Parse(args)
 
 	prompt := strings.TrimSpace(strings.Join(fs.Args(), " "))
@@ -206,6 +276,23 @@ func cmdDo(args []string) error {
 			return err
 		}
 	}
+	// auto can pick claude-code, so both paths need the profile. Checked
+	// here, before any event is recorded, so a misconfigured shell never
+	// pollutes the ledger with a run that was doomed at launch. On a
+	// terminal the missing choice becomes the question itself (ADR-0021);
+	// headless (daemon, cron, pipe) it stays a hard error.
+	if (*providerName == "claude-code" || *providerName == "auto") && !claudeProfileSet {
+		if !isTTY(os.Stdin) || !isTTY(os.Stdout) {
+			return fmt.Errorf("do: no claude-code profile chosen — run `tomobit setup`,\n" +
+				"  or export TOMOBIT_CLAUDE_CONFIG_DIR=$HOME/.claude-personal\n" +
+				"  (set it empty to deliberately inherit the parent environment)")
+		}
+		fmt.Println("claude-code のプロファイルがまだ決まっていない。")
+		if err := askClaudeProfile(bufio.NewReader(os.Stdin), os.Stdout); err != nil {
+			return err
+		}
+	}
+
 	s, err := openStore(*db)
 	if err != nil {
 		return err
@@ -708,8 +795,8 @@ func perceiveBestEffort(s *store.Store, extractor perceive.Extractor) []reflecti
 func cmdPerceive(args []string) error {
 	fs := flag.NewFlagSet("perceive", flag.ExitOnError)
 	db := dbFlag(fs)
-	model := fs.String("model", "qwen3:8b", "ollama model for context extraction")
-	url := fs.String("url", "", "ollama base url (default http://localhost:11434)")
+	model := fs.String("model", ollamaModelDefault(), "ollama model for context extraction")
+	url := fs.String("url", cfg.OllamaURL, "ollama base url (default http://localhost:11434)")
 	fs.Parse(args)
 
 	s, err := openStore(*db)

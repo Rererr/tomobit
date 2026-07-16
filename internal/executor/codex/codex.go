@@ -29,13 +29,13 @@ func (a *Adapter) Name() string { return providerName }
 // thread means provider_session_id (thread_id) still points at Codex's own
 // session log, the original-reference pattern claude-code already uses
 // (ADR-0006 Decision 3).
-func (a *Adapter) Command(req executor.Request) (string, []string) {
+func (a *Adapter) Command(req executor.Request) (string, []string, []string) {
 	args := []string{"exec", "--json", "--skip-git-repo-check"}
 	if req.PermissionMode != "" {
 		args = append(args, "--sandbox", req.PermissionMode)
 	}
 	args = append(args, req.Prompt)
-	return "codex", args
+	return "codex", args, nil
 }
 
 // streamLine is the union of the codex exec --json envelopes this adapter
