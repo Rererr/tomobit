@@ -25,7 +25,7 @@
 
 ### 実装設計
 - [docs/design/SCHEMA.md](docs/design/SCHEMA.md) — スキーマ v1.0（**確定** — D1〜D11・R1〜R4レビュー済み）
-- [docs/design/SPRITES.md](docs/design/SPRITES.md) — Tomoスプライト正本（16×12・2フレーム・パレット）
+- [docs/design/SPRITES-WINDOW.md](docs/design/SPRITES-WINDOW.md) — Tomoスプライト正本（32×32・犬種3種・グレースケール6トーン）
 
 ### 意思決定の記録
 - [ADR-0001](docs/decisions/ADR-0001-connection-granularity.md) — Connectionの誕生モデル（粗→Split採用）
@@ -35,7 +35,7 @@
 - [ADR-0005](docs/decisions/ADR-0005-perception-model-and-schema-boundary.md) — 知覚の実装（qwen3:8b確定 / schemaは「形」・プロンプトは「意味」）
 - [ADR-0006](docs/decisions/ADR-0006-executor-integration.md) — Executor統合（`tomobit do` / claude-code Adapter / ダイジェスト記帳 / 採用確認）
 - [ADR-0007](docs/decisions/ADR-0007-curiosity-question.md) — Curiosityの最初の器官（Preference GapはView / 質問予算はeventsから導出 / doの区切りでTomoの質問）
-- [ADR-0008](docs/decisions/ADR-0008-appearance.md) — Tomoの姿（成長ステージはView / ドット絵＝半ブロック＋ANSI / 依存ゼロ）
+- [ADR-0008](docs/decisions/ADR-0008-appearance.md) — Tomoの姿（成長ステージはView / ドット絵＝半ブロック＋ANSI / 依存ゼロ — 端末描画はADR-0025で廃止）
 - [ADR-0009](docs/decisions/ADR-0009-voice.md) — Tomoの声（発話＝Viewの写像 / LLM不使用 / 語調は確信度のView）
 - [ADR-0010](docs/decisions/ADR-0010-codex-adapter.md) — 2つ目のAdapter（codex / `do --provider` / 写像はエラー経路実採取＋仕様準拠）
 - [ADR-0011](docs/decisions/ADR-0011-meaning-by-model-judgment-by-math.md) — Meaning by Model, Judgment by Math（判断は純関数、LLMの座席はextractorのみ）
@@ -52,6 +52,7 @@
 - [ADR-0022](docs/decisions/ADR-0022-chat-session.md) — 対話セッション（会話は入力の器・タスクは記帳の単位 / ターンはスレッドを継ぐ / インラインの自前ラインエディタ）
 - [ADR-0023](docs/decisions/ADR-0023-task-split.md) — タスク分割（Providerの分割提案はプロトコル / サブタスクは独立タスク / 実行者は親の選択方法を継ぐ — autoなら台帳が分配）
 - [ADR-0024](docs/decisions/ADR-0024-chat-ux.md) — チャットUX（履歴永続化・Ctrl-R・Tab補完・markdown-lite描画・ツールdetailは表示専用チャネル）
+- [ADR-0025](docs/decisions/ADR-0025-face-autolaunch.md) — 端末アバターの廃止と顔窓の自動起動（姿は窓に一本化 / 端末=声とテキスト / 顔窓は既定で出る・設定で止める）
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。
@@ -59,7 +60,7 @@
 ## Status
 
 最小コア（記帳 → 知覚 → Connection更新 → rebuild）に加え、相棒の器官を実装済み:
-**姿**（ドット絵アバター・成長6ステージ・すべてConnectionからのView）、
+**姿**（顔窓 `tomobit-face`・成長6ステージ・すべてConnectionからのView。端末はテキスト、姿は窓 — ADR-0025）、
 **声**（つぶやき・成長報告・提案 — 全発話が決定的導出）、
 **質問**（Preference Gap導出・予算1問/24h — ADR-0007）、
 **対話**（チャット形式のセッション・ターンは同じスレッドを継ぐ — ADR-0022）。
@@ -68,7 +69,7 @@ Stack: **Go / SQLite / Ollama**（完全ローカル・ターミナルUI。依�
 raw modeに `x/term`、表示幅に `uniseg`）
 
 ```
-tomobit            # 相棒ビュー（アバター・発話・Connection一覧）→ そのまま対話へ
+tomobit            # 相棒ビュー（発話・Connection一覧）→ そのまま対話へ
                    # パイプ・リダイレクトなら見せて終わる
 tomobit chat [--provider claude-code|codex|human|auto] [--cap <capability>] ["<prompt>"]
                    # 対話セッション。1つの会話 = 1つのタスク = 1つの経験。
@@ -81,7 +82,11 @@ tomobit record  --session <id> --type <event.type> [--json '{...}']
 tomobit perceive   # 未知覚セッションをOllama(qwen3:8b)で経験化しConnectionへ反映
 tomobit rebuild    # 射影を破棄しexperiencesから再構築（決定的 — 姿も再現される）
 tomobit status     # 相棒ビュー（見て終わる）
+tomobit-face       # Tomoのマスコット窓（表示専用・DBは読み取りのみ — ADR-0020）
 ```
+
+姿は窓が担う: `chat` / `do` / `status` を端末（TTY）で使うと顔窓が自動で出る。
+止めるなら `config.json` の `"face_auto_launch": false` か `TOMOBIT_FACE=0`（ADR-0025）。
 
 チャットの中では `/new`（区切って次のタスク）・`/provider`・`/cap`・`/size`・`/status`・`/help`・`/exit`。
 入力は ↑↓履歴・Ctrl-A/E/W/U・複数行貼り付け（そのまま1つの依頼になる）・Shift+Enter か `\`+Enter で改行。

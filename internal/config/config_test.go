@@ -55,6 +55,46 @@ func TestRoundTripKeepsAbsentVsEmptyDistinct(t *testing.T) {
 	}
 }
 
+func TestFaceAutoLaunchAbsentVsExplicit(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+
+	// Absent → nil, so the ADR-0025 default (on) is free to hold.
+	if err := SaveFile(p, Config{DB: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.FaceAutoLaunch != nil {
+		t.Errorf("absent face_auto_launch must load as nil (never chosen): %v", *c.FaceAutoLaunch)
+	}
+
+	// Explicit false must survive — it is the user turning the window off.
+	no := false
+	if err := SaveFile(p, Config{FaceAutoLaunch: &no}); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = LoadFile(p); err != nil {
+		t.Fatal(err)
+	}
+	if c.FaceAutoLaunch == nil || *c.FaceAutoLaunch {
+		t.Errorf("explicit false must survive the round trip: %v", c.FaceAutoLaunch)
+	}
+
+	// Explicit true must survive as its own value, distinct from absent.
+	yes := true
+	if err := SaveFile(p, Config{FaceAutoLaunch: &yes}); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = LoadFile(p); err != nil {
+		t.Fatal(err)
+	}
+	if c.FaceAutoLaunch == nil || !*c.FaceAutoLaunch {
+		t.Errorf("explicit true must survive the round trip: %v", c.FaceAutoLaunch)
+	}
+}
+
 func TestSaveFileCreatesParentDir(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "nested", "config.json")
 	if err := SaveFile(p, Config{DB: "x"}); err != nil {

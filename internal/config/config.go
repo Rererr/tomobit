@@ -29,6 +29,11 @@ type Config struct {
 	DB              string   `json:"db,omitempty"`
 	OllamaURL       string   `json:"ollama_url,omitempty"`
 	OllamaModel     string   `json:"ollama_model,omitempty"`
+	// FaceAutoLaunch is a pointer for the same absent-vs-set reason as
+	// ClaudeConfigDir: nil = never chosen, so the ADR-0025 default (on) holds;
+	// an explicit false is the user turning the face window off. A plain bool
+	// could not tell "left at the default" from "deliberately disabled".
+	FaceAutoLaunch *bool `json:"face_auto_launch,omitempty"`
 }
 
 // Path is ~/.tomobit/config.json — beside the default DB, never inside it.

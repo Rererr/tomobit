@@ -76,6 +76,7 @@ func cmdChat(args []string) error {
 			return err
 		}
 	}
+	maybeLaunchFace(*db)
 	ed := lineedit.New(os.Stdin, os.Stdout)
 	if err := ensureClaudeProfile(ed.Reader(), *providerName); err != nil {
 		return err
