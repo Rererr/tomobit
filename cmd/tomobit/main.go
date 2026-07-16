@@ -30,6 +30,7 @@ import (
 	"github.com/Rererr/tomobit/internal/reflection"
 	"github.com/Rererr/tomobit/internal/store"
 	"github.com/Rererr/tomobit/internal/voice"
+	"golang.org/x/term"
 )
 
 const extractorVer = 3 // bump when the extraction prompt/schema changes
@@ -105,7 +106,7 @@ func resolveProvider(name string) (executor.Adapter, error) {
 	if a, ok := providers[name]; ok {
 		return a, nil
 	}
-	return nil, fmt.Errorf("do: unknown provider %q (available: %s, human, auto)",
+	return nil, fmt.Errorf("unknown provider %q (available: %s, human, auto)",
 		name, strings.Join(providerNames(), ", "))
 }
 
@@ -121,14 +122,14 @@ func run(args []string) error {
 		fmt.Fprintln(os.Stderr, "warning: config ignored:", cfgErr, "— `tomobit setup` rewrites it")
 	}
 	if len(args) == 0 {
-		// ADR-0008 Consequences: the first screen is the companion view, not
-		// the manual — usage moved to `tomobit help`.
-		return cmdStatus(nil)
+		return cmdHome(nil)
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "do":
 		return cmdDo(rest)
+	case "chat":
+		return cmdChat(rest)
 	case "record":
 		return cmdRecord(rest)
 	case "perceive":
@@ -144,20 +145,37 @@ func run(args []string) error {
 		return nil
 	default:
 		if strings.HasPrefix(cmd, "-") {
-			// A bare `tomobit --db X` names no subcommand — route the flags to
-			// the companion view instead of failing as "unknown command".
-			return cmdStatus(args)
+			// A bare `tomobit --db X` names no subcommand — route the flags
+			// home instead of failing as "unknown command".
+			return cmdHome(args)
 		}
 		usage()
 		return fmt.Errorf("unknown command %q", cmd)
 	}
 }
 
+// cmdHome is what bare `tomobit` does. ADR-0008 made the first screen the
+// companion view rather than the manual; ADR-0022 Decision 4 makes its next
+// line the prompt — you meet Tomo and you can just talk. Piped or redirected
+// there is nobody to talk to, so it stays the view it has always been.
+func cmdHome(args []string) error {
+	if isTTY(os.Stdin) && isTTY(os.Stdout) {
+		return cmdChat(args)
+	}
+	return cmdStatus(args)
+}
+
 func usage() {
 	fmt.Println(`tomobit — a living harness that grows with you
 
 usage:
-  tomobit          (no args) companion view — avatar, mood, a line, connections
+  tomobit          (no args) 相棒ビュー(アバター・気分・一言・Connection)を出して
+                   そのまま対話に入る。パイプ・リダイレクトなら見せて終わる
+  tomobit chat     [--cap implement] [--provider claude-code|codex|human|auto]
+                   [--permission-mode <mode>] [--timeout 0] [--size ...] ["<prompt>"]
+                   対話セッション(ADR-0022)。1つの会話 = 1つのタスク = 1つの経験。
+                   ターンは同じスレッドを継ぐ。/new か /exit で区切ると
+                   採用確認 → 知覚 → Tomoの質問 が走る。/help でコマンド一覧
   tomobit do       [--cap implement] [--timeout 0] [--permission-mode <mode>]
                    [--provider claude-code|codex|human|auto]
                    [--plan auto|full|direct|quick|<steps>] [--size small|medium|large]
@@ -216,14 +234,16 @@ func openStore(path string) (*store.Store, error) {
 	return store.Open(path)
 }
 
-// isTTY reports whether f is a character device (an interactive terminal),
-// not a pipe or redirected file. Shared by the Curiosity question (stdin,
-// ADR-0007) and the companion-view avatar (stdout, ADR-0008 Decision 4) so
-// both honor the same non-interactive detection.
-func isTTY(f *os.File) bool {
-	fi, err := f.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
-}
+// isTTY reports whether f is an interactive terminal. Shared by the Curiosity
+// question (stdin, ADR-0007), the companion-view avatar (stdout, ADR-0008
+// Decision 4) and the chat (ADR-0022), so every organ honors the same
+// detection — the same one the line editor uses to choose raw mode.
+//
+// It asks the terminal driver (a termios ioctl) rather than trusting the file
+// mode: /dev/null is a character device too, so `tomobit do ... < /dev/null`
+// would otherwise look like a human sitting at a keyboard, and Tomo would
+// spend its one question a day on nobody.
+func isTTY(f *os.File) bool { return term.IsTerminal(int(f.Fd())) }
 
 func cmdRecord(args []string) error {
 	fs := flag.NewFlagSet("record", flag.ExitOnError)
@@ -264,33 +284,15 @@ func cmdDo(args []string) error {
 	if prompt == "" {
 		return fmt.Errorf("do: a prompt is required")
 	}
-	// A named provider fails fast, before any event is recorded. auto is
-	// resolved after the session opens — the decision reads the projections.
-	// human is a provider with no adapter (ADR-0018 Decision 2): the same
-	// ledger, gate, and rehabilitation, executed by the user.
-	var adapter executor.Adapter
-	var err error
-	human := *providerName == "human"
-	if *providerName != "auto" && !human {
-		if adapter, err = resolveProvider(*providerName); err != nil {
+	// A named provider fails fast, before the store is even opened.
+	if *providerName != "auto" && *providerName != "human" {
+		if _, err := resolveProvider(*providerName); err != nil {
 			return err
 		}
 	}
-	// auto can pick claude-code, so both paths need the profile. Checked
-	// here, before any event is recorded, so a misconfigured shell never
-	// pollutes the ledger with a run that was doomed at launch. On a
-	// terminal the missing choice becomes the question itself (ADR-0021);
-	// headless (daemon, cron, pipe) it stays a hard error.
-	if (*providerName == "claude-code" || *providerName == "auto") && !claudeProfileSet {
-		if !isTTY(os.Stdin) || !isTTY(os.Stdout) {
-			return fmt.Errorf("do: no claude-code profile chosen — run `tomobit setup`,\n" +
-				"  or export TOMOBIT_CLAUDE_CONFIG_DIR=$HOME/.claude-personal\n" +
-				"  (set it empty to deliberately inherit the parent environment)")
-		}
-		fmt.Println("claude-code のプロファイルがまだ決まっていない。")
-		if err := askClaudeProfile(bufio.NewReader(os.Stdin), os.Stdout); err != nil {
-			return err
-		}
+	stdin := bufio.NewReader(os.Stdin)
+	if err := ensureClaudeProfile(stdin, *providerName); err != nil {
+		return err
 	}
 
 	s, err := openStore(*db)
@@ -299,26 +301,9 @@ func cmdDo(args []string) error {
 	}
 	defer s.Close()
 
-	sid := store.NewID(time.Now().UnixMilli())
-	if err := s.AppendEvent(sid, "task.started", time.Now().UnixMilli(),
-		map[string]any{"intent": prompt, "source": "production"}); err != nil {
+	sid, adapter, human, err := openTask(s, *providerName, *capability, *size, prompt)
+	if err != nil {
 		return err
-	}
-	if err := s.AppendEvent(sid, "capability.started", time.Now().UnixMilli(),
-		map[string]any{"capability": *capability}); err != nil {
-		return err
-	}
-
-	if adapter == nil && !human {
-		dec, err := autoDecide(s, sid, *capability, *size)
-		if err != nil {
-			return err
-		}
-		if dec.Provider == "human" {
-			human = true
-		} else {
-			adapter = providers[dec.Provider]
-		}
 	}
 
 	// Plan selection (ADR-0014). The human path skips it: a human run has no
@@ -336,7 +321,7 @@ func cmdDo(args []string) error {
 	var result executor.Result
 	var runErr error
 	if human {
-		result, runErr = runHuman(s, sid, os.Stdin)
+		result, runErr = runHuman(s, sid, stdin)
 		if runErr != nil {
 			return runErr
 		}
@@ -392,14 +377,24 @@ func cmdDo(args []string) error {
 		}
 	}
 
-	// The adoption question runs at the end of every completed run (ADR-0006
+	return finishTask(s, sid, stdin, os.Stdout, result.Started, &perceive.Ollama{URL: *url, Model: *model})
+}
+
+// finishTask is the tail every task boundary shares (ADR-0022 Decision 1):
+// 採用確認 → best-effort知覚 → Tomoの質問 → 鏡. `do` reaches it when its one
+// run ends; a chat session reaches it at /new, /exit or Ctrl-D. The boundary
+// moved, the organs did not.
+//
+// judged says the session produced something a human can judge — a run that
+// never started (e.g. the claude binary is missing) produced nothing, so the
+// adoption question is skipped and the outcome carries no signal.
+func finishTask(s *store.Store, sid string, in *bufio.Reader, out io.Writer, judged bool, extractor perceive.Extractor) error {
+	// The adoption question runs at the end of every completed task (ADR-0006
 	// Decision 4): exit 0 is not adoption, and even a failed run may have
-	// produced something the user keeps. A run that never started (e.g. the
-	// claude binary is missing) produced nothing to judge, so the question is
-	// skipped and the outcome carries no signal.
+	// produced something the user keeps.
 	payload := map[string]any{}
-	if result.Started {
-		payload = adoptionPayload(os.Stdin)
+	if judged {
+		payload = adoptionPayload(in, out)
 	}
 	if err := s.AppendEvent(sid, "task.finished", time.Now().UnixMilli(), payload); err != nil {
 		return err
@@ -413,16 +408,16 @@ func cmdDo(args []string) error {
 		fmt.Fprintln(os.Stderr, "reflection: snapshot failed:", snapErr)
 	}
 
-	extras := perceiveBestEffort(s, &perceive.Ollama{URL: *url, Model: *model})
+	extras := perceiveBestEffort(s, extractor)
 
 	// ADR-0007 lists the question right after the adoption prompt, but it runs
-	// here — after perception — so today's do is already folded into the Gap
-	// derivation. The interruption is still once per do at the same boundary,
-	// so the position ADR-0007 protects is unchanged.
-	askBestEffort(s, sid)
+	// here — after perception — so today's work is already folded into the Gap
+	// derivation. The interruption is still once per boundary, so the position
+	// ADR-0007 protects is unchanged.
+	askWithIO(s, sid, in, out, isTTY(os.Stdin), time.Now().UnixMilli())
 
 	if snapErr == nil {
-		reflectBestEffort(s, snap, extras, sid)
+		reflectWithIO(s, snap, extras, sid, in, out, isTTY(os.Stdin), time.Now().UnixMilli())
 	}
 	return nil
 }
@@ -432,14 +427,14 @@ func cmdDo(args []string) error {
 // reaction recorded as a Learning Reality. Best-effort — a failure prints
 // to stderr but never fails the do.
 func reflectBestEffort(s *store.Store, snap *reflection.Snapshot, extras []reflection.Candidate, doSession string) {
-	reflectWithIO(s, snap, extras, doSession, os.Stdin, os.Stdout, isTTY(os.Stdin), time.Now().UnixMilli())
+	reflectWithIO(s, snap, extras, doSession, bufio.NewReader(os.Stdin), os.Stdout, isTTY(os.Stdin), time.Now().UnixMilli())
 }
 
 // reflectWithIO is reflectBestEffort's testable core (the askWithIO split).
 // extras are candidates the snapshot comparison cannot see (re-perception,
 // ADR-0019 Decision 4). The seed doubles as nowMs: millisecond resolution is
 // plenty for a 1/day lottery, and RecordAndApply persists it either way.
-func reflectWithIO(s *store.Store, snap *reflection.Snapshot, extras []reflection.Candidate, doSession string, in io.Reader, out io.Writer, interactive bool, now int64) {
+func reflectWithIO(s *store.Store, snap *reflection.Snapshot, extras []reflection.Candidate, doSession string, in *bufio.Reader, out io.Writer, interactive bool, now int64) {
 	// A pipe has no reader to mirror to; the budget stays unspent.
 	if !interactive {
 		return
@@ -479,7 +474,7 @@ func reflectWithIO(s *store.Store, snap *reflection.Snapshot, extras []reflectio
 // records the routing like any provider.selected, waits, and the ordinary
 // adoption/perception tail turns the work into a human experience on the
 // same ledger, same decay, same gate.
-func runHuman(s *store.Store, sid string, in io.Reader) (executor.Result, error) {
+func runHuman(s *store.Store, sid string, in *bufio.Reader) (executor.Result, error) {
 	if err := s.AppendEvent(sid, "provider.selected", time.Now().UnixMilli(),
 		map[string]any{"provider": "human"}); err != nil {
 		return executor.Result{}, err
@@ -488,8 +483,79 @@ func runHuman(s *store.Store, sid string, in io.Reader) (executor.Result, error)
 	// EOF (piped stdin) falls straight through: the adoption prompt then
 	// also sees EOF and records no signal, which is correct for a headless
 	// run that no human actually performed.
-	bufio.NewReader(in).ReadString('\n')
+	in.ReadString('\n')
 	return executor.Result{Started: true}, nil
+}
+
+// openTask opens the ledger session for one task and settles who will run it.
+// `do` and a chat's first turn open the same thing (ADR-0022 Decision 1), so
+// they open it the same way.
+//
+// A named provider is resolved before anything is recorded: a session whose
+// provider never existed would sit in the ledger as a task that never
+// happened. auto is resolved after, by nature — its decision reads the
+// projections and is recorded into the very session it is deciding for.
+// human is a provider with no adapter (ADR-0018 Decision 2): the same ledger,
+// gate, and rehabilitation, executed by the user.
+func openTask(s *store.Store, providerName, capability, size, intent string) (sid string, adapter executor.Adapter, human bool, err error) {
+	human = providerName == "human"
+	if !human && providerName != "auto" {
+		if adapter, err = resolveProvider(providerName); err != nil {
+			return "", nil, false, err
+		}
+	}
+
+	now := time.Now().UnixMilli()
+	sid = store.NewID(now)
+	if err = s.AppendEvent(sid, "task.started", now,
+		map[string]any{"intent": intent, "source": "production"}); err != nil {
+		return "", nil, false, err
+	}
+	if err = s.AppendEvent(sid, "capability.started", now,
+		map[string]any{"capability": capability}); err != nil {
+		return "", nil, false, err
+	}
+
+	if providerName == "auto" {
+		dec, err := autoDecide(s, sid, capability, size)
+		if err != nil {
+			return "", nil, false, err
+		}
+		if dec.Provider == "human" {
+			human = true
+		} else {
+			adapter = providers[dec.Provider]
+		}
+	}
+	return sid, adapter, human, nil
+}
+
+// ensureClaudeProfile gates every path that can launch claude-code — auto can
+// pick it too, and a chat can switch to it mid-conversation. Called before any
+// event is recorded, so a misconfigured shell never pollutes the ledger with a
+// run that was doomed at launch.
+func ensureClaudeProfile(in *bufio.Reader, providerName string) error {
+	return ensureClaudeProfileIO(in, os.Stdout, providerName, isTTY(os.Stdin) && isTTY(os.Stdout))
+}
+
+// ensureClaudeProfileIO is ensureClaudeProfile's testable core (the askWithIO
+// split): interactivity is injected, so the question — the branch that costs
+// the user a prompt if it reads from the wrong place — can be exercised
+// without a terminal.
+//
+// On a terminal the missing choice becomes the question itself (ADR-0021
+// Decision 4); headless (daemon, cron, pipe) it stays a hard error.
+func ensureClaudeProfileIO(in *bufio.Reader, out io.Writer, providerName string, interactive bool) error {
+	if providerName != "claude-code" && providerName != "auto" || claudeProfileSet {
+		return nil
+	}
+	if !interactive {
+		return fmt.Errorf("no claude-code profile chosen — run `tomobit setup`,\n" +
+			"  or export TOMOBIT_CLAUDE_CONFIG_DIR=$HOME/.claude-personal\n" +
+			"  (set it empty to deliberately inherit the parent environment)")
+	}
+	fmt.Fprintln(out, "claude-code のプロファイルがまだ決まっていない。")
+	return askClaudeProfile(in, out)
 }
 
 // resolvePlan turns the --plan flag into a canonical plan name and records
@@ -624,17 +690,11 @@ func autoDecide(s *store.Store, sid, capability, size string) (decide.Decision, 
 	return dec, nil
 }
 
-// askBestEffort runs the Curiosity question at the do boundary (ADR-0007).
-// Best-effort: any failure prints to stderr but never fails the do.
-func askBestEffort(s *store.Store, doSession string) {
-	askWithIO(s, doSession, os.Stdin, os.Stdout, isTTY(os.Stdin), time.Now().UnixMilli())
-}
-
-// askWithIO is askBestEffort's testable core (same split as
-// adoptionPayload): stdin/stdout/interactivity/clock are injected so the
-// budget check and the recording side effect can be exercised without a
+// askWithIO is the Curiosity question at a task boundary (ADR-0007), and
+// finishTask's only way in. stdin/stdout/interactivity/clock are injected so
+// the budget check and the recording side effect can be exercised without a
 // real terminal.
-func askWithIO(s *store.Store, doSession string, in io.Reader, out io.Writer, interactive bool, now int64) {
+func askWithIO(s *store.Store, doSession string, in *bufio.Reader, out io.Writer, interactive bool, now int64) {
 	// Non-interactive stdin has no human to interrupt, so we neither ask nor
 	// record: the budget guards interruption frequency, and recording a
 	// tomo.asked here would silently burn 24h of budget on a headless run that
@@ -691,9 +751,9 @@ func providerErrorPayload(runErr error, result executor.Result) (payload map[str
 // (including EOF on non-interactive stdin) carry no learning signal, so the
 // payload is empty — EOF must never be read as "Enter" (both trim to ""),
 // or a headless run with no terminal would be silently recorded as adopted.
-func adoptionPayload(in io.Reader) map[string]any {
-	fmt.Print("採用? [Enter=そのまま / e=手直しあり / r=破棄 / s=わからない] ")
-	line, err := bufio.NewReader(in).ReadString('\n')
+func adoptionPayload(in *bufio.Reader, out io.Writer) map[string]any {
+	fmt.Fprint(out, "採用? [Enter=そのまま / e=手直しあり / r=破棄 / s=わからない] ")
+	line, err := in.ReadString('\n')
 	if err != nil {
 		return map[string]any{}
 	}
@@ -915,7 +975,12 @@ func cmdStatus(args []string) error {
 		return err
 	}
 	defer s.Close()
+	return showStatus(s)
+}
 
+// showStatus draws the companion view on an already-open store, so a chat can
+// slip it between turns (/status) without opening the DB a second time.
+func showStatus(s *store.Store) error {
 	conns, err := s.AllConnections()
 	if err != nil {
 		return err

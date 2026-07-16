@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -10,34 +11,35 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/Rererr/tomobit/internal/config"
 	"github.com/Rererr/tomobit/internal/core"
 	"github.com/Rererr/tomobit/internal/executor"
 	"github.com/Rererr/tomobit/internal/store"
 )
 
 func TestAdoptionPayloadEnterMeansAsIs(t *testing.T) {
-	got := adoptionPayload(strings.NewReader("\n"))
+	got := adoptionPayload(bufio.NewReader(strings.NewReader("\n")), io.Discard)
 	if got["adopted"] != "as-is" || got["reverted"] != false {
 		t.Errorf("Enter: got %v", got)
 	}
 }
 
 func TestAdoptionPayloadEMeansWithEdits(t *testing.T) {
-	got := adoptionPayload(strings.NewReader("e\n"))
+	got := adoptionPayload(bufio.NewReader(strings.NewReader("e\n")), io.Discard)
 	if got["adopted"] != "with-edits" || got["reverted"] != false {
 		t.Errorf("e: got %v", got)
 	}
 }
 
 func TestAdoptionPayloadRMeansReverted(t *testing.T) {
-	got := adoptionPayload(strings.NewReader("r\n"))
+	got := adoptionPayload(bufio.NewReader(strings.NewReader("r\n")), io.Discard)
 	if got["adopted"] != "" || got["reverted"] != true {
 		t.Errorf("r: got %v", got)
 	}
 }
 
 func TestAdoptionPayloadSCarriesNoSignal(t *testing.T) {
-	got := adoptionPayload(strings.NewReader("s\n"))
+	got := adoptionPayload(bufio.NewReader(strings.NewReader("s\n")), io.Discard)
 	if len(got) != 0 {
 		t.Errorf("s: got %v, want empty payload", got)
 	}
@@ -48,7 +50,7 @@ func TestAdoptionPayloadSCarriesNoSignal(t *testing.T) {
 // an empty line and mistaken for Enter — which would fabricate "as-is"
 // adoption nobody actually confirmed.
 func TestAdoptionPayloadEOFCarriesNoSignal(t *testing.T) {
-	got := adoptionPayload(strings.NewReader(""))
+	got := adoptionPayload(bufio.NewReader(strings.NewReader("")), io.Discard)
 	if len(got) != 0 {
 		t.Errorf("EOF: got %v, want empty payload (not as-is)", got)
 	}
@@ -172,7 +174,7 @@ func TestAskWithIONonInteractiveRecordsNothing(t *testing.T) {
 	growCapability(t, s, en, "lang=rust", "claude", 1000, 4, 1)
 	growCapability(t, s, en, "lang=rust", "codex", 1000, 4, 1)
 
-	askWithIO(s, "do-session", strings.NewReader("1\n"), &bytes.Buffer{}, false, 1000)
+	askWithIO(s, "do-session", bufio.NewReader(strings.NewReader("1\n")), &bytes.Buffer{}, false, 1000)
 
 	var total int
 	if err := s.DB.QueryRow(`SELECT count(*) FROM events`).Scan(&total); err != nil {
@@ -193,7 +195,7 @@ func TestAskWithIOInteractiveRecordsTomoAsked(t *testing.T) {
 	growCapability(t, s, en, "lang=rust", "codex", 1000, 4, 1)
 
 	var out bytes.Buffer
-	askWithIO(s, "do-session", strings.NewReader("1\n"), &out, true, 1000)
+	askWithIO(s, "do-session", bufio.NewReader(strings.NewReader("1\n")), &out, true, 1000)
 
 	if n := countEventsOfType(t, s, "tomo.asked"); n != 1 {
 		t.Errorf("interactive with an open gap should record exactly one tomo.asked, got %d", n)
@@ -461,5 +463,121 @@ func TestGreetIfReturned(t *testing.T) {
 	greetIfReturned(&out, s2, nil, now)
 	if out.Len() != 0 {
 		t.Errorf("an hour is no absence, got %q", out.String())
+	}
+}
+
+// TestIsTTYRejectsDevNull guards the whole non-interactive story: /dev/null is
+// a character device, so a file-mode check calls `tomobit ... < /dev/null` an
+// interactive terminal — and Tomo spends its one question a day (ADR-0007) on
+// nobody, recording a tomo.asked no human ever saw.
+func TestIsTTYRejectsDevNull(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if isTTY(f) {
+		t.Error("/dev/null is not a terminal")
+	}
+}
+
+// A regular file is the other half: `tomobit do ... < script.txt`.
+func TestIsTTYRejectsARegularFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "in.txt")
+	if err := os.WriteFile(path, []byte("hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if isTTY(f) {
+		t.Error("a regular file is not a terminal")
+	}
+}
+
+// unsetClaudeProfile makes this process look like a machine where no profile
+// has ever been chosen, and puts the wiring back afterwards. HOME is
+// redirected too: answering the question saves, and a test must never write
+// the real ~/.tomobit/config.json.
+func unsetClaudeProfile(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	if v, ok := os.LookupEnv("TOMOBIT_CLAUDE_CONFIG_DIR"); ok {
+		os.Unsetenv("TOMOBIT_CLAUDE_CONFIG_DIR")
+		t.Cleanup(func() { os.Setenv("TOMOBIT_CLAUDE_CONFIG_DIR", v) })
+	}
+	oldCfg, oldErr := cfg, cfgErr
+	cfg, cfgErr = config.Config{}, nil
+	t.Cleanup(func() {
+		cfg, cfgErr = oldCfg, oldErr
+		wireClaude()
+	})
+	wireClaude()
+	if claudeProfileSet {
+		t.Fatal("setup: the profile should look unchosen")
+	}
+}
+
+// The missing choice becomes the question (ADR-0021 Decision 4), and the
+// question reads from the reader it was handed — the one a chat also reads
+// its next turn from. Taking one byte more than its own line would swallow
+// whatever the user had already typed ahead.
+func TestEnsureClaudeProfileAsksOnTheGivenReaderAndTakesOnlyItsLine(t *testing.T) {
+	unsetClaudeProfile(t)
+	in := bufio.NewReader(strings.NewReader("0\n次のタスク\n"))
+	var out bytes.Buffer
+
+	if err := ensureClaudeProfileIO(in, &out, "claude-code", true); err != nil {
+		t.Fatal(err)
+	}
+	if !claudeProfileSet {
+		t.Error("answering must settle the choice")
+	}
+	if !strings.Contains(out.String(), "プロファイル") {
+		t.Errorf("the question must be asked: %q", out.String())
+	}
+	rest, err := in.ReadString('\n')
+	if err != nil || strings.TrimSpace(rest) != "次のタスク" {
+		t.Errorf("the rest of the reader must survive the question: got %q (%v)", rest, err)
+	}
+}
+
+// Headless (daemon, cron, pipe) it stays a hard error: starting a dialogue
+// inside automation is the accident ADR-0021 refuses, so nothing is read and
+// nothing is saved.
+func TestEnsureClaudeProfileHeadlessRefusesWithoutReading(t *testing.T) {
+	unsetClaudeProfile(t)
+	in := bufio.NewReader(strings.NewReader("0\n"))
+	var out bytes.Buffer
+
+	err := ensureClaudeProfileIO(in, &out, "claude-code", false)
+	if err == nil {
+		t.Fatal("a headless run with no profile chosen must fail")
+	}
+	if !strings.Contains(err.Error(), "tomobit setup") {
+		t.Errorf("the error must say how to fix it: %v", err)
+	}
+	if claudeProfileSet {
+		t.Error("nothing may be settled without an answer")
+	}
+	if line, _ := in.ReadString('\n'); strings.TrimSpace(line) != "0" {
+		t.Errorf("the input must be untouched: got %q", line)
+	}
+}
+
+// auto can pick claude-code, so it carries the same gate; a provider that
+// cannot be claude-code never triggers the question.
+func TestEnsureClaudeProfileGatesAutoButNotOtherProviders(t *testing.T) {
+	unsetClaudeProfile(t)
+	var out bytes.Buffer
+	if err := ensureClaudeProfileIO(bufio.NewReader(strings.NewReader("")), &out, "auto", false); err == nil {
+		t.Error("auto may launch claude-code, so it must be gated too")
+	}
+	for _, name := range []string{"codex", "human"} {
+		if err := ensureClaudeProfileIO(bufio.NewReader(strings.NewReader("")), &out, name, false); err != nil {
+			t.Errorf("%s needs no claude profile: %v", name, err)
+		}
 	}
 }
