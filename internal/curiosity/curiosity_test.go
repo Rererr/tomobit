@@ -143,7 +143,7 @@ func TestFrequentGateClosesOnRareScope(t *testing.T) {
 	applyExec(t, s, en, "e1", "lang=rust", "claude", core.Outcome{Adopted: "as-is"})
 	applyExec(t, s, en, "e2", "lang=rust", "codex", core.Outcome{Adopted: "as-is"})
 
-	freq, _, _ := scopeStats(core.ParseScopeKey("lang=rust"), mustExps(t, s), now)
+	freq, _, _ := scopeStats(core.ParseScopeKey("lang=rust"), mustExps(t, s), now, func(e *core.Experience) string { return e.Target() })
 	if freq >= FMin {
 		t.Fatalf("fixture broken: freq %v should be below FMin", freq)
 	}
@@ -349,4 +349,44 @@ func countEvents(t *testing.T, s *store.Store, typ string) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// TestVoIDeprioritizesPartiallyAnsweredGaps (ADR-0016): equal arrival
+// frequency, but the pair that already leans one way (preference evidence
+// below EMax, so the gap is still open) wobbles less — and sinks in the
+// ranking. 判断が変わることだけが理由になる。
+func TestVoIDeprioritizesPartiallyAnsweredGaps(t *testing.T) {
+	s := openStore(t)
+	en := &core.Engine{Repo: s}
+	grow(t, s, en, "lang=rust", "claude", 3, 0)
+	grow(t, s, en, "lang=rust", "codex", 3, 0)
+	grow(t, s, en, "lang=go", "claude", 3, 0)
+	grow(t, s, en, "lang=go", "codex", 3, 0)
+
+	// lang=go already leans claude a little: 0.4 evidence keeps the gap
+	// open (< EMax) but sharpens the lottery below the blank slate's coin.
+	if err := s.UpsertConnection(&core.Connection{
+		Kind: core.ConnPreference, ScopeKey: "lang=go", Target: "claude~codex",
+		Alpha: 1.4, Beta: 1.0, LastUpdate: now, BornTS: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	gaps := gapsAt(t, s)
+	if len(gaps) != 2 {
+		t.Fatalf("want 2 open gaps, got %d: %+v", len(gaps), gaps)
+	}
+	if gaps[0].ScopeKey != "lang=rust" || gaps[1].ScopeKey != "lang=go" {
+		t.Errorf("blank pair should outrank the leaning pair: %q then %q",
+			gaps[0].ScopeKey, gaps[1].ScopeKey)
+	}
+	if gaps[0].Wobble <= gaps[1].Wobble {
+		t.Errorf("wobble should shrink with evidence: %v vs %v",
+			gaps[0].Wobble, gaps[1].Wobble)
+	}
+	for _, g := range gaps {
+		if g.VoI <= 0 || g.VoI != g.Freq*g.Wobble {
+			t.Errorf("VoI must be Freq×Wobble > 0: %+v", g)
+		}
+	}
 }

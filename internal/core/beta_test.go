@@ -23,21 +23,36 @@ func TestDecayFactorHalvesEveryHalfLife(t *testing.T) {
 }
 
 func TestPosteriorAtLeavesCountsWhenNowEqualsLastUpdate(t *testing.T) {
-	a, b := PosteriorAt(11, 4, 500, 500)
+	c := &Connection{Alpha: 11, Beta: 4, LastUpdate: 500}
+	a, b := c.PosteriorAt(500)
 	almostEqual(t, a, 11, 1e-12, "alpha")
 	almostEqual(t, b, 4, 1e-12, "beta")
 }
 
 func TestPosteriorAtShrinksTowardPrior(t *testing.T) {
-	a, b := PosteriorAt(11, 1, 0, HalfLifeMs)
+	c := &Connection{Alpha: 11, Beta: 1, LastUpdate: 0}
+	a, b := c.PosteriorAt(HalfLifeMs)
 	almostEqual(t, a, PriorAlpha+(11-PriorAlpha)*0.5, 1e-12, "alpha halved toward prior")
 	almostEqual(t, b, PriorBeta+(1-PriorBeta)*0.5, 1e-12, "beta halved toward prior")
 }
 
 func TestPosteriorAtApproachesPriorAtInfinity(t *testing.T) {
-	a, b := PosteriorAt(100, 50, 0, 100*HalfLifeMs)
+	c := &Connection{Alpha: 100, Beta: 50, LastUpdate: 0}
+	a, b := c.PosteriorAt(100 * HalfLifeMs)
 	almostEqual(t, a, PriorAlpha, 1e-9, "alpha -> prior")
 	almostEqual(t, b, PriorBeta, 1e-9, "beta -> prior")
+}
+
+// TestPosteriorAtSinksToInheritedPrior: forgetting bottoms out at the family
+// memory, not at the blank Beta(1,1) (ADR-0013 Decision 2 —
+// 忘却の底は白紙ではなく、家系の記憶である).
+func TestPosteriorAtSinksToInheritedPrior(t *testing.T) {
+	c := &Connection{Alpha: 20, Beta: 5, LastUpdate: 0, PriorA: 1.6, PriorB: 0.4}
+	a, b := c.PosteriorAt(100 * HalfLifeMs)
+	almostEqual(t, a, 1.6, 1e-9, "alpha -> inherited prior")
+	almostEqual(t, b, 0.4, 1e-9, "beta -> inherited prior")
+	almostEqual(t, c.Mean(100*HalfLifeMs), 0.8, 1e-9, "mean -> parent μ")
+	almostEqual(t, c.Evidence(100*HalfLifeMs), 0, 1e-9, "evidence -> 0")
 }
 
 func TestObserveDecaysThenFoldsWeightedOutcome(t *testing.T) {

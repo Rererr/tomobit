@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Rererr/tomobit/internal/core"
+	"github.com/Rererr/tomobit/internal/decide"
 	"github.com/Rererr/tomobit/internal/store"
 	"github.com/Rererr/tomobit/internal/voice"
 )
@@ -36,6 +37,12 @@ const (
 	// BudgetWindowMs is the rolling window in which a single tomo.asked spends
 	// the whole budget (ADR-0007 Decision 3).
 	BudgetWindowMs = 24 * 3600 * 1000
+
+	// VoIDraws is M (ADR-0016): how many judgment-lottery draws measure the
+	// wobble. The seed is fixed so the ordering is a deterministic View —
+	// the same ledger always ranks its gaps the same way.
+	VoIDraws = 64
+	voiSeed  = 1
 )
 
 // Gap is a scope where two providers are indistinguishable on capability,
@@ -45,11 +52,15 @@ type Gap struct {
 	ScopeKey string
 	A, B     string // providers, lexicographically A < B
 	LnBF     float64
-	Freq     float64 // decayed scope frequency = priority
+	Freq     float64 // decayed scope frequency
+	Wobble   float64 // TS-lottery winner split rate (ADR-0016)
+	VoI      float64 // Freq × Wobble = priority
 }
 
-// Gaps derives every open Preference Gap at nowMs, ordered by priority:
-// Freq desc, then scope_key asc, then pair asc — fully deterministic.
+// Gaps derives every open Preference Gap at nowMs, ordered by Value of
+// Information (ADR-0016 Decision 2): 到来頻度 × 判断の揺らぎ. Ties break on
+// scope_key then pair — fully deterministic (fixed wobble seed).
+// 不確実性は好奇心の理由にならない。判断が変わることだけが理由になる。
 func Gaps(repo core.Repo, nowMs int64) ([]Gap, error) {
 	conns, err := repo.AllConnections()
 	if err != nil {
@@ -61,57 +72,79 @@ func Gaps(repo core.Repo, nowMs int64) ([]Gap, error) {
 	}
 
 	providersByScope := map[string][]string{}
-	capEvidence := map[string]float64{}
+	plansByScope := map[string][]string{}
+	betEvidence := map[string]float64{}
 	prefEvidence := map[string]float64{}
+	prefConns := map[string]*core.Connection{}
 	for _, c := range conns {
 		switch c.Kind {
 		case core.ConnCapability:
 			providersByScope[c.ScopeKey] = append(providersByScope[c.ScopeKey], c.Target)
-			capEvidence[c.ScopeKey+"\x00"+c.Target] = c.Evidence(nowMs)
+			betEvidence[c.ScopeKey+"\x00"+c.Target] = c.Evidence(nowMs)
+		case core.ConnPlan:
+			// Plans are the second bet target (ADR-0014 Decision 1) — Tomo
+			// may also ask 「どっちの手順が好みだった?」.
+			plansByScope[c.ScopeKey] = append(plansByScope[c.ScopeKey], c.Target)
+			betEvidence[c.ScopeKey+"\x00"+c.Target] = c.Evidence(nowMs)
 		case core.ConnPreference:
 			prefEvidence[c.ScopeKey+"\x00"+c.Target] = c.Evidence(nowMs)
+			prefConns[c.ScopeKey+"\x00"+c.Target] = c
 		}
 	}
 
 	var gaps []Gap
-	for scopeKey, providers := range providersByScope {
-		if len(providers) < 2 {
-			continue
-		}
-		sort.Strings(providers)
-		scope := core.ParseScopeKey(scopeKey)
-		freq, k, n := scopeStats(scope, exps, nowMs)
-		if freq < FMin { // frequent gate
-			continue
-		}
-		for i := 0; i < len(providers); i++ {
-			for j := i + 1; j < len(providers); j++ {
-				a, b := providers[i], providers[j]
-				// Even gate. Evidence guards against calling a Bayes factor
-				// neutral-by-ignorance "even": that is a Knowledge Gap, not a
-				// Preference Gap (ADR-0007 Decision 2).
-				if capEvidence[scopeKey+"\x00"+a] < NMin || capEvidence[scopeKey+"\x00"+b] < NMin {
-					continue
+	// stats reads the outcome tallies keyed по the given attribute of each
+	// matching experience: the provider for capability bets, the plan for
+	// plan bets.
+	collect := func(byScope map[string][]string, targetOf func(*core.Experience) string) {
+		for scopeKey, targets := range byScope {
+			if len(targets) < 2 {
+				continue
+			}
+			sort.Strings(targets)
+			scope := core.ParseScopeKey(scopeKey)
+			freq, k, n := scopeStats(scope, exps, nowMs, targetOf)
+			if freq < FMin { // frequent gate
+				continue
+			}
+			for i := 0; i < len(targets); i++ {
+				for j := i + 1; j < len(targets); j++ {
+					a, b := targets[i], targets[j]
+					// Even gate. Evidence guards against calling a Bayes factor
+					// neutral-by-ignorance "even": that is a Knowledge Gap, not a
+					// Preference Gap (ADR-0007 Decision 2).
+					if betEvidence[scopeKey+"\x00"+a] < NMin || betEvidence[scopeKey+"\x00"+b] < NMin {
+						continue
+					}
+					lnBF := core.LnBF(k[a], n[a], k[b], n[b])
+					if lnBF >= ThetaEven {
+						continue
+					}
+					// No-evidence gate: an absent preference Connection is 0.
+					if prefEvidence[scopeKey+"\x00"+a+"~"+b] >= EMax {
+						continue
+					}
+					// The gap's judgment is exactly this pair's lottery, so its
+					// wobble prices the question (ADR-0016: PreferenceGapの発火
+					// 条件は実はVoIの特殊例だった). The preference connection is
+					// usually absent here — Beta(1,1), maximum wobble.
+					wobble := decide.PairWobble(
+						prefConns[scopeKey+"\x00"+a+"~"+b], VoIDraws, voiSeed, nowMs)
+					gaps = append(gaps, Gap{
+						Scope: scope, ScopeKey: scopeKey,
+						A: a, B: b, LnBF: lnBF, Freq: freq,
+						Wobble: wobble, VoI: freq * wobble,
+					})
 				}
-				lnBF := core.LnBF(k[a], n[a], k[b], n[b])
-				if lnBF >= ThetaEven {
-					continue
-				}
-				// No-evidence gate: an absent preference Connection is 0.
-				if prefEvidence[scopeKey+"\x00"+a+"~"+b] >= EMax {
-					continue
-				}
-				gaps = append(gaps, Gap{
-					Scope: scope, ScopeKey: scopeKey,
-					A: a, B: b, LnBF: lnBF, Freq: freq,
-				})
 			}
 		}
 	}
+	collect(providersByScope, func(e *core.Experience) string { return e.Target() })
+	collect(plansByScope, func(e *core.Experience) string { return e.Plan })
 
 	sort.Slice(gaps, func(i, j int) bool {
-		if gaps[i].Freq != gaps[j].Freq {
-			return gaps[i].Freq > gaps[j].Freq
+		if gaps[i].VoI != gaps[j].VoI {
+			return gaps[i].VoI > gaps[j].VoI
 		}
 		if gaps[i].ScopeKey != gaps[j].ScopeKey {
 			return gaps[i].ScopeKey < gaps[j].ScopeKey
@@ -124,9 +157,10 @@ func Gaps(repo core.Repo, nowMs int64) ([]Gap, error) {
 	return gaps, nil
 }
 
-// scopeStats returns the decayed scope frequency and, per provider, the
+// scopeStats returns the decayed scope frequency and, per bet target, the
 // decayed (k, n) over usable execution experiences matching the scope.
-func scopeStats(scope core.Scope, exps []*core.Experience, nowMs int64) (freq float64, k, n map[string]float64) {
+// targetOf selects which attribute the tallies key on (provider or plan).
+func scopeStats(scope core.Scope, exps []*core.Experience, nowMs int64, targetOf func(*core.Experience) string) (freq float64, k, n map[string]float64) {
 	k, n = map[string]float64{}, map[string]float64{}
 	for _, e := range exps {
 		if e.Kind != core.KindExecution || !scope.SubsetOf(e.Tokens()) {
@@ -141,7 +175,10 @@ func scopeStats(scope core.Scope, exps []*core.Experience, nowMs int64) (freq fl
 		if !ok {
 			continue
 		}
-		p := e.Target()
+		p := targetOf(e)
+		if p == "" {
+			continue
+		}
 		k[p] += w * y
 		n[p] += w
 	}
@@ -165,8 +202,8 @@ func HasBudget(s *store.Store, nowMs int64) (bool, error) {
 // LLM) and maps the reply: "1" -> A wins, "2" -> B wins, anything else
 // (including EOF) is a skip.
 func Ask(in io.Reader, out io.Writer, gap Gap) (preferred, over string, answered bool) {
-	fmt.Fprintf(out, "「最近 %s で %s と %s 両方使ってるけど、どっちが好みだった?」 [1=%s / 2=%s / Enter=スキップ] ",
-		voice.ScopeDisplay(gap.Scope), gap.A, gap.B, gap.A, gap.B)
+	fmt.Fprintf(out, "「%s」 [1=%s / 2=%s / Enter=スキップ] ",
+		voice.Asked(gap.Scope, gap.A, gap.B), gap.A, gap.B)
 	line, _ := bufio.NewReader(in).ReadString('\n')
 	switch strings.TrimSpace(line) {
 	case "1":
@@ -192,6 +229,8 @@ func RecordAndPerceive(s *store.Store, en *core.Engine, gap Gap, preferred, over
 		"pair":        []string{gap.A, gap.B},
 		"ln_bf":       gap.LnBF,
 		"freq":        gap.Freq,
+		"wobble":      gap.Wobble,
+		"voi":         gap.VoI,
 		"asked_after": askedAfter,
 	}
 	if err := s.AppendEvent(askSession, "tomo.asked", nowMs, asked); err != nil {

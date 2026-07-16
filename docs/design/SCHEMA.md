@@ -261,4 +261,26 @@ R4. eventsのtype初期カタログ（14種で確定）
     tomo.asked: Tomoの質問自体もReality。
     質問予算の管理と「聞きすぎていないか」の検証に使う。
     封筒方式のため、type追加はいつでも可能（このカタログは初版）
+
+    追加済みtype（初版以後）:
+    - tomo.decided（ADR-0012）: 決定エンジンの監査記録。
+      payload = {provider, seed(文字列 — UnixNanoはJSON float64の整数精度を
+      超えるため), n, q, fallback, cap, size, candidates[{provider, quantile,
+      passed, scope}]}。同じ台帳＋同じseed → 同じ判断のリプレイ用
+    - tomo.reflected（ADR-0015）: 語った事実の記帳。予算管理と重複抑止用。
+      payload = {type, scope, provider, other, text, seed, after}
+    - tomo.greeted（ADR-0019 D2）: おかえりを言った事実。同じ帰還への
+      重複挨拶の抑止用。payload = {absent_ms}
+    - plan.selected（ADR-0014）: 採用したPlanの記帳（知覚の決定的抽出元 —
+      experiences.plan列へ）。payload = {plan, cap, size, seed, n, q,
+      fallback} または手動指定時 {plan, cap, manual: true}
+    （plan.generated は初期カタログ14種に含まれる。ADR-0014の提案記帳:
+      payload = {cap, plan, parent, op} — メニューの生存はこのイベントから
+      導出されるため rebuild で消えない）
+
+    列追加（ADR-0014）: experiences.plan（機械属性 — ハーネス自身が知って
+    いる採用Plan。plan Connectionの賭け先キー）
+
+    kind追加（ADR-0015）: experiences.kind に 'reflection'
+    （反応の記帳。outcomeに insight / reaction を持つ）
 ```

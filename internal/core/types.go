@@ -10,20 +10,29 @@ import (
 	"unicode"
 )
 
-// Experience kinds (SCHEMA.md D7).
+// Experience kinds (SCHEMA.md D7; reflection added by ADR-0015).
 const (
 	KindExecution  = "execution"
 	KindPreference = "preference"
+	KindReflection = "reflection"
 )
 
-// Connection kinds.
+// Connection kinds. ConnPlan is the second bet target (ADR-0014 Decision 1:
+// 台帳は賭ける対象を選ばない — the right side of a Connection is not limited
+// to providers).
 const (
 	ConnCapability = "capability"
 	ConnPreference = "preference"
+	ConnPlan       = "plan"
 )
 
 // Outcome holds the raw observations of an experience. Weights are NOT
 // stored here; they are resolved by OutcomeWeight (SCHEMA.md D11).
+//
+// Insight/Reaction belong to reflection experiences (ADR-0015). They live in
+// Outcome, not Context, on purpose: a context token like "insight=split"
+// would enter the Split candidate vocabulary and let the judgment partition
+// capability worlds on the mirror's own bookkeeping.
 type Outcome struct {
 	TestsPassed *bool  `json:"tests_passed,omitempty"`
 	Adopted     string `json:"adopted,omitempty"` // "as-is" | "with-edits"
@@ -32,9 +41,15 @@ type Outcome struct {
 	Cancelled   bool   `json:"cancelled,omitempty"`
 	Preferred   string `json:"preferred,omitempty"` // preference kind
 	Over        string `json:"over,omitempty"`      // preference kind
+	Insight     string `json:"insight,omitempty"`   // reflection: candidate type told
+	Reaction    string `json:"reaction,omitempty"`  // reflection: "unexpected" | "known" | "wrong"
 }
 
 // Experience is the immutable asset (SCHEMA.md: experiences table).
+//
+// Plan is the harness-known plan the run followed (ADR-0014) — a machine
+// attribute like Provider, never asked of the model. Empty for runs that
+// used no plan machinery.
 type Experience struct {
 	ID             string
 	SessionID      string
@@ -44,6 +59,7 @@ type Experience struct {
 	ExtractorModel string
 	Context        map[string]string
 	Provider       string // execution only
+	Plan           string // execution only (ADR-0014)
 	Outcome        Outcome
 	Source         string // "production" | "learning"
 }
@@ -142,6 +158,10 @@ func OutcomeWeight(e *Experience) (y float64, ok bool) {
 
 // Connection is a projection row: the substance is Beta(α,β) plus the lazy
 // decay anchor. Everything else is a derived view (One Ledger).
+//
+// PriorA/PriorB are this connection's own prior (ADR-0013): a split child
+// inherits Beta(μ·m₀, (1−μ)·m₀) from its parent's posterior mean, and decay
+// sinks back to it — 忘却の底は白紙ではなく、家系の記憶である.
 type Connection struct {
 	Kind       string
 	ScopeKey   string
@@ -151,9 +171,21 @@ type Connection struct {
 	LastUpdate int64
 	BornTS     int64
 	ParentKey  string
+	PriorA     float64
+	PriorB     float64
 }
 
 func (c *Connection) Scope() Scope { return ParseScopeKey(c.ScopeKey) }
+
+// Prior returns the connection's own prior, falling back to Beta(1,1) for
+// parentless connections and legacy rows where the pair was never set
+// (ADR-0003: 親を持たずに生まれるConnectionの初期値).
+func (c *Connection) Prior() (a, b float64) {
+	if c.PriorA <= 0 || c.PriorB <= 0 {
+		return PriorAlpha, PriorBeta
+	}
+	return c.PriorA, c.PriorB
+}
 
 // LedgerEntry is one row of the surprise ledger (ADR-0002).
 type LedgerEntry struct {

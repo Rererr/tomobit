@@ -335,6 +335,50 @@ func TestUpsertConnectionUpdatesOnlyPosteriorFields(t *testing.T) {
 	}
 }
 
+// TestConnectionPriorRoundTripAndImmutability (ADR-0013): the inherited
+// prior persists, and a later posterior upsert can never rewrite it — the
+// prior is set at birth, full stop.
+func TestConnectionPriorRoundTripAndImmutability(t *testing.T) {
+	s := openTest(t)
+	first := &core.Connection{
+		Kind: core.ConnCapability, ScopeKey: "cap=impl|lang=rust", Target: "claude",
+		Alpha: 1.6, Beta: 0.4, LastUpdate: 100, BornTS: 100, ParentKey: "cap=impl",
+		PriorA: 1.6, PriorB: 0.4,
+	}
+	if err := s.UpsertConnection(first); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetConnection(core.ConnCapability, "cap=impl|lang=rust", "claude")
+	if got.PriorA != 1.6 || got.PriorB != 0.4 {
+		t.Errorf("prior round-trip mismatch: %+v", got)
+	}
+
+	update := *first
+	update.Alpha, update.Beta, update.LastUpdate = 5, 3, 200
+	update.PriorA, update.PriorB = 9, 9
+	if err := s.UpsertConnection(&update); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.GetConnection(core.ConnCapability, "cap=impl|lang=rust", "claude")
+	if got.PriorA != 1.6 || got.PriorB != 0.4 {
+		t.Errorf("prior must stay from first insert: %+v", got)
+	}
+
+	// A parentless row that never set its prior reads back as the blank
+	// Beta(1,1) via the schema default.
+	root := &core.Connection{
+		Kind: core.ConnCapability, ScopeKey: "lang=go", Target: "claude",
+		Alpha: 2, Beta: 1, LastUpdate: 100, BornTS: 100,
+	}
+	if err := s.UpsertConnection(root); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.GetConnection(core.ConnCapability, "lang=go", "claude")
+	if pa, pb := got.Prior(); pa != core.PriorAlpha || pb != core.PriorBeta {
+		t.Errorf("parentless prior should be Beta(1,1), got (%v,%v)", pa, pb)
+	}
+}
+
 func TestLedgerCRUDAndClearProjections(t *testing.T) {
 	s := openTest(t)
 	c := &core.Connection{Kind: core.ConnCapability, ScopeKey: "lang=rust", Target: "claude", Alpha: 1, Beta: 1, LastUpdate: 1, BornTS: 1}
@@ -439,4 +483,60 @@ func currentByID(t *testing.T, s *Store, id string) *core.Experience {
 	}
 	t.Fatalf("experience %q not in current view", id)
 	return nil
+}
+
+// TestMigrationRebuildsPreReflectionExperiences (ADR-0015): an old database
+// whose CHECK predates kind='reflection' is rebuilt in place — truth rows
+// survive verbatim, the append-only triggers come back, and reflection
+// experiences insert cleanly afterwards.
+func TestMigrationRebuildsPreReflectionExperiences(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Regress the schema to the pre-ADR-0015 CHECK with one row in it.
+	_, err = s.DB.Exec(`
+		BEGIN;
+		DROP VIEW experiences_current;
+		DROP TABLE experiences;
+		CREATE TABLE experiences (
+		  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, ts INTEGER NOT NULL,
+		  kind TEXT NOT NULL CHECK (kind IN ('execution','preference')),
+		  extractor_ver INTEGER NOT NULL, extractor_model TEXT NOT NULL,
+		  context TEXT NOT NULL CHECK (json_valid(context)),
+		  provider TEXT, outcome TEXT NOT NULL CHECK (json_valid(outcome)),
+		  source TEXT NOT NULL DEFAULT 'production' CHECK (source IN ('production','learning'))
+		);
+		INSERT INTO experiences VALUES ('e1','sess',100,'execution',1,'m','{}','claude','{}','production');
+		COMMIT;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen with migration: %v", err)
+	}
+	defer s.Close()
+
+	exps, err := s.CurrentExperiences()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exps) != 1 || exps[0].ID != "e1" {
+		t.Fatalf("truth rows must survive the rebuild: %+v", exps)
+	}
+	if err := s.InsertExperience(&core.Experience{
+		ID: "r1", SessionID: "refl", TS: 200, Kind: core.KindReflection,
+		ExtractorVer: 1, ExtractorModel: "deterministic",
+		Context: map[string]string{}, Outcome: core.Outcome{Reaction: "unexpected"},
+		Source: "learning",
+	}); err != nil {
+		t.Fatalf("reflection insert after migration: %v", err)
+	}
+	if _, err := s.DB.Exec(`DELETE FROM experiences WHERE id='e1'`); err == nil {
+		t.Fatal("append-only trigger must be recreated after the rebuild")
+	}
 }

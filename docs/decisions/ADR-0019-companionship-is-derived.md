@@ -107,3 +107,14 @@ Sovereignty（ADR-0018）と響き合う: あなたの経験だけが、あな�
 - 実装順序は前提部品に従う: Decision 1は揺らぎ＋Surprise実装後、
   Decision 2は減衰実装後、Decision 3/4はReflection実装後。
   Decision 5（VISION）は今日から真
+- 実装追記（2026-07-16、前提部品が全て揃ったため全Decision実装）:
+  - D1: 確信度は2段階（揺らぎ≥0.25で弱音、`voice.Decided` — autoの決定時に発話）。
+    驚きの閾値は小=0.2 / 大=1.0 nats（`voice.Missed` — perceive境界の発話連鎖に
+    growth > insight > **miss-reaction** > murmur として挿入）
+  - D2: 不在=直近イベントから72h以上の空白。挨拶は最も自信が薄れた島
+    （Confidence低下≥0.02）を名指しし、`tomo.greeted` を記帳して同じ帰還に
+    二度挨拶しない（statusの相棒ビューで発話）
+  - D3: humanの逆転はReflectionの既存逆転検出に自動で乗り、human勝ちは
+    専用テンプレート（`voice.ReflectHumanReversal`）
+  - D4: 再知覚=第5のトリガー `reperceived`。extractor_ver更新で同一sessionの
+    currentが差し替わり、コンテキストトークンが動いたとき、移動した帰属を語る

@@ -83,3 +83,9 @@ Sovereigntyが前提であることに意味がある:
 - Provider語彙に `human`（Human Executorは既存 — ADR-0006。R3の道具名と同列）
 - 将来の同期・共有機能は必ずopt-in。「既定オフ」は原則からの要求であり実装の趣味ではない
 - 思想・設計改稿シリーズの論点キュー（5→6→2→3→1→8→9→10）が全て閉じた
+- 実装追記（2026-07-16）: `tomobit do --provider human`（自分でやると宣言）と
+  `--provider auto` の候補に human が常時参加。humanが選ばれた場合は
+  provider.selected {provider: human} を記帳し、Tomoが正直にルーティングを告げ、
+  作業完了後は通常の採用質問→知覚で同じ台帳に乗る（Decision 2/3）。
+  Reflectionの逆転トリガーはhumanも対象で、human勝ちの逆転は専用の語り
+  （ADR-0019 Decision 3）になる（Decision 4）

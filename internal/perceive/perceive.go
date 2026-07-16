@@ -102,7 +102,7 @@ func (p *Perceiver) perceiveSession(sessionID string) ([]*core.Experience, error
 		ID: store.NewID(ts), SessionID: sessionID, TS: ts,
 		Kind: core.KindExecution, ExtractorVer: p.Ver,
 		ExtractorModel: p.extractorName(),
-		Context:        ctx, Provider: det.provider,
+		Context:        ctx, Provider: det.provider, Plan: det.plan,
 		Outcome: det.outcome, Source: det.source,
 	}}
 
@@ -141,6 +141,7 @@ type deterministic struct {
 	capability  string
 	provider    string
 	model       string
+	plan        string
 	outcome     core.Outcome
 	source      string
 	preferences []core.Outcome
@@ -165,6 +166,10 @@ func parseDeterministic(events []*store.Event) deterministic {
 		case "provider.selected":
 			d.provider = str(e.Payload, "provider")
 			d.model = str(e.Payload, "model")
+		case "plan.selected":
+			// The plan is a machine attribute the harness itself recorded
+			// (ADR-0014) — deterministic, never asked of the model.
+			d.plan = str(e.Payload, "plan")
 		case "test.result":
 			if passed, ok := e.Payload["passed"].(bool); ok {
 				p := passed

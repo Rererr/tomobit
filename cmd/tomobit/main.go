@@ -12,29 +12,43 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/Rererr/tomobit/internal/core"
 	"github.com/Rererr/tomobit/internal/curiosity"
+	"github.com/Rererr/tomobit/internal/decide"
 	"github.com/Rererr/tomobit/internal/executor"
 	"github.com/Rererr/tomobit/internal/executor/claudecode"
 	"github.com/Rererr/tomobit/internal/executor/codex"
 	"github.com/Rererr/tomobit/internal/face"
 	"github.com/Rererr/tomobit/internal/perceive"
+	"github.com/Rererr/tomobit/internal/plan"
+	"github.com/Rererr/tomobit/internal/reflection"
 	"github.com/Rererr/tomobit/internal/store"
 	"github.com/Rererr/tomobit/internal/voice"
 )
 
 const extractorVer = 3 // bump when the extraction prompt/schema changes
 
-// providers is the Decision Engine's Phase 1 stand-in (ADR-0010 Decision 1):
-// a human picks via --provider until Connections grow enough to justify
-// automatic selection. Registered names are SCHEMA.md R3 provider names.
+// providers holds the registered adapters (SCHEMA.md R3 provider names).
+// `--provider <name>` is the human's explicit pick; `--provider auto` hands
+// the choice to the Decision Engine (ADR-0012: 悲観分位点ゲート + Thompson
+// Sampling), which records its seed to events so the lottery replays.
 var providers = map[string]executor.Adapter{
 	"claude-code": claudecode.New(),
 	"codex":       codex.New(),
+}
+
+func providerNames() []string {
+	names := make([]string, 0, len(providers))
+	for n := range providers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // resolveProvider looks up a registered Adapter by name, or reports the
@@ -43,12 +57,8 @@ func resolveProvider(name string) (executor.Adapter, error) {
 	if a, ok := providers[name]; ok {
 		return a, nil
 	}
-	names := make([]string, 0, len(providers))
-	for n := range providers {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return nil, fmt.Errorf("do: unknown provider %q (available: %s)", name, strings.Join(names, ", "))
+	return nil, fmt.Errorf("do: unknown provider %q (available: %s, human, auto)",
+		name, strings.Join(providerNames(), ", "))
 }
 
 func main() {
@@ -96,8 +106,13 @@ func usage() {
 usage:
   tomobit          (no args) companion view — avatar, mood, a line, connections
   tomobit do       [--cap implement] [--timeout 0] [--permission-mode <mode>]
-                   [--provider claude-code|codex]
+                   [--provider claude-code|codex|human|auto]
+                   [--plan auto|full|direct|quick|<steps>] [--size small|medium|large]
                    [--model qwen3:8b] [--url http://localhost:11434] "<prompt>"
+                   --provider auto: 決定エンジン(ADR-0012)が能力ゲート+TSで選ぶ
+                   （humanも候補 — ADR-0018）。--provider human: 自分でやって
+                   同じ台帳に乗せる。--plan auto: 手順も台帳が選ぶ(ADR-0014、
+                   例 analyze>implement>test)。--size は判断の温度 n(stakes)
   tomobit record   --session <id> --type <event.type> [--json '{...}']
   tomobit perceive [--model qwen3:8b] [--url http://localhost:11434]
   tomobit rebuild
@@ -168,7 +183,9 @@ func cmdDo(args []string) error {
 	capability := fs.String("cap", "implement", "capability of the task")
 	timeout := fs.Duration("timeout", 0, "max run time, 0 = no limit")
 	permMode := fs.String("permission-mode", "", "permission mode passthrough (claude --permission-mode / codex --sandbox)")
-	providerName := fs.String("provider", "claude-code", "adapter to run: claude-code|codex")
+	providerName := fs.String("provider", "claude-code", "adapter to run: claude-code|codex|auto")
+	planArg := fs.String("plan", "", "plan: auto, a label (full|direct|quick), or steps like analyze>implement>test")
+	size := fs.String("size", "", "task size for decision stakes: small|medium|large (--provider auto)")
 	model := fs.String("model", "qwen3:8b", "ollama model for best-effort perception")
 	url := fs.String("url", "", "ollama base url (default http://localhost:11434)")
 	fs.Parse(args)
@@ -177,11 +194,18 @@ func cmdDo(args []string) error {
 	if prompt == "" {
 		return fmt.Errorf("do: a prompt is required")
 	}
-	adapter, err := resolveProvider(*providerName)
-	if err != nil {
-		return err
+	// A named provider fails fast, before any event is recorded. auto is
+	// resolved after the session opens — the decision reads the projections.
+	// human is a provider with no adapter (ADR-0018 Decision 2): the same
+	// ledger, gate, and rehabilitation, executed by the user.
+	var adapter executor.Adapter
+	var err error
+	human := *providerName == "human"
+	if *providerName != "auto" && !human {
+		if adapter, err = resolveProvider(*providerName); err != nil {
+			return err
+		}
 	}
-
 	s, err := openStore(*db)
 	if err != nil {
 		return err
@@ -198,29 +222,75 @@ func cmdDo(args []string) error {
 		return err
 	}
 
+	if adapter == nil && !human {
+		dec, err := autoDecide(s, sid, *capability, *size)
+		if err != nil {
+			return err
+		}
+		if dec.Provider == "human" {
+			human = true
+		} else {
+			adapter = providers[dec.Provider]
+		}
+	}
+
+	// Plan selection (ADR-0014). The human path skips it: a human run has no
+	// step boundary the harness could drive.
+	planName := ""
+	if !human {
+		if planName, err = resolvePlan(s, sid, *planArg, *capability, *size); err != nil {
+			return err
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	sink := func(ev executor.Event, ts int64) error {
-		// The user must read the result to judge adoption, so assistant text
-		// is echoed to the terminal, not just recorded.
-		if ev.Type == executor.EventProviderOutput {
-			if text, ok := ev.Payload["text"].(string); ok && text != "" {
-				fmt.Println(text)
+	var result executor.Result
+	var runErr error
+	if human {
+		result, runErr = runHuman(s, sid, os.Stdin)
+		if runErr != nil {
+			return runErr
+		}
+	} else {
+		sink := func(ev executor.Event, ts int64) error {
+			// The user must read the result to judge adoption, so assistant text
+			// is echoed to the terminal, not just recorded.
+			if ev.Type == executor.EventProviderOutput {
+				if text, ok := ev.Payload["text"].(string); ok && text != "" {
+					fmt.Println(text)
+				}
+			}
+			return s.AppendEvent(sid, ev.Type, ts, ev.Payload)
+		}
+
+		// Warn (malformed stream lines) is always visible; Debug (recognised,
+		// intentionally dropped lines) only under TOMOBIT_DEBUG.
+		ex := &executor.Executor{Adapter: adapter, Stderr: os.Stderr, Warn: os.Stderr}
+		if os.Getenv("TOMOBIT_DEBUG") != "" {
+			ex.Debug = os.Stderr
+		}
+
+		// One provider run per plan step (ADR-0014); no plan = one plain
+		// run. The plan stops at the first failed step — later steps would
+		// be working on a broken premise.
+		steps := []string{""}
+		if planName != "" {
+			steps = plan.Steps(planName)
+		}
+		for i, step := range steps {
+			if len(steps) > 1 {
+				fmt.Printf("-- plan %d/%d: %s --\n", i+1, len(steps), step)
+			}
+			result, runErr = ex.Run(ctx, executor.Request{
+				Prompt: stepPrompt(prompt, step, i, len(steps)), PermissionMode: *permMode, Timeout: *timeout,
+			}, sink)
+			if ctx.Err() != nil || runErr != nil || result.ExitCode != 0 {
+				break
 			}
 		}
-		return s.AppendEvent(sid, ev.Type, ts, ev.Payload)
 	}
-
-	// Warn (malformed stream lines) is always visible; Debug (recognised,
-	// intentionally dropped lines) only under TOMOBIT_DEBUG.
-	ex := &executor.Executor{Adapter: adapter, Stderr: os.Stderr, Warn: os.Stderr}
-	if os.Getenv("TOMOBIT_DEBUG") != "" {
-		ex.Debug = os.Stderr
-	}
-	result, runErr := ex.Run(ctx, executor.Request{
-		Prompt: prompt, PermissionMode: *permMode, Timeout: *timeout,
-	}, sink)
 
 	// SIGINT: the child was already signalled; record the cancellation and
 	// stop, skipping the adoption prompt. The session stays pending, so
@@ -248,14 +318,223 @@ func cmdDo(args []string) error {
 		return err
 	}
 
-	perceiveBestEffort(s, &perceive.Ollama{URL: *url, Model: *model})
+	// The reflection snapshot is taken before perception so that whatever
+	// the coming Apply batch discovers (Split, 逆転, Questioned, 名誉回復)
+	// shows up as a before/after difference (ADR-0015 Decision 2).
+	snap, snapErr := reflection.TakeSnapshot(s, time.Now().UnixMilli())
+	if snapErr != nil {
+		fmt.Fprintln(os.Stderr, "reflection: snapshot failed:", snapErr)
+	}
+
+	extras := perceiveBestEffort(s, &perceive.Ollama{URL: *url, Model: *model})
 
 	// ADR-0007 lists the question right after the adoption prompt, but it runs
 	// here — after perception — so today's do is already folded into the Gap
 	// derivation. The interruption is still once per do at the same boundary,
 	// so the position ADR-0007 protects is unchanged.
 	askBestEffort(s, sid)
+
+	if snapErr == nil {
+		reflectBestEffort(s, snap, extras, sid)
+	}
 	return nil
+}
+
+// reflectBestEffort runs the mirror at the do boundary (ADR-0015):
+// detection over the before/after snapshots, one telling a day at most,
+// reaction recorded as a Learning Reality. Best-effort — a failure prints
+// to stderr but never fails the do.
+func reflectBestEffort(s *store.Store, snap *reflection.Snapshot, extras []reflection.Candidate, doSession string) {
+	reflectWithIO(s, snap, extras, doSession, os.Stdin, os.Stdout, isTTY(os.Stdin), time.Now().UnixMilli())
+}
+
+// reflectWithIO is reflectBestEffort's testable core (the askWithIO split).
+// extras are candidates the snapshot comparison cannot see (re-perception,
+// ADR-0019 Decision 4). The seed doubles as nowMs: millisecond resolution is
+// plenty for a 1/day lottery, and RecordAndApply persists it either way.
+func reflectWithIO(s *store.Store, snap *reflection.Snapshot, extras []reflection.Candidate, doSession string, in io.Reader, out io.Writer, interactive bool, now int64) {
+	// A pipe has no reader to mirror to; the budget stays unspent.
+	if !interactive {
+		return
+	}
+	ok, err := reflection.HasBudget(s, now)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "reflection: budget check failed:", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	cands, err := reflection.Detect(snap, s, now)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "reflection: detection failed:", err)
+		return
+	}
+	cands = append(cands, extras...)
+	if len(cands) == 0 {
+		return
+	}
+	exps, err := s.CurrentExperiences()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "reflection: ledger read failed:", err)
+		return
+	}
+	cand := reflection.Pick(cands, exps, now, now)
+	reaction := reflection.Ask(in, out, cand.Text())
+	en := &core.Engine{Repo: s}
+	if err := reflection.RecordAndApply(s, en, cand, now, reaction, doSession, extractorVer, now); err != nil {
+		fmt.Fprintln(os.Stderr, "reflection: recording failed:", err)
+	}
+}
+
+// runHuman is the Human Executor path (ADR-0018 Decision 2): the ledger —
+// or the user with --provider human — routed this task to the human. Tomo
+// records the routing like any provider.selected, waits, and the ordinary
+// adoption/perception tail turns the work into a human experience on the
+// same ledger, same decay, same gate.
+func runHuman(s *store.Store, sid string, in io.Reader) (executor.Result, error) {
+	if err := s.AppendEvent(sid, "provider.selected", time.Now().UnixMilli(),
+		map[string]any{"provider": "human"}); err != nil {
+		return executor.Result{}, err
+	}
+	fmt.Printf("\n「%s」\n", voice.RouteHuman())
+	// EOF (piped stdin) falls straight through: the adoption prompt then
+	// also sees EOF and records no signal, which is correct for a headless
+	// run that no human actually performed.
+	bufio.NewReader(in).ReadString('\n')
+	return executor.Result{Started: true}, nil
+}
+
+// resolvePlan turns the --plan flag into a canonical plan name and records
+// the choice (ADR-0014). "" keeps the plain single-run behavior and records
+// nothing; "auto" derives the live menu, lets Curiosity propose into free
+// space, and runs the same decision rule over the plan bets; anything else
+// is a label or explicit steps.
+func resolvePlan(s *store.Store, sid, arg, capability, size string) (string, error) {
+	switch arg {
+	case "":
+		return "", nil
+	case "auto":
+		now := time.Now()
+		menu, err := plan.Live(s, capability, now.UnixMilli())
+		if err != nil {
+			return "", err
+		}
+		if len(menu) == 0 {
+			return "", nil
+		}
+		// Curiosity proposal (ADR-0014 Decision 3/5): a newborn enters the
+		// menu as a blank slate — TS gives it its first light task.
+		if proposed, err := plan.Propose(s, capability, menu, now.UnixMilli()); err != nil {
+			return "", err
+		} else if proposed != "" {
+			menu = append(menu, proposed)
+			fmt.Printf("proposed plan %s\n", proposed)
+		}
+		conns, err := s.AllConnections()
+		if err != nil {
+			return "", err
+		}
+		tokens := []string{core.CanonToken("cap", capability)}
+		dec := decide.ChoosePlan(conns, menu, tokens, size, now.UnixNano(), now.UnixMilli())
+		if err := s.AppendEvent(sid, "plan.selected", now.UnixMilli(), map[string]any{
+			"plan": dec.Provider, "seed": strconv.FormatInt(dec.Seed, 10),
+			"n": dec.N, "q": dec.Q, "fallback": dec.Fallback,
+			"cap": capability, "size": size,
+		}); err != nil {
+			return "", err
+		}
+		fmt.Printf("plan: %s (n=%d)\n", dec.Provider, dec.N)
+		return dec.Provider, nil
+	default:
+		name, ok := plan.Resolve(capability, arg)
+		if !ok {
+			return "", fmt.Errorf("do: unknown --plan %q (auto, full|direct|quick, or steps like analyze>implement>test)", arg)
+		}
+		if err := s.AppendEvent(sid, "plan.selected", time.Now().UnixMilli(), map[string]any{
+			"plan": name, "cap": capability, "manual": true,
+		}); err != nil {
+			return "", err
+		}
+		return name, nil
+	}
+}
+
+// stepInstruction frames each capability step deterministically — harness
+// text, not model judgment (ADR-0014 Decision 2: LLMはPlanを生成しない).
+var stepInstruction = map[string]string{
+	"analyze":   "変更は行わず、対象を分析して要点を報告する",
+	"implement": "実装する",
+	"review":    "ここまでの変更内容をレビューし、問題があれば修正する",
+	"refactor":  "挙動を変えずにコードを整理する",
+	"summarize": "ここまでの結果を要約する",
+	"test":      "テストを実行し、失敗があれば修正する",
+	"benchmark": "ベンチマークを実行して結果を報告する",
+	"commit":    "変更をコミットする",
+	"deploy":    "デプロイする",
+	"notify":    "結果を通知する",
+}
+
+// stepPrompt wraps the user's prompt with the current step's framing. A
+// plain run (no plan) passes the prompt through untouched.
+func stepPrompt(prompt, step string, i, total int) string {
+	if step == "" || total <= 1 && stepInstruction[step] == "" {
+		return prompt
+	}
+	inst := stepInstruction[step]
+	if inst == "" {
+		inst = step
+	}
+	return fmt.Sprintf("%s\n\n[plan %d/%d: %s] このステップでは%s。", prompt, i+1, total, step, inst)
+}
+
+// autoDecide runs the Decision Engine (ADR-0012) over the current
+// projections and records the full audit — seed included — as a
+// tomo.decided event, so the same ledger + the same seed replays the same
+// choice. The seed is stored as a string: a UnixNano exceeds JSON's exact
+// float64 integer range and would silently lose the bits that make the
+// lottery replayable.
+func autoDecide(s *store.Store, sid, capability, size string) (decide.Decision, error) {
+	conns, err := s.AllConnections()
+	if err != nil {
+		return decide.Decision{}, err
+	}
+	now := time.Now()
+	tokens := []string{core.CanonToken("cap", capability)}
+	// human competes on the same ledger with the same gate (ADR-0018
+	// Decision 2) — the engine may honestly route the task to the user.
+	candidates := append(providerNames(), "human")
+	dec := decide.Choose(conns, candidates, tokens, size, now.UnixNano(), now.UnixMilli())
+
+	cands := make([]map[string]any, len(dec.Candidates))
+	for i, c := range dec.Candidates {
+		cands[i] = map[string]any{
+			"provider": c.Provider, "quantile": c.Quantile,
+			"passed": c.Passed, "scope": c.ScopeKey,
+		}
+	}
+	payload := map[string]any{
+		"provider": dec.Provider, "seed": strconv.FormatInt(dec.Seed, 10),
+		"n": dec.N, "q": dec.Q, "fallback": dec.Fallback,
+		"cap": capability, "size": size, "candidates": cands,
+	}
+	if err := s.AppendEvent(sid, "tomo.decided", now.UnixMilli(), payload); err != nil {
+		return decide.Decision{}, err
+	}
+	// Operational log line (ADR-0009: machine channel, not Tomo's voice).
+	if dec.Fallback {
+		fmt.Printf("decided %s (every provider below the gate — least pessimistic chosen)\n", dec.Provider)
+	} else {
+		fmt.Printf("decided %s (n=%d)\n", dec.Provider, dec.N)
+	}
+	// The calibrated voice (ADR-0019 Decision 1): confidence follows the
+	// judgment's wobble, measured with the same sampler the decision used.
+	// human speaks its own routing line in runHuman instead.
+	if dec.Provider != "human" {
+		w := decide.Wobble(conns, candidates, tokens, size, 64, 1, now.UnixMilli())
+		fmt.Printf("\n「%s」\n\n", voice.Decided(dec.Provider, w))
+	}
+	return dec, nil
 }
 
 // askBestEffort runs the Curiosity question at the do boundary (ADR-0007).
@@ -345,23 +624,30 @@ func adoptionPayload(in io.Reader) map[string]any {
 
 // perceiveBestEffort mirrors cmdPerceive but never fails the run: if Ollama is
 // down the session stays pending (Deferred Perception, ADR-0006 Decision 5).
+// It returns any re-perception candidates (ADR-0019 Decision 4) for the
+// reflection boundary that follows.
 //
 // Unlike cmdPerceive, the do user gets no per-experience machine log line —
 // the one spoken line (ADR-0009) replaces it, since a do session's user
 // wants to hear what Tomo learned, not read an extraction trace.
-func perceiveBestEffort(s *store.Store, extractor perceive.Extractor) {
+func perceiveBestEffort(s *store.Store, extractor perceive.Extractor) []reflection.Candidate {
 	p := &perceive.Perceiver{
 		Store:     s,
 		Extractor: extractor,
 		Ver:       extractorVer,
 	}
+	beforeCurrent, err := s.CurrentExperiences()
+	if err != nil {
+		fmt.Println("perception pending — run `tomobit perceive` later:", err)
+		return nil
+	}
 	exps, err := p.Run()
 	if err != nil {
 		fmt.Println("perception pending — run `tomobit perceive` later:", err)
-		return
+		return nil
 	}
 	if len(exps) == 0 {
-		return
+		return nil
 	}
 	// Apply in the (ts, id) order the store replays on rebuild, so the live
 	// projection matches the canonical rebuilt one.
@@ -376,26 +662,47 @@ func perceiveBestEffort(s *store.Store, extractor perceive.Extractor) {
 	before, err := s.AllConnections()
 	if err != nil {
 		fmt.Printf("perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
-		return
+		return nil
 	}
-	stageBefore := face.Stage(before, now)
+	stageBefore, err := face.StageFrom(s, now)
+	if err != nil {
+		fmt.Printf("perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
+		return nil
+	}
 
 	en := &core.Engine{Repo: s}
+	expIDs := make([]string, 0, len(exps))
 	for _, e := range exps {
 		if err := en.Apply(e); err != nil {
 			fmt.Printf("perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
-			return
+			return nil
 		}
+		expIDs = append(expIDs, e.ID)
 	}
 
 	after, err := s.AllConnections()
 	if err != nil {
 		fmt.Printf("perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
-		return
+		return nil
 	}
-	if text, ok := voice.Perceive(stageBefore, face.Stage(after, now), voice.NewSplits(before, after), exps); ok {
+	stageAfter, err := face.StageFrom(s, now)
+	if err != nil {
+		fmt.Printf("perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
+		return nil
+	}
+	maxExcess, err := s.MaxExcess(expIDs)
+	if err != nil {
+		maxExcess = 0
+	}
+	if text, ok := voice.Perceive(stageBefore, stageAfter, voice.NewSplits(before, after), exps, maxExcess); ok {
 		fmt.Printf("\n「%s」\n", text) // speaker separation: a blank line before Tomo's line
 	}
+
+	afterCurrent, err := s.CurrentExperiences()
+	if err != nil {
+		return nil
+	}
+	return reflection.ReperceptionCandidates(beforeCurrent, afterCurrent)
 }
 
 func cmdPerceive(args []string) error {
@@ -416,7 +723,10 @@ func cmdPerceive(args []string) error {
 		Extractor: &perceive.Ollama{URL: *url, Model: *model},
 		Ver:       extractorVer,
 	}
+	snap, snapErr := reflection.TakeSnapshot(s, time.Now().UnixMilli())
+	beforeCurrent, curErr := s.CurrentExperiences()
 	exps, err := p.Run()
+	var extras []reflection.Candidate
 	if len(exps) > 0 {
 		// Apply in the same (ts, id) order the store replays on rebuild, so
 		// the live projection matches the canonical rebuilt one.
@@ -432,25 +742,43 @@ func cmdPerceive(args []string) error {
 		if snapErr != nil {
 			return snapErr
 		}
-		stageBefore := face.Stage(before, now)
+		stageBefore, snapErr := face.StageFrom(s, now)
+		if snapErr != nil {
+			return snapErr
+		}
 
 		en := &core.Engine{Repo: s}
+		expIDs := make([]string, 0, len(exps))
 		for _, e := range exps {
 			if applyErr := en.Apply(e); applyErr != nil {
 				return fmt.Errorf("apply %s: %w (experiences are saved; the projection is stale — run `tomobit rebuild` to repair)", e.ID, applyErr)
 			}
 			fmt.Printf("perceived %s: %s %s → %s\n",
 				e.SessionID, e.Kind, core.NewScope(e.Tokens()...).Key(), e.Target())
+			expIDs = append(expIDs, e.ID)
 		}
 
 		after, snapErr := s.AllConnections()
 		if snapErr != nil {
 			return snapErr
 		}
+		stageAfter, snapErr := face.StageFrom(s, now)
+		if snapErr != nil {
+			return snapErr
+		}
+		maxExcess, exErr := s.MaxExcess(expIDs)
+		if exErr != nil {
+			maxExcess = 0
+		}
 		// The machine log lines above stay (this is the operational command,
 		// ADR-0009): the spoken line is an addition, not a replacement.
-		if text, ok := voice.Perceive(stageBefore, face.Stage(after, now), voice.NewSplits(before, after), exps); ok {
+		if text, ok := voice.Perceive(stageBefore, stageAfter, voice.NewSplits(before, after), exps, maxExcess); ok {
 			fmt.Printf("「%s」\n", text)
+		}
+		if curErr == nil {
+			if afterCurrent, err := s.CurrentExperiences(); err == nil {
+				extras = reflection.ReperceptionCandidates(beforeCurrent, afterCurrent)
+			}
 		}
 	}
 	if err != nil {
@@ -458,6 +786,11 @@ func cmdPerceive(args []string) error {
 	}
 	if len(exps) == 0 {
 		fmt.Println("nothing pending")
+	}
+	// Re-perception is this command's specialty (a bumped extractor_ver
+	// re-reads history here), so the mirror gets its boundary too.
+	if snapErr == nil {
+		reflectBestEffort(s, snap, extras, "")
 	}
 	return nil
 }
@@ -501,7 +834,10 @@ func cmdStatus(args []string) error {
 		return err
 	}
 	now := time.Now().UnixMilli()
-	stage := face.Stage(conns, now)
+	stage, err := face.StageFrom(s, now)
+	if err != nil {
+		return err
+	}
 
 	// A pipe or redirect wants the machine-readable table only — no avatar,
 	// no speech (ADR-0008 Decision 4: "the avatar only draws on a TTY").
@@ -509,6 +845,7 @@ func cmdStatus(args []string) error {
 	if tty {
 		printAvatar(os.Stdout, stage)
 		fmt.Println() // speaker separation: a blank line before Tomo's own line
+		greetIfReturned(os.Stdout, s, conns, now)
 	}
 	if len(conns) == 0 {
 		if tty {
@@ -541,6 +878,36 @@ func cmdStatus(args []string) error {
 		}
 	}
 	return printConnections(os.Stdout, cands, now, tty)
+}
+
+// Absence knobs (ADR-0019 Decision 2: 不在と判定する空白の長さ).
+const (
+	absenceMs     = 72 * 3600 * 1000 // three quiet days make a return
+	okaeriMinFade = 0.02             // smallest confidence drop worth naming
+)
+
+// greetIfReturned speaks the return greeting (ADR-0019 Decision 2): absence
+// is the gap since the newest event, and the greeting's content is the
+// lazy-decay diff across it — 忘却という正直な機構が、再会の挨拶になる.
+// A tomo.greeted event closes the gap so the same return greets once.
+func greetIfReturned(w io.Writer, s *store.Store, conns []*core.Connection, now int64) {
+	last, err := s.LatestEventTS()
+	if err != nil || last == 0 || now-last < absenceMs {
+		return
+	}
+	var faded core.Scope
+	best := okaeriMinFade
+	for _, c := range conns {
+		if drop := c.Confidence(last) - c.Confidence(now); drop > best {
+			best = drop
+			faded = c.Scope()
+		}
+	}
+	fmt.Fprintf(w, "「%s」\n\n", voice.Okaeri(faded))
+	if err := s.AppendEvent(store.NewID(now), "tomo.greeted", now,
+		map[string]any{"absent_ms": now - last}); err != nil {
+		fmt.Fprintln(os.Stderr, "okaeri: recording failed:", err)
+	}
 }
 
 // printAvatar draws the sprite (ADR-0008 Decision 4): a short animation in
