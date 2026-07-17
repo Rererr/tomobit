@@ -19,49 +19,52 @@ import (
 	"github.com/Rererr/tomobit/internal/subtask"
 )
 
-func TestAdoptionPayloadOneMeansAsIs(t *testing.T) {
-	got := adoptionPayload(bufio.NewReader(strings.NewReader("1\n")), io.Discard)
+// The Feedback question keeps the adopted/reverted payload keys (呼称の統一
+// ADR-0028 changed the name, not the schema): 1/2/3 still map to the same
+// y-value writes rebuild reads.
+func TestFeedbackPayloadOneMeansAsIs(t *testing.T) {
+	got := feedbackPayload(bufio.NewReader(strings.NewReader("1\n")), io.Discard)
 	if got["adopted"] != "as-is" || got["reverted"] != false {
 		t.Errorf("1: got %v", got)
 	}
 }
 
-func TestAdoptionPayloadTwoMeansWithEdits(t *testing.T) {
-	got := adoptionPayload(bufio.NewReader(strings.NewReader("2\n")), io.Discard)
+func TestFeedbackPayloadTwoMeansWithEdits(t *testing.T) {
+	got := feedbackPayload(bufio.NewReader(strings.NewReader("2\n")), io.Discard)
 	if got["adopted"] != "with-edits" || got["reverted"] != false {
 		t.Errorf("2: got %v", got)
 	}
 }
 
-func TestAdoptionPayloadThreeMeansReverted(t *testing.T) {
-	got := adoptionPayload(bufio.NewReader(strings.NewReader("3\n")), io.Discard)
+func TestFeedbackPayloadThreeMeansReverted(t *testing.T) {
+	got := feedbackPayload(bufio.NewReader(strings.NewReader("3\n")), io.Discard)
 	if got["adopted"] != "" || got["reverted"] != true {
 		t.Errorf("3: got %v", got)
 	}
 }
 
-// TestAdoptionPayloadEnterCarriesNoSignal pins the deliberate default (案A):
+// TestFeedbackPayloadEnterCarriesNoSignal pins the deliberate default (案A):
 // a bare Enter is "まだ言えない", not top-grade praise — the ledger learns
 // nothing rather than being inflated by a mindless keypress.
-func TestAdoptionPayloadEnterCarriesNoSignal(t *testing.T) {
-	got := adoptionPayload(bufio.NewReader(strings.NewReader("\n")), io.Discard)
+func TestFeedbackPayloadEnterCarriesNoSignal(t *testing.T) {
+	got := feedbackPayload(bufio.NewReader(strings.NewReader("\n")), io.Discard)
 	if len(got) != 0 {
 		t.Errorf("Enter: got %v, want empty payload", got)
 	}
 }
 
-func TestAdoptionPayloadUnknownCarriesNoSignal(t *testing.T) {
-	got := adoptionPayload(bufio.NewReader(strings.NewReader("x\n")), io.Discard)
+func TestFeedbackPayloadUnknownCarriesNoSignal(t *testing.T) {
+	got := feedbackPayload(bufio.NewReader(strings.NewReader("x\n")), io.Discard)
 	if len(got) != 0 {
 		t.Errorf("unknown: got %v, want empty payload", got)
 	}
 }
 
-// TestAdoptionPayloadEOFCarriesNoSignal guards against EOF (non-interactive
+// TestFeedbackPayloadEOFCarriesNoSignal guards against EOF (non-interactive
 // stdin, e.g. a headless invocation with no terminal attached) fabricating a
 // verdict nobody confirmed — it must stay an empty payload, never a grade.
-func TestAdoptionPayloadEOFCarriesNoSignal(t *testing.T) {
-	got := adoptionPayload(bufio.NewReader(strings.NewReader("")), io.Discard)
+func TestFeedbackPayloadEOFCarriesNoSignal(t *testing.T) {
+	got := feedbackPayload(bufio.NewReader(strings.NewReader("")), io.Discard)
 	if len(got) != 0 {
 		t.Errorf("EOF: got %v, want empty payload", got)
 	}
@@ -593,28 +596,6 @@ func TestEnsureClaudeProfileGatesAutoButNotOtherProviders(t *testing.T) {
 	}
 }
 
-// TestSplitFlagRejectsPlanCombination and TestSplitFlagRejectsHumanProvider
-// guard ADR-0023 Decision 3's mutually-exclusive combinations. cmdDo checks
-// these before the store is even opened, so a plain function call — no flag
-// parsing, no DB — is enough to exercise the same condition it evaluates.
-func TestSplitFlagRejectsPlanCombination(t *testing.T) {
-	if err := splitCombinationError(true, "auto", "full"); err == nil {
-		t.Error("--split with --plan should be rejected")
-	}
-	if err := splitCombinationError(true, "auto", ""); err != nil {
-		t.Errorf("--split alone should be fine, got %v", err)
-	}
-}
-
-func TestSplitFlagRejectsHumanProvider(t *testing.T) {
-	if err := splitCombinationError(true, "human", ""); err == nil {
-		t.Error("--split with --provider human should be rejected")
-	}
-	if err := splitCombinationError(true, "claude-code", ""); err != nil {
-		t.Errorf("--split with an explicit non-human provider should be fine, got %v", err)
-	}
-}
-
 // fakeSplitAdapter is a test-only executor.Adapter: Command launches a real
 // but trivial child (`sh -c`) so the Executor's actual process lifecycle
 // runs, and Translate maps every stdout line straight to a provider.output.
@@ -716,12 +697,12 @@ func TestProviderSinkCollectsTextAcrossEventsForSplitParsing(t *testing.T) {
 	if len(texts) != 2 {
 		t.Fatalf("only text-bearing outputs should be collected, got %d: %v", len(texts), texts)
 	}
-	subs, err := subtask.Parse(strings.Join(texts, "\n"))
+	groups, err := subtask.Parse(strings.Join(texts, "\n"))
 	if err != nil {
 		t.Fatalf("joined collection should parse as a proposal: %v", err)
 	}
-	if len(subs) != 2 || subs[0] != "part one" {
-		t.Fatalf("got %v, want the proposed subtasks", subs)
+	if len(groups) != 2 || groups[0][0] != "part one" {
+		t.Fatalf("got %v, want the proposed subtasks", groups)
 	}
 	if n := countEventsOfTypeInSession(t, s, "sess", "provider.output"); n != 3 {
 		t.Errorf("every event must still be recorded regardless of collection, got %d", n)
@@ -749,9 +730,10 @@ func TestProviderSinkKeepsViewOnlyDetailOutOfTheLedger(t *testing.T) {
 }
 
 // TestRunSplitNormalFlowRecordsParentAndPerSubtaskLedger exercises the happy
-// path (ADR-0023 Decision 5): the parent gets task.split and an
-// adoption-free task.finished, while each subtask is its own session, linked
-// to the parent, with its own adoption confirmation.
+// path: the parent gets task.split and a Feedback-free task.finished, while
+// each subtask is its own session linked to the parent. Under ADR-0028
+// Decision 5 the subtask's task.finished is empty too — no per-subtask
+// subjective Feedback — so only objective signals become its experience.
 func TestRunSplitNormalFlowRecordsParentAndPerSubtaskLedger(t *testing.T) {
 	s := openTestStore(t)
 	registerFakeProvider(t, "fake-split", &fakeSplitAdapter{name: "fake-split", line: "done"})
@@ -762,13 +744,13 @@ func TestRunSplitNormalFlowRecordsParentAndPerSubtaskLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	subs := []string{"subtask A", "subtask B"}
-	in := bufio.NewReader(strings.NewReader("1\n1\n")) // adoption "1"=文句なし, once per subtask
+	groups := [][]string{{"subtask A"}, {"subtask B"}}
+	in := bufio.NewReader(strings.NewReader("")) // no per-subtask Feedback is asked
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	err := runSplit(context.Background(), s, parentSID, subs, "big task", "fake-split",
-		"implement", "", "", 0, in, &out, extractor)
+	err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
+		"implement", "", "", 0, in, &out, false, extractor)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -789,7 +771,7 @@ func TestRunSplitNormalFlowRecordsParentAndPerSubtaskLedger(t *testing.T) {
 		}
 	}
 	if !sawParentFinished || len(parentFinished) != 0 {
-		t.Errorf("parent task.finished should carry no adoption key (the artifact was the proposal, not work to judge), got %v", parentFinished)
+		t.Errorf("parent task.finished should carry no Feedback key (the artifact was the proposal, not work to judge), got %v", parentFinished)
 	}
 
 	subSIDs := subtaskSessionIDs(t, s, parentSID)
@@ -802,20 +784,149 @@ func TestRunSplitNormalFlowRecordsParentAndPerSubtaskLedger(t *testing.T) {
 			t.Fatal(err)
 		}
 		var started, finished map[string]any
+		var sawFinished bool
 		for _, e := range evs {
 			switch e.Type {
 			case "task.started":
 				started = e.Payload
 			case "task.finished":
+				sawFinished = true
 				finished = e.Payload
 			}
 		}
 		if started == nil || started["parent"] != parentSID {
 			t.Errorf("subtask %d task.started.parent = %v, want %q", i, started["parent"], parentSID)
 		}
-		if finished == nil || finished["adopted"] != "as-is" {
-			t.Errorf("subtask %d task.finished.adopted = %v, want \"as-is\"", i, finished["adopted"])
+		if !sawFinished || len(finished) != 0 {
+			t.Errorf("subtask %d task.finished should be empty (no subjective Feedback, ADR-0028), got %v", i, finished)
 		}
+	}
+}
+
+// TestRunSplitFlattensGroupsAndRecordsIndexGroups pins the Phase-1 execution
+// model (ADR-0028): a mixed group proposal is flattened to a single sequential
+// run, and task.split records the flat subtasks plus the index groups
+// ([[0],[1,2]]) so the independence declaration stays auditable.
+func TestRunSplitFlattensGroupsAndRecordsIndexGroups(t *testing.T) {
+	s := openTestStore(t)
+	registerFakeProvider(t, "fake-split", &fakeSplitAdapter{name: "fake-split", line: "done"})
+
+	const parentSID = "parent-groups"
+	if err := s.AppendEvent(parentSID, "task.started", 1000,
+		map[string]any{"intent": "big task", "source": "production"}); err != nil {
+		t.Fatal(err)
+	}
+
+	groups := [][]string{{"lone"}, {"para A", "para B"}}
+	var out bytes.Buffer
+	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
+
+	err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
+		"implement", "", "", 0, bufio.NewReader(strings.NewReader("")), &out, false, extractor)
+	if err != nil {
+		t.Fatalf("runSplit: %v", err)
+	}
+
+	if n := len(subtaskSessionIDs(t, s, parentSID)); n != 3 {
+		t.Fatalf("three flattened subtasks should each open a session, got %d", n)
+	}
+
+	split := payloadOf(t, s, "task.split") // the parent's is the only one
+	subs, ok := split["subtasks"].([]any)
+	if !ok || len(subs) != 3 || subs[0] != "lone" || subs[1] != "para A" || subs[2] != "para B" {
+		t.Fatalf("task.split.subtasks should be the flat proposal order, got %v", split["subtasks"])
+	}
+	idx, ok := split["groups"].([]any)
+	if !ok || len(idx) != 2 {
+		t.Fatalf("task.split.groups should hold two index groups, got %v", split["groups"])
+	}
+	first, _ := idx[0].([]any)
+	second, _ := idx[1].([]any)
+	if len(first) != 1 || first[0].(float64) != 0 {
+		t.Errorf("group 0 should index [0], got %v", idx[0])
+	}
+	if len(second) != 2 || second[0].(float64) != 1 || second[1].(float64) != 2 {
+		t.Errorf("group 1 should index [1,2], got %v", idx[1])
+	}
+}
+
+// TestRunSplitFlatProposalOmitsGroups pins declaresGroups' spec (SCHEMA.md R4,
+// ADR-0028): a flat proposal (every element a lone subtask) declares no
+// independence, so task.split records subtasks but omits the redundant groups
+// index — its absence is the audit signal that no parallelism was declared.
+func TestRunSplitFlatProposalOmitsGroups(t *testing.T) {
+	s := openTestStore(t)
+	registerFakeProvider(t, "fake-split", &fakeSplitAdapter{name: "fake-split", line: "done"})
+
+	const parentSID = "parent-flat"
+	if err := s.AppendEvent(parentSID, "task.started", 1000,
+		map[string]any{"intent": "big task", "source": "production"}); err != nil {
+		t.Fatal(err)
+	}
+
+	groups := [][]string{{"one"}, {"two"}}
+	var out bytes.Buffer
+	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
+	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
+		"implement", "", "", 0, bufio.NewReader(strings.NewReader("")), &out, false, extractor); err != nil {
+		t.Fatalf("runSplit: %v", err)
+	}
+
+	split := payloadOf(t, s, "task.split")
+	if _, ok := split["subtasks"]; !ok {
+		t.Errorf("subtasks must always be recorded, got %v", split)
+	}
+	if _, ok := split["groups"]; ok {
+		t.Errorf("a flat proposal must omit groups, got %v", split["groups"])
+	}
+}
+
+// TestSplitProtocolEligible: the protocol rides a vanilla do, but not a plan
+// run (a step's output is not the proposal), a human run (no provider stream),
+// nor any run when the kill switch is off (config split_protocol=false) —
+// ADR-0028 Decision 1, symmetric with duelEligible.
+func TestSplitProtocolEligible(t *testing.T) {
+	cases := []struct {
+		name     string
+		enabled  bool
+		human    bool
+		planName string
+		want     bool
+	}{
+		{"vanilla do", true, false, "", true},
+		{"plan run", true, false, "full", false},
+		{"human run", true, true, "", false},
+		{"kill switch off", false, false, "", false},
+		{"kill switch off, otherwise eligible", false, false, "", false},
+	}
+	for _, c := range cases {
+		if got := splitProtocolEligible(c.enabled, c.human, c.planName); got != c.want {
+			t.Errorf("%s: splitProtocolEligible(%v,%v,%q) = %v, want %v", c.name, c.enabled, c.human, c.planName, got, c.want)
+		}
+	}
+}
+
+// TestSplitProtocolEnabledDefaultsOnWhenAbsent pins the kill switch's default
+// (ADR-0028 Decision 1): a nil pointer (key absent from config) reads as on, so
+// a config predating the key never silently disables the always-on protocol; an
+// explicit false is the only way off.
+func TestSplitProtocolEnabledDefaultsOnWhenAbsent(t *testing.T) {
+	saved := cfg
+	t.Cleanup(func() { cfg = saved })
+
+	cfg = config.Config{SplitProtocol: nil}
+	if !splitProtocolEnabled() {
+		t.Error("an absent split_protocol key must default to on")
+	}
+	no := false
+	cfg = config.Config{SplitProtocol: &no}
+	if splitProtocolEnabled() {
+		t.Error("an explicit false must disable the protocol")
+	}
+	yes := true
+	cfg = config.Config{SplitProtocol: &yes}
+	if !splitProtocolEnabled() {
+		t.Error("an explicit true must enable the protocol")
 	}
 }
 
@@ -833,13 +944,13 @@ func TestRunSplitStopsAfterAFailedSubtask(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	subs := []string{"subtask A", "subtask B"}
-	in := bufio.NewReader(strings.NewReader("\n\n"))
+	groups := [][]string{{"subtask A"}, {"subtask B"}}
+	in := bufio.NewReader(strings.NewReader(""))
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	err := runSplit(context.Background(), s, parentSID, subs, "big task", "fail-split",
-		"implement", "", "", 0, in, &out, extractor)
+	err := runSplit(context.Background(), s, parentSID, groups, "big task", "fail-split",
+		"implement", "", "", 0, in, &out, false, extractor)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -875,16 +986,16 @@ func TestRunSplitAutoInheritsDecisionEnginePerSubtask(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	subs := []string{"subtask A", "subtask B"}
-	// Enough lines to cover runHuman (1 line) + adoptionPayload (1 line) for
-	// both subtasks, in case auto ever routes either one to the human
-	// candidate — that must not stop the run.
+	groups := [][]string{{"subtask A"}, {"subtask B"}}
+	// Enough lines to cover runHuman (1 line per subtask), in case auto ever
+	// routes either one to the human candidate — that must not stop the run.
+	// No per-subtask Feedback is asked anymore (ADR-0028 Decision 5).
 	in := bufio.NewReader(strings.NewReader(strings.Repeat("\n", 8)))
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	err := runSplit(context.Background(), s, parentSID, subs, "big task", "auto",
-		"implement", "", "", 0, in, &out, extractor)
+	err := runSplit(context.Background(), s, parentSID, groups, "big task", "auto",
+		"implement", "", "", 0, in, &out, false, extractor)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}

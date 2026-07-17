@@ -237,6 +237,8 @@ Adapter登録名に固定し、自由入力を許さない（表記揺れの根�
 - Pros: 重み変更→rebuildだけで全歴史に新しい解釈が効く（Born with Historyと同じ思想）
 - Cons: ledgerのyは「その時の重み」なので、重み変更後は台帳とconnectionsの整合はrebuildを要する（どちらも射影なので問題なし）
 
+**Outcomeの生情報フィールド**（`core.Outcome`。重み解決は`OutcomeWeight`）: `tests_passed` / `adopted`（as-is|with-edits）/ `reverted`（ユーザーの主観的差し戻し）/ `verdict`（up|down・明示・全上書き）/ `cancelled`（中断＝無信号）/ `failed`（**客観**の実行失敗＝`provider.error`/exit≠0。ADR-0028 Decision 5で追加。`reverted`とは別フィールド — 主観の差し戻しと客観の失敗を混ぜないため）。`OutcomeWeight`第1層で`failed`→y=0。サブタスク／duel子は空の`task.finished`を持ち`failed`だけが信号になる。純関数を変えたので既存履歴はrebuildで再解釈、決定的パース（`provider.error`分岐）を変えたのでextractor_verをバンプ。
+
 ---
 
 # 確定事項（レビュー済み 2026-07-15）
@@ -279,10 +281,16 @@ R4. eventsのtype初期カタログ（14種で確定）
     - plan.selected（ADR-0014）: 採用したPlanの記帳（知覚の決定的抽出元 —
       experiences.plan列へ）。payload = {plan, cap, size, seed, n, q,
       fallback} または手動指定時 {plan, cap, manual: true}
-    - task.split（ADR-0023）: 受理した分割提案の記帳。payload = {subtasks: [...]}。
+    - task.split（ADR-0023、ADR-0028で拡張）: 受理した分割提案の記帳。
+      payload = {subtasks: [...], groups: [[...]], parallel_offered,
+      parallel_accepted, est_cost_usd}。subtasks はフラットな実行順、
+      groups は subtasks のインデックス群（例 [[0],[1,2],[3]] — Providerが
+      独立と宣言した群。ADR-0028）、parallel_* / est_cost_usd は並走許可
+      ゲートの提示・回答・概算（フラット提案では groups 以降を省略）。
       サブタスクは独立セッションで、その task.started は payload に
-      parent: <親session_id> を持つ（source は production のまま —
-      知覚schemaは不変なので extractor_ver のバンプ不要）
+      parent: <親session_id> を持つ（source は production のまま）。
+      知覚は task.split を読まず、抽出プロンプト/schemaも不変なので
+      payload 拡張でも extractor_ver のバンプ不要（ADR-0006と同じ理屈）
     （plan.generated は初期カタログ14種に含まれる。ADR-0014の提案記帳:
       payload = {cap, plan, parent, op} — メニューの生存はこのイベントから
       導出されるため rebuild で消えない）

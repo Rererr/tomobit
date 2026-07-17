@@ -295,6 +295,34 @@ func (s *Store) LastEventTS(eventType string) (tsMs int64, found bool, err error
 	return tsMs, true, nil
 }
 
+// RecentProviderCosts returns the cost_usd values of the most recent
+// provider.finished events that carry one, newest first, up to limit. Only
+// claude-code reports cost_usd (codex does not — implementation confirmed), so
+// this is the sample the parallel gate's cost estimate draws its median from
+// (ADR-0028 Decision 3). An empty result means no real cost has ever been
+// measured: the gate says so honestly rather than inventing a number.
+func (s *Store) RecentProviderCosts(limit int) ([]float64, error) {
+	rows, err := s.DB.Query(`
+		SELECT json_extract(payload, '$.cost_usd') AS cost
+		FROM events
+		WHERE type = 'provider.finished'
+		  AND json_extract(payload, '$.cost_usd') IS NOT NULL
+		ORDER BY ts DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []float64
+	for rows.Next() {
+		var cost float64
+		if err := rows.Scan(&cost); err != nil {
+			return nil, err
+		}
+		out = append(out, cost)
+	}
+	return out, rows.Err()
+}
+
 // LatestEventTS returns the newest event timestamp of any type (0 when
 // empty) — the absence detector's anchor (ADR-0019 Decision 2:
 // 不在はeventsの空白から知覚できる).
@@ -349,6 +377,32 @@ func scanEvents(rows *sql.Rows) ([]*Event, error) {
 			return nil, err
 		}
 		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// ChildSessions returns the session ids of tasks opened as subtasks of
+// parentSID — their task.started names it as parent (ADR-0023 Decision 2) — in
+// creation order (the events autoincrement id, which is the flat proposal order
+// subtasks open in). The chat's split fold-back reads them to gather each
+// subtask's output for the parent thread (ADR-0028 Decision 5); the flat order
+// lets it tell a subtask that ran from one left 未着手 by a fail-stop.
+func (s *Store) ChildSessions(parentSID string) ([]string, error) {
+	rows, err := s.DB.Query(`
+		SELECT session_id FROM events
+		WHERE type = 'task.started' AND json_extract(payload, '$.parent') = ?
+		ORDER BY id`, parentSID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
 	}
 	return out, rows.Err()
 }

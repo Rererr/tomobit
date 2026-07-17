@@ -187,6 +187,13 @@ func parseDeterministic(events []*store.Event) deterministic {
 			if reverted, ok := e.Payload["reverted"].(bool); ok {
 				d.outcome.Reverted = reverted
 			}
+		case "provider.error":
+			// The objective failure signal (exit≠0 / executor error, recorded
+			// via providerErrorPayload). It is a split subtask's and a duel
+			// child's only outcome — their task.finished is empty (ADR-0028
+			// Decision 5) — so without this branch a failed child would be
+			// indistinguishable from a successful one.
+			d.outcome.Failed = true
 		case "task.cancelled":
 			d.outcome.Cancelled = true
 		}

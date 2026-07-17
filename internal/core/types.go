@@ -37,12 +37,19 @@ type Outcome struct {
 	TestsPassed *bool  `json:"tests_passed,omitempty"`
 	Adopted     string `json:"adopted,omitempty"` // "as-is" | "with-edits"
 	Reverted    bool   `json:"reverted,omitempty"`
-	Verdict     string `json:"verdict,omitempty"` // "up" | "down"
-	Cancelled   bool   `json:"cancelled,omitempty"`
-	Preferred   string `json:"preferred,omitempty"` // preference kind
-	Over        string `json:"over,omitempty"`      // preference kind
-	Insight     string `json:"insight,omitempty"`   // reflection: candidate type told
-	Reaction    string `json:"reaction,omitempty"`  // reflection: "unexpected" | "known" | "wrong"
+	// Failed is the objective execution-failure signal (provider.error /
+	// exit≠0), kept apart from Reverted on purpose (ADR-0028 Decision 5): a
+	// revert is the user's subjective pushback, a failure is the process not
+	// delivering — folding one into the other would blur two meanings rebuild
+	// could never separate again. It is the only signal a split subtask or a
+	// duel child carries (both have an empty task.finished).
+	Failed    bool   `json:"failed,omitempty"`
+	Verdict   string `json:"verdict,omitempty"` // "up" | "down"
+	Cancelled bool   `json:"cancelled,omitempty"`
+	Preferred string `json:"preferred,omitempty"` // preference kind
+	Over      string `json:"over,omitempty"`      // preference kind
+	Insight   string `json:"insight,omitempty"`   // reflection: candidate type told
+	Reaction  string `json:"reaction,omitempty"`  // reflection: "unexpected" | "known" | "wrong"
 }
 
 // Experience is the immutable asset (SCHEMA.md: experiences table).
@@ -137,7 +144,9 @@ func OutcomeWeight(e *Experience) (y float64, ok bool) {
 	case "down":
 		return 0, true
 	}
-	// Layer 1: objective signals.
+	// Layer 1: objective signals and the human's Feedback. Reverted and a failed
+	// test lead — a differenced-out result and a red test are verdicts on the
+	// deliverable itself, above an adoption grade (ADR-0003, unchanged).
 	if o.Reverted {
 		return 0, true
 	}
@@ -149,6 +158,17 @@ func OutcomeWeight(e *Experience) (y float64, ok bool) {
 		return 1.0, true
 	case "with-edits":
 		return 0.7, true
+	}
+	// Failed is the final conclusion only when no subjective Feedback was given —
+	// a subtask/duel child scores y=0 off its objective error alone (ADR-0028
+	// Decision 5 / C1), since its empty task.finished leaves Adopted "". But when
+	// a human returned Feedback, their sovereign judgment (ADR-0018 experience
+	// sovereignty) outranks a transient provider.error: the do/chat boundary asks
+	// for Feedback even after a failed run, and a "文句なし" on the whole session —
+	// especially a multi-turn chat that erred early and recovered — must win over
+	// an earlier stray error rather than be crushed to y=0 by it.
+	if o.Failed {
+		return 0, true
 	}
 	if o.TestsPassed != nil && *o.TestsPassed {
 		return 0.9, true

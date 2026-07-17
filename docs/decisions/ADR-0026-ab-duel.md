@@ -216,3 +216,25 @@ chat セッション（ADR-0022）は `/exit` されるまで task.started の�
    レイアウト可変化。実機（faceウィンドウ）で2つの思考が同時に浮かぶことを目視確認。
 
 各フェーズ末で実環境検証（実 Provider・実 face 窓）を完了条件に含める。
+
+---
+
+## 追記（2026-07-17）: ADR-0028（判断ゼロの分割）による陳腐化の修正
+
+本文の「申し出の抑制」節は `--split` フラグの存在を前提にしていた。ADR-0028 が
+分割プロトコルを**常時ON**へ変え `--split` を廃止したので、その前提を更新する:
+
+- **`--split` の抑制条件は消える**: `duelEligible` は split を見ない
+  （`func duelEligible(providerExplicit bool, providerName string) bool`）。
+  分割は実行前に有無を知り得ない（常時ON）ため、デュエルとは排他にできない。
+  デュエルを断ると、常時ONの分割プロトコルを載せた**通常実行へフォールスルー**する
+  （同じタスクでデュエル申し出 → n → 通常実行 → 分割提案の順に両方現れうるが、
+  予算体系が別なので食い合わない — ADR-0028 Decision 3）。抑制が残るのは
+  `--provider X`（対を人が固定）と `--provider human`（provider ストリームが無い）のみ。
+- **duel 子の失敗が初めて負の outcome を受ける**: 本文 Decision 3 は「失敗した側は
+  正直に負の outcome を受ける」と書いたが、`OutcomeWeight` は失敗を y に落とさず、
+  子の空 `task.finished` は無信号（ok=false）にとどまっていた（潜在欠落）。
+  ADR-0028 Decision 5 が `provider.error`→`core.Outcome.Failed`→`OutcomeWeight`
+  第1層 y=0 を配線したことで、duel 子（同じく空 `task.finished`）の失敗も
+  初めて負の execution 経験になる。この配線は決定的パースと純関数を変えるため
+  extractor_ver をバンプし rebuild で全履歴を再解釈する（ADR-0028 Consequences）。

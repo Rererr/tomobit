@@ -33,7 +33,7 @@
 - [ADR-0003](docs/decisions/ADR-0003-outcome-and-preference.md) — Outcome三層信号、能力/好みの二重Connection、Tomoの質問
 - [ADR-0004](docs/decisions/ADR-0004-tech-stack.md) — 技術選定（Go / SQLite真実と射影の分離 / Ollama＋Deferred Perception / 段階的デーモン化）
 - [ADR-0005](docs/decisions/ADR-0005-perception-model-and-schema-boundary.md) — 知覚の実装（qwen3:8b確定 / schemaは「形」・プロンプトは「意味」）
-- [ADR-0006](docs/decisions/ADR-0006-executor-integration.md) — Executor統合（`tomobit do` / claude-code Adapter / ダイジェスト記帳 / 採用確認）
+- [ADR-0006](docs/decisions/ADR-0006-executor-integration.md) — Executor統合（`tomobit do` / claude-code Adapter / ダイジェスト記帳 / Feedback）
 - [ADR-0007](docs/decisions/ADR-0007-curiosity-question.md) — Curiosityの最初の器官（Preference GapはView / 質問予算はeventsから導出 / doの区切りでTomoの質問）
 - [ADR-0008](docs/decisions/ADR-0008-appearance.md) — Tomoの姿（成長ステージはView / ドット絵＝半ブロック＋ANSI / 依存ゼロ — 端末描画はADR-0025で廃止）
 - [ADR-0009](docs/decisions/ADR-0009-voice.md) — Tomoの声（発話＝Viewの写像 / LLM不使用 / 語調は確信度のView）
@@ -50,11 +50,12 @@
 - [ADR-0020](docs/decisions/ADR-0020-face-window.md) — Tomoの顔窓（窓は第二のレンダラである）
 - [ADR-0021](docs/decisions/ADR-0021-onboarding.md) — 初期導入（配線は経験ではない / config.json / `tomobit setup`）
 - [ADR-0022](docs/decisions/ADR-0022-chat-session.md) — 対話セッション（会話は入力の器・タスクは記帳の単位 / ターンはスレッドを継ぐ / インラインの自前ラインエディタ）
-- [ADR-0023](docs/decisions/ADR-0023-task-split.md) — タスク分割（Providerの分割提案はプロトコル / サブタスクは独立タスク / 実行者は親の選択方法を継ぐ — autoなら台帳が分配）
+- [ADR-0023](docs/decisions/ADR-0023-task-split.md) — タスク分割（Providerの分割提案はプロトコル / サブタスクは独立タスク / 実行者は親の選択方法を継ぐ — autoなら台帳が分配。opt-in `--split` と逐次のみはADR-0028が改定）
 - [ADR-0024](docs/decisions/ADR-0024-chat-ux.md) — チャットUX（履歴永続化・Ctrl-R・Tab補完・markdown-lite描画・ツールdetailは表示専用チャネル）
 - [ADR-0025](docs/decisions/ADR-0025-face-autolaunch.md) — 端末アバターの廃止と顔窓の自動起動（姿は窓に一本化 / 端末=声とテキスト / 顔窓は既定で出る・設定で止める）
 - [ADR-0026](docs/decisions/ADR-0026-ab-duel.md) — A/B実走（好奇心が問いから比較実験へ / Tomoが「試していい?」と申し出てY/n・2Providerを並走・ユーザー判定をpreference経験化 / 顔窓は「考える」吹き出し⚪︎つなぎで可視化 — orchestrator化しない）
 - [ADR-0027](docs/decisions/ADR-0027-face-lifetime.md) — 顔窓の寿命（窓は対話が生きている間だけ居る＝既定エフェメラル / 在席は`~/.tomobit/sessions/<pid>.lock`のflockで測る / 常駐は`face_resident`でオプトイン）
+- [ADR-0028](docs/decisions/ADR-0028-auto-split-parallel.md) — 判断ゼロの分割と並走（分割プロトコルは常時ON＝判断は毎回Provider / 独立群はProviderが宣言・既定は逐次 / 並走だけ実行直前にy/Nで人が許す＝コストは実測中央値 / chatは成果を親スレッドにfeedし親Providerが統合 / 子は客観信号のみ・主観Feedbackは区切りの親に1回）
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。
@@ -75,11 +76,14 @@ tomobit            # 相棒ビュー（発話・Connection一覧）→ そのま
                    # パイプ・リダイレクトなら見せて終わる
 tomobit chat [--provider claude-code|codex|human|auto] [--cap <capability>] ["<prompt>"]
                    # 対話セッション。1つの会話 = 1つのタスク = 1つの経験。
-                   # /new か /exit で区切ると 採用確認→知覚→Tomoの質問→鏡 が走る
-tomobit do [--provider claude-code|codex] [--cap <capability>] [--split] "<prompt>"
+                   # /new か /exit で区切ると Feedback→知覚→Tomoの質問→鏡 が走る
+tomobit do [--provider claude-code|codex] [--cap <capability>] "<prompt>"
                    # 非対話の一発（スクリプト向け）。区切りの器官はchatと同じ。
-                   # --split: Providerが「難しすぎる/分割すべき」と提案したら
-                   # サブタスク群として実行（autoなら実行者は台帳が選ぶ — ADR-0023）
+                   # 分割プロトコルは常時ON: Providerが「難しすぎる/独立に分けられる」と
+                   # 提案したらサブタスクとして実行（autoなら実行者は台帳が選ぶ）。
+                   # 独立群を宣言されたら実行直前に y/N で並走可否を聞く（既定N=全逐次、
+                   # 概算コストを実測中央値から提示。並走は[n:provider]表示。非TTYは
+                   # 常に逐次 — ADR-0023/0028。config split_protocol=false で止める）
 tomobit record  --session <id> --type <event.type> [--json '{...}']
 tomobit perceive   # 未知覚セッションをOllama(qwen3:8b)で経験化しConnectionへ反映
 tomobit rebuild    # 射影を破棄しexperiencesから再構築（決定的 — 姿も再現される）
