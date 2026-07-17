@@ -213,6 +213,43 @@ func TestPollerActiveThoughtsClearOnFinish(t *testing.T) {
 	}
 }
 
+// TestPollerActiveThoughtsClearOnTurnEnd: the gate is a turn in flight, not an
+// open task. A chat session left task.started (closed without /exit) after its
+// turn finished shows no thought — provider.finished cleared the streamed text,
+// so a stale session never pins a phantom bubble. Regression: a chat left open
+// hours ago kept "thinking" its last answer beside a genuinely running one.
+func TestPollerActiveThoughtsClearOnTurnEnd(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.db")
+	s := mustOpen(t, path)
+	defer s.Close()
+
+	p := &Poller{Path: path}
+	if _, err := p.Poll(nowMs); err != nil {
+		t.Fatal(err)
+	}
+	must := func(sid, typ string, ts int64, payload map[string]any) {
+		if err := s.AppendEvent(sid, typ, ts, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must("chat", "task.started", nowMs+100, map[string]any{"intent": "x"})
+	must("chat", "provider.selected", nowMs+101, map[string]any{"provider": "claude-code"})
+	must("chat", "provider.output", nowMs+102, map[string]any{"text": "両方完了しました"})
+	must("chat", "provider.finished", nowMs+103, map[string]any{})
+
+	if u, _ := p.Poll(nowMs + 200); len(u.Thoughts) != 0 {
+		t.Errorf("a finished turn on an unclosed session shows no thought, got %d: %+v", len(u.Thoughts), u.Thoughts)
+	}
+
+	// A new turn re-lights the bubble: same session, but a fresh provider.output
+	// means a provider is streaming again.
+	must("chat", "task.turn", nowMs+300, map[string]any{})
+	must("chat", "provider.output", nowMs+301, map[string]any{"text": "次を考える"})
+	if u, _ := p.Poll(nowMs + 400); len(u.Thoughts) != 1 || u.Thoughts[0].Text != "次を考える" {
+		t.Errorf("a new turn should show the fresh thought, got %+v", u.Thoughts)
+	}
+}
+
 func mustOpen(t *testing.T, path string) *store.Store {
 	t.Helper()
 	s, err := store.Open(path)

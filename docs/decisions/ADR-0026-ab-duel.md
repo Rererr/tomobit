@@ -147,6 +147,41 @@ Tomo にできるのは **ユーザーに問うこと**（`curiosity.Ask` → `u
 （回答チャネルは端末）に反する。デュエルの可視化は**喋りではなく「考え中」の記号**に
 留める — 生の回答は端末、思考の気配だけが顔窓。この線引きが顔窓の相棒性を保つ。
 
+**追記（2026-07-17）: 「直近に provider.output」の判定を厳密化**。active の判定は
+「task 未完了 かつ 出力あり」ではなく **turn 進行中**（session の turn-lifecycle 最終イベントが
+`provider.output` であること。後続の `provider.finished`/`provider.error` が来た時点で消す）。
+chat セッション（ADR-0022）は `/exit` されるまで task.started のままなので、緩い判定だと
+ターン完了後やアイドル中、さらに端末を閉じ忘れた孤児セッションの最終回答が**幻の思考として
+何時間も残る**（実測: 10.5時間前の未クローズ chat が「両方完了しました」を考え続けた）。
+残課題: **ストリーム途中でのハードキル**（最終イベントが provider.output のまま孤児化）は
+この判定でも残る。恒久対策は起動時の孤児 reap か直近性ガードだが、時間ノブを避けるため
+現時点では未実装（計測された症状＝ターン完了後の残留は本追記で解消）。
+
+---
+
+## 検証（手動E2E）の再現
+
+デュエルは実 Provider 2つの並走＋顔窓 GUI 目視が要り、自動テストに置換できない。
+毎回この状態を作る使い捨て seed スクリプトは**コミットしない**（Go の testdata は
+入力データ用でスクリプトの置き場ではなく、cmd/ に検証専用バイナリを常設するのは
+コンセプト純度に反する）。資産はコードでなく**seed 条件**なのでここに残す。
+
+申し出（Decision 1）の唯一のトリガーは「open な Preference Gap」なので、それを
+最小構成で作る:
+
+- 同一 scope（例 `cap=implement`）に 2 Provider（`claude-code` と `codex`）を
+  **同型の実行実績**で育てる。実測で gap が出た配合は **各 4 採用 / 1 破棄**
+  （`Outcome{Adopted:"as-is"}` ×4、`Outcome{Reverted:true}` ×1、`Source:"production"`）。
+- 両者が同記録なら capability は拮抗・頻度は互角・preference 未確定＝open gap。
+  seed 後は `curiosity.Gaps()` に `cap=implement` の `claude-code` vs `codex` が
+  現れることを**確認してから**（推測でなく計測）実走する。育成ロジックは
+  `internal/curiosity` のテストヘルパーと同型。
+- 実走: 同じ `TOMOBIT_DB` を指すこと。`do --provider auto "<副作用のない指示>"`
+  → 申し出に `y` → 端末で両出力を見て採点（引き分けは Enter）→ preference が
+  台帳へ1件入る。`ExtractorVer` は cmd/tomobit と一致させる。
+- 後片付け: seed DB（`~/.tomobit/duel-smoke.db*`）は本番台帳と同居しうるので
+  名指しで消す（ワイルドカードで薙がない）。
+
 ---
 
 ## Consequences
