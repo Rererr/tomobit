@@ -54,6 +54,7 @@
 - [ADR-0024](docs/decisions/ADR-0024-chat-ux.md) — チャットUX（履歴永続化・Ctrl-R・Tab補完・markdown-lite描画・ツールdetailは表示専用チャネル）
 - [ADR-0025](docs/decisions/ADR-0025-face-autolaunch.md) — 端末アバターの廃止と顔窓の自動起動（姿は窓に一本化 / 端末=声とテキスト / 顔窓は既定で出る・設定で止める）
 - [ADR-0026](docs/decisions/ADR-0026-ab-duel.md) — A/B実走（好奇心が問いから比較実験へ / Tomoが「試していい?」と申し出てY/n・2Providerを並走・ユーザー判定をpreference経験化 / 顔窓は「考える」吹き出し⚪︎つなぎで可視化 — orchestrator化しない）
+- [ADR-0027](docs/decisions/ADR-0027-face-lifetime.md) — 顔窓の寿命（窓は対話が生きている間だけ居る＝既定エフェメラル / 在席は`~/.tomobit/sessions/<pid>.lock`のflockで測る / 常駐は`face_resident`でオプトイン）
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。
@@ -88,6 +89,9 @@ tomobit-face       # Tomoのマスコット窓（表示専用・DBは読み取�
 
 姿は窓が担う: `chat` / `do` / `status` を端末（TTY）で使うと顔窓が自動で出る。
 止めるなら `config.json` の `"face_auto_launch": false` か `TOMOBIT_FACE=0`（ADR-0025）。
+窓の寿命は対話に接地する（ADR-0027）: 既定では `chat`/`do` が生きている間だけ居て、
+最後の対話が終わると数秒後に自閉する（`status` 単体は約3秒の一瞥）。手で閉じるまで残す
+従来挙動が欲しければ `config.json` の `"face_resident": true` か `TOMOBIT_FACE_RESIDENT=1`。
 
 チャットの中では `/new`（区切って次のタスク）・`/provider`・`/cap`・`/size`・`/status`・`/help`・`/exit`。
 入力は ↑↓履歴・Ctrl-A/E/W/U・複数行貼り付け（そのまま1つの依頼になる）・Shift+Enter か `\`+Enter で改行。

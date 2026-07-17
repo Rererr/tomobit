@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/Rererr/tomobit/internal/facelock"
+	"github.com/Rererr/tomobit/internal/presence"
 )
 
 // resolveFaceAutoLaunch is faceAutoLaunchEnabled's testable core: env
@@ -36,6 +37,55 @@ func resolveFaceAutoLaunch(envVal string, envSet bool, configChoice *bool, warn 
 func faceAutoLaunchEnabled() bool {
 	v, ok := os.LookupEnv("TOMOBIT_FACE")
 	return resolveFaceAutoLaunch(v, ok, cfg.FaceAutoLaunch, os.Stderr)
+}
+
+// resolveFaceResident is faceResidentEnabled's testable core, a mirror of
+// resolveFaceAutoLaunch but for ADR-0027's "keep the window" choice. Same
+// env > config order (ADR-0021); the only difference is the default: a nil
+// config choice is false = ephemeral, the new default where the window follows
+// the conversation's life instead of lingering.
+func resolveFaceResident(envVal string, envSet bool, configChoice *bool, warn io.Writer) bool {
+	if envSet {
+		switch envVal {
+		case "0":
+			return false
+		case "1":
+			return true
+		default:
+			fmt.Fprintf(warn, "warning: TOMOBIT_FACE_RESIDENT=%q は 0 か 1 のみ — 設定値にフォールバック\n", envVal)
+		}
+	}
+	if configChoice != nil {
+		return *configChoice
+	}
+	return false
+}
+
+func faceResidentEnabled() bool {
+	v, ok := os.LookupEnv("TOMOBIT_FACE_RESIDENT")
+	return resolveFaceResident(v, ok, cfg.FaceResident, os.Stderr)
+}
+
+// registerPresence marks this CLI as a live conversation so the face window
+// counts it and stays open while it runs (ADR-0027 Decision 3). Best-effort: a
+// failure warns one honest line and returns a no-op release, never failing the
+// command — presence governs the window's lifetime, not the work. Call the
+// returned func (deferred) at the conversation's end.
+//
+// Gated on a TTY stdout, the same condition maybeLaunchFace uses: presence only
+// exists to govern a window's lifetime, and a pipe has no window (ADR-0025) — so
+// registering one would be a side effect on machine-readable output for nothing
+// to read it (ADR-0008).
+func registerPresence(warn io.Writer) func() {
+	if !isTTY(os.Stdout) {
+		return func() {}
+	}
+	h, err := presence.Register()
+	if err != nil {
+		fmt.Fprintln(warn, "warning: 在席登録に失敗:", err, "— 顔窓の寿命管理を諦めて続行")
+		return func() {}
+	}
+	return func() { h.Release() }
 }
 
 // maybeLaunchFace spawns tomobit-face for an interactive command (ADR-0025
@@ -97,7 +147,15 @@ func spawnFace(dbPath string, warn io.Writer) {
 		return
 	}
 
-	cmd := exec.Command(bin, "--db", dbPath)
+	// --resident is resolved here and passed to the child (ADR-0027 Decision 4):
+	// config wiring lives on the CLI side, the same as --db. The face obeys the
+	// flag rather than reading config itself, and the window's mode is fixed by
+	// whichever process first opens it (later CLIs skip spawn on the lock).
+	args := []string{"--db", dbPath}
+	if faceResidentEnabled() {
+		args = append(args, "--resident")
+	}
+	cmd := exec.Command(bin, args...)
 	// Detach (platform-split): its own session/process group with no controlling
 	// terminal, so the mascot outlives this CLI turn and never rides the
 	// parent's Ctrl-C.

@@ -33,6 +33,7 @@ func run(args []string) error {
 	plain := fs.Bool("plain", false, "ordinary decorated window (no transparency / always-on-top)")
 	fontPath := fs.String("font", "", "font file for the bubble (.ttf/.otf/.ttc; default: system Japanese font)")
 	debug := fs.Bool("debug", false, "keep raw stderr (macOS system noise included — needed to see panics)")
+	resident := fs.Bool("resident", false, "0セッションでも常駐（既定は最後の対話終了後に自閉）")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), `tomobit-face — Tomoのマスコット窓（表示専用・DBは読み取りのみ）
 
@@ -77,7 +78,7 @@ func run(args []string) error {
 		return err
 	}
 
-	g := facewin.NewGame(&facewin.Poller{Path: *db}, breed, *scale, *plain, font)
+	g := facewin.NewGame(&facewin.Poller{Path: *db}, breed, *scale, *plain, font, *resident)
 	w, h := g.Size()
 
 	ebiten.SetWindowTitle("Tomo")

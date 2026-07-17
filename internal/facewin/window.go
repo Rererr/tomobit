@@ -12,6 +12,8 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	text "github.com/hajimehoshi/ebiten/v2/text/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
+
+	"github.com/Rererr/tomobit/internal/presence"
 )
 
 // Knobs (ADR-0020 Consequences: the numbers a human decides).
@@ -22,6 +24,12 @@ const (
 	blinkHold    = 180 * time.Millisecond
 	bubbleFor    = 8 * time.Second // 吹き出し表示時間
 	bobPeriod    = 3200 * time.Millisecond
+
+	// residentGrace is how long presence must stay 0 before an ephemeral window
+	// self-closes (ADR-0027 Decision 2): a momentary dip — a do finishing before
+	// the next one, a startup race — never closes it. At pollInterval 500ms this
+	// is six consecutive 0 observations.
+	residentGrace = 3 * time.Second
 
 	fontSize    = 13.0
 	bubblePad   = 8
@@ -38,6 +46,15 @@ type Game struct {
 	scale  int
 	plain  bool
 	font   *text.GoTextFaceSource
+
+	// resident keeps the window until Esc/Q regardless of presence (ADR-0027).
+	// When false the window self-closes once no conversation is alive; liveCount
+	// reports that count (injected so a test stubs it), and zeroSince tracks how
+	// long the count has stood at 0 for the grace rule. liveCount is nil when
+	// self-close is disabled (resident, or the sessions dir couldn't resolve).
+	resident  bool
+	liveCount func() int
+	zeroSince time.Time
 
 	w, h   int // logical window size
 	frames [6][2]*ebiten.Image
@@ -62,9 +79,13 @@ type Game struct {
 
 // NewGame builds the window for one breed at one integer scale (ADR-0020
 // Decision 4: 非整数拡大はドットの輪郭を壊すため禁止 — enforced by type).
-func NewGame(p *Poller, breed Breed, scale int, plain bool, font *text.GoTextFaceSource) *Game {
+// resident (ADR-0027) fixes the window's lifetime: false makes it ephemeral
+// (self-closes when no conversation is alive), true keeps it until Esc/Q.
+func NewGame(p *Poller, breed Breed, scale int, plain bool, font *text.GoTextFaceSource, resident bool) *Game {
 	g := &Game{
 		poller: p, breed: breed, scale: scale, plain: plain, font: font,
+		resident:  resident,
+		liveCount: defaultLiveCount(resident),
 		// Sprite box at bottom-center; the same amount of headroom above is
 		// the bubble/overlay area (既定4倍で256×256の透明キャンバス).
 		w: spriteSize * scale * 2,
@@ -81,6 +102,50 @@ func NewGame(p *Poller, breed Breed, scale int, plain bool, font *text.GoTextFac
 	g.ovQ = gridImage(overlayQuestion)
 	g.ovZ = gridImage(overlaySleep)
 	return g
+}
+
+// defaultLiveCount wires the ephemeral window's presence probe (ADR-0027): it
+// counts live conversations via presence.CountLive. A resident window never
+// self-closes, so it needs no probe (nil). If the sessions dir can't even be
+// resolved we also return nil — the safe side is to keep the companion on
+// screen, never to vanish on a probe we could not run. A count error returns
+// -1 ("unknown"), which Update reads as "don't close this tick".
+func defaultLiveCount(resident bool) func() int {
+	if resident {
+		return nil
+	}
+	dir, err := presence.DefaultDir()
+	if err != nil {
+		return nil
+	}
+	return func() int {
+		n, err := presence.CountLive(dir)
+		if err != nil {
+			return -1
+		}
+		return n
+	}
+}
+
+// closeDecision is the ephemeral window's self-close rule (ADR-0027 Decision 2),
+// a pure function so the grace-window logic is table-tested without a window. A
+// resident window never closes. Otherwise: the first 0 observation records
+// zeroSince, any live>0 resets it, and the window closes only once presence has
+// stood at 0 for a continuous grace — so a one-tick dip never closes it.
+func closeDecision(resident bool, live int, now, zeroSince time.Time, grace time.Duration) (terminate bool, nextZeroSince time.Time) {
+	if resident {
+		return false, zeroSince
+	}
+	if live > 0 {
+		return false, time.Time{}
+	}
+	if zeroSince.IsZero() {
+		return false, now
+	}
+	if now.Sub(zeroSince) >= grace {
+		return true, zeroSince
+	}
+	return false, zeroSince
 }
 
 // Size returns the logical window size for ebiten.SetWindowSize.
@@ -111,6 +176,19 @@ func (g *Game) Update() error {
 		} else {
 			g.view = u.Snapshot
 			g.queue = append(g.queue, u.Lines...)
+		}
+
+		// Self-close on 0 live conversations (ADR-0027). A negative count is
+		// "unknown" (probe failed): leave zeroSince as-is and don't close — the
+		// safe side keeps the companion rather than vanishing on a bad read.
+		if g.liveCount != nil {
+			if live := g.liveCount(); live >= 0 {
+				terminate, next := closeDecision(g.resident, live, now, g.zeroSince, residentGrace)
+				g.zeroSince = next
+				if terminate {
+					return ebiten.Termination
+				}
+			}
 		}
 	}
 

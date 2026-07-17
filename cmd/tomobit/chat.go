@@ -76,6 +76,12 @@ func cmdChat(args []string) error {
 			return err
 		}
 	}
+	// Take presence before spawning the face (ADR-0027 Decision 2): the window
+	// is born with at least one live conversation, so it never observes 0 during
+	// its own startup race. Held for the whole REPL — even between turns — so an
+	// idle chat keeps Tomo on screen; released on exit.
+	releasePresence := registerPresence(os.Stderr)
+	defer releasePresence()
 	maybeLaunchFace(*db)
 	ed := lineedit.New(os.Stdin, os.Stdout)
 	if err := ensureClaudeProfile(ed.Reader(), *providerName); err != nil {
