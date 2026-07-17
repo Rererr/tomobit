@@ -6,6 +6,7 @@ package facewin
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -25,6 +26,18 @@ type Snapshot struct {
 	Marker   string // "" ふつう / "?" はてな / "z" ねむい (face.Mood)
 	Conns    []*core.Connection
 	MaxExpTS int64
+	Thoughts []Thought // providers currently running (ADR-0026 Decision 5)
+}
+
+// Thought is one in-flight provider's latest visible thinking (ADR-0026
+// Decision 5): the assistant text it last emitted, tagged with its name. The
+// window draws one "考える" bubble per thought — a duel shows two at once,
+// making "Tomo is comparing" visible. Still display-only: the text is the same
+// provider.output already in the ledger (回答チャネルは端末), shown as a
+// thinking fragment, never a spoken answer.
+type Thought struct {
+	Provider string // provider name; "" until the run reports provider.selected
+	Text     string // latest assistant text fragment
 }
 
 // Update is one poll's result: the fresh snapshot plus the spoken lines the
@@ -166,12 +179,84 @@ func (p *Poller) snapshot(nowMs int64) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	thoughts, err := p.activeThoughts()
+	if err != nil {
+		return Snapshot{}, err
+	}
 	return Snapshot{
 		Stage:    stage,
 		Marker:   marker,
 		Conns:    conns,
 		MaxExpTS: maxTS,
+		Thoughts: thoughts,
 	}, nil
+}
+
+// activeThoughts derives the providers running right now (ADR-0026 Decision 5):
+// task sessions that started but have not finished or cancelled, each folded to
+// its latest provider name and assistant text. A session with no assistant text
+// yet contributes nothing (there is no thought to show). Ordered by session id
+// so two duel siblings keep a stable left/right; the caller caps how many draw.
+//
+// A duel's parent session is task.started-but-unfinished too, but it carries no
+// provider.output of its own (its children do), so it folds to no thought — the
+// bubbles are the children's, never the parent's.
+func (p *Poller) activeThoughts() ([]Thought, error) {
+	rows, err := p.s.DB.Query(`
+		SELECT session_id, type, payload FROM events
+		WHERE session_id IN (
+			SELECT session_id FROM events WHERE type = 'task.started'
+			EXCEPT
+			SELECT session_id FROM events WHERE type IN ('task.finished','task.cancelled')
+		) AND type IN ('provider.selected','provider.output')
+		ORDER BY session_id, seq`)
+	if err != nil {
+		return nil, fmt.Errorf("facewin: active thoughts: %w", err)
+	}
+	defer rows.Close()
+
+	order := []string{}
+	byID := map[string]*Thought{}
+	get := func(sid string) *Thought {
+		t, ok := byID[sid]
+		if !ok {
+			t = &Thought{}
+			byID[sid] = t
+			order = append(order, sid)
+		}
+		return t
+	}
+	for rows.Next() {
+		var sid, typ, payload string
+		if err := rows.Scan(&sid, &typ, &payload); err != nil {
+			return nil, err
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(payload), &m); err != nil {
+			continue // a malformed row must not blank the whole view
+		}
+		switch typ {
+		case "provider.selected":
+			if v, ok := m["provider"].(string); ok && v != "" {
+				get(sid).Provider = v
+			}
+		case "provider.output":
+			if v, ok := m["text"].(string); ok && v != "" {
+				get(sid).Text = v
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var out []Thought
+	for _, sid := range order {
+		if t := byID[sid]; t.Text != "" {
+			out = append(out, *t)
+		}
+	}
+	return out, nil
 }
 
 func (p *Poller) maxExperienceTS() (int64, error) {
