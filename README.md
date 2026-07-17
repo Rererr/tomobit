@@ -53,6 +53,7 @@
 - [ADR-0023](docs/decisions/ADR-0023-task-split.md) — タスク分割（Providerの分割提案はプロトコル / サブタスクは独立タスク / 実行者は親の選択方法を継ぐ — autoなら台帳が分配）
 - [ADR-0024](docs/decisions/ADR-0024-chat-ux.md) — チャットUX（履歴永続化・Ctrl-R・Tab補完・markdown-lite描画・ツールdetailは表示専用チャネル）
 - [ADR-0025](docs/decisions/ADR-0025-face-autolaunch.md) — 端末アバターの廃止と顔窓の自動起動（姿は窓に一本化 / 端末=声とテキスト / 顔窓は既定で出る・設定で止める）
+- [ADR-0026](docs/decisions/ADR-0026-ab-duel.md) — A/B実走（好奇心が問いから比較実験へ / Tomoが「試していい?」と申し出てY/n・2Providerを並走・ユーザー判定をpreference経験化 / 顔窓は「考える」吹き出し⚪︎つなぎで可視化 — orchestrator化しない）
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。
