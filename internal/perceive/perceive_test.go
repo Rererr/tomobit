@@ -97,6 +97,49 @@ func TestParseDeterministicRevertedFinish(t *testing.T) {
 	}
 }
 
+// TestFailedSubtaskShapeScoresZero pins the C1 wiring end to end (ADR-0028
+// Decision 5): a session with provider.error and an empty task.finished — the
+// exact shape of a split subtask or a duel child — parses to a failed Outcome
+// that OutcomeWeight scores y=0, so a failed child's Beta drops instead of
+// staying neutral.
+func TestFailedSubtaskShapeScoresZero(t *testing.T) {
+	d := parseDeterministic([]*store.Event{
+		ev("task.started", map[string]any{"source": "production", "parent": "p"}),
+		ev("capability.started", map[string]any{"capability": "impl"}),
+		ev("provider.selected", map[string]any{"provider": "claude"}),
+		ev("provider.error", map[string]any{"message": "exit 1"}),
+		ev("task.finished", map[string]any{}),
+	})
+	if !d.outcome.Failed {
+		t.Fatal("provider.error should mark the outcome failed")
+	}
+	e := &core.Experience{Kind: core.KindExecution, Outcome: d.outcome}
+	y, ok := core.OutcomeWeight(e)
+	if !ok || y != 0 {
+		t.Fatalf("a failed child should score y=0 (ok=true), got y=%v ok=%v", y, ok)
+	}
+}
+
+// TestSuccessfulSubtaskShapeStaysNeutral: the same empty-task.finished shape
+// without provider.error carries no signal — no objective failure and no
+// subjective grade — so it stays neutral (ok=false), never fabricated into y=1
+// (ADR-0028 Decision 5).
+func TestSuccessfulSubtaskShapeStaysNeutral(t *testing.T) {
+	d := parseDeterministic([]*store.Event{
+		ev("task.started", map[string]any{"source": "production", "parent": "p"}),
+		ev("capability.started", map[string]any{"capability": "impl"}),
+		ev("provider.selected", map[string]any{"provider": "claude"}),
+		ev("task.finished", map[string]any{}),
+	})
+	if d.outcome.Failed {
+		t.Fatal("a clean run must not be marked failed")
+	}
+	e := &core.Experience{Kind: core.KindExecution, Outcome: d.outcome}
+	if _, ok := core.OutcomeWeight(e); ok {
+		t.Fatal("an unverified success must stay neutral (ok=false), not fabricate y=1")
+	}
+}
+
 // fakeExtractor returns a fixed semantic map and records the vocabulary it
 // was handed, so tests can assert the prompt input.
 type fakeExtractor struct {

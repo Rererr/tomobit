@@ -1,7 +1,7 @@
 // tomobit chat — the conversational session (ADR-0022).
 //
 // One chat = one task = one Experience; turns are the breathing inside it.
-// The organs `do` runs at its boundary (採用確認 → 知覚 → 質問 → 鏡) run here
+// The organs `do` runs at its boundary (Feedback → 知覚 → 質問 → 鏡) run here
 // too, at /new, /exit or Ctrl-D — the boundary moved from "one process" to
 // "one task", which is what it always meant.
 package main
@@ -24,6 +24,7 @@ import (
 	"github.com/Rererr/tomobit/internal/mdlite"
 	"github.com/Rererr/tomobit/internal/perceive"
 	"github.com/Rererr/tomobit/internal/store"
+	"github.com/Rererr/tomobit/internal/subtask"
 	"github.com/Rererr/tomobit/internal/voice"
 )
 
@@ -46,6 +47,11 @@ type chat struct {
 	timeout      time.Duration
 	size         string
 	extractor    perceive.Extractor
+	// interactive is whether a human is watching (both stdin and stdout are a
+	// terminal). It gates the split parallelism offer (splitAndFold): a pipe or CI
+	// never sees it and stays sequential. A field, not a live isTTY() call, so a
+	// test can drive the accept path deterministically without a real terminal.
+	interactive bool
 
 	// sid == "" means no task is open: the next prompt starts one.
 	sid       string
@@ -104,7 +110,8 @@ func cmdChat(args []string) error {
 		s: s, ed: ed, in: ed.Reader(), out: os.Stdout,
 		providerName: *providerName, capability: *capability,
 		permMode: *permMode, timeout: *timeout, size: *size,
-		extractor: &perceive.Ollama{URL: *url, Model: *model},
+		extractor:   &perceive.Ollama{URL: *url, Model: *model},
+		interactive: isTTY(os.Stdin) && isTTY(os.Stdout),
 	}
 	ed.Completer = c.complete
 	// The first screen is the companion view (ADR-0008), and its next line is
@@ -308,12 +315,17 @@ func (c *chat) setWiring(field *string, arg, label string, check func(string) er
 }
 
 // turn is one exchange: the first opens the task, the rest resume its thread.
+// opening (the turn that starts the task — the first, or the first after /new)
+// is where the split protocol rides, since intent decomposition only means
+// anything at a task's birth (ADR-0028 Decision 1); a continuation turn carries
+// no protocol.
 func (c *chat) turn(prompt string) error {
 	if c.human {
 		fmt.Fprintln(c.out, dim("いまのタスクは君の手にある — 終わったら /new か /exit で区切る"))
 		return nil
 	}
-	if c.sid == "" {
+	opening := c.sid == ""
+	if opening {
 		if err := c.startTask(prompt); err != nil {
 			return err
 		}
@@ -327,7 +339,7 @@ func (c *chat) turn(prompt string) error {
 			return err
 		}
 	}
-	return c.run(prompt)
+	return c.run(prompt, opening)
 }
 
 // startTask opens the ledger session: the first prompt is the task's intent,
@@ -356,11 +368,26 @@ func (c *chat) startTask(prompt string) error {
 	return nil
 }
 
-// run executes one turn against the provider, resuming the thread the
-// earlier turns opened.
-func (c *chat) run(prompt string) error {
+// run executes one turn against the provider, resuming the thread the earlier
+// turns opened. opening carries the split protocol (ADR-0028 Decision 1) and is
+// the only turn whose output is read for a proposal: the fold-back's own feed
+// turn (splitAndFold) reuses this method with opening=false, so the protocol
+// text that stays in the thread is never read back as a fresh proposal — depth
+// stays 1 (ADR-0023 Decision 4), structurally, not by luck.
+func (c *chat) run(prompt string, opening bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+
+	// The protocol rides the task's opening turn only, under the same discipline
+	// as do (splitProtocolEligible): the kill switch must be on, and a human turn
+	// (excluded earlier in turn) never gets it. A chat has no plan step, so
+	// planName is always "".
+	split := opening && splitProtocolEligible(splitProtocolEnabled(), c.human, "")
+	runPrompt := prompt
+	var texts []string
+	if split {
+		runPrompt = subtask.Instruction(prompt)
+	}
 
 	v := newTurnView(c.out, c.adapter.Name())
 	sink := func(ev executor.Event, ts int64) error {
@@ -371,6 +398,11 @@ func (c *chat) run(prompt string) error {
 			c.threadID = id
 		}
 		v.show(ev)
+		if split && ev.Type == executor.EventProviderOutput {
+			if text, ok := ev.Payload["text"].(string); ok && text != "" {
+				texts = append(texts, text)
+			}
+		}
 		// The ledger gets the payload without its view-only keys (ADR-0024
 		// Decision 6): tool detail is for the human watching, and recording it
 		// would spend the perception digest budget on what R3 already excludes.
@@ -383,7 +415,7 @@ func (c *chat) run(prompt string) error {
 	}
 	v.begin()
 	result, runErr := ex.Run(ctx, executor.Request{
-		Prompt: prompt, ResumeID: c.threadID,
+		Prompt: runPrompt, ResumeID: c.threadID,
 		PermissionMode: c.permMode, Timeout: c.timeout,
 	}, sink)
 	v.end(result)
@@ -406,7 +438,135 @@ func (c *chat) run(prompt string) error {
 	if result.Started {
 		c.completed = true
 	}
+
+	// A clean opening turn's output may be a split proposal (ADR-0028 Decision
+	// 5). A broken run (already returned above on ctx.Err(), or non-zero exit /
+	// runErr here) is never trusted as one — its output is not a decision.
+	if split && runErr == nil && result.ExitCode == 0 {
+		groups, parseErr := subtask.Parse(strings.Join(texts, "\n"))
+		if parseErr != nil {
+			fmt.Fprintln(os.Stderr, "split: proposal ignored —", parseErr)
+		} else if groups != nil {
+			return c.splitAndFold(ctx, groups, prompt)
+		}
+	}
 	return nil
+}
+
+// splitAndFold runs the opening turn's accepted proposal and folds the results
+// back into the parent thread (ADR-0028 Decision 5). The subtasks run through
+// the shared executeSplit (the same machinery do uses); then, instead of do's
+// finishTask, a single deterministic feed turn resumes the parent thread so the
+// next user turn talks to a Provider that already knows what the subtasks
+// produced — the conversation continues over the integrated result, not over the
+// split JSON it stalled on.
+func (c *chat) splitAndFold(ctx context.Context, groups [][]string, parentIntent string) error {
+	subs, cancelled, err := executeSplit(ctx, c.s, c.sid, groups, parentIntent,
+		c.providerName, c.capability, c.size, c.permMode, c.timeout, c.in, c.out, c.interactive)
+	if err != nil {
+		return err
+	}
+	if cancelled {
+		// SIGINT already recorded task.cancelled on the children and the parent
+		// (c.sid): the task is over, so reset the session and let the next turn
+		// open a fresh one rather than resume a cancelled thread — the same reset
+		// closeTask does at a boundary.
+		c.sid, c.threadID, c.turns = "", "", 0
+		c.adapter, c.human, c.completed = nil, false, false
+		fmt.Fprintln(c.out, dim("中断 — 分割を止めた。/new で次のタスクへ"))
+		return nil
+	}
+
+	prompt, err := c.feedPrompt(parentIntent, subs)
+	if err != nil {
+		return err
+	}
+	// The feed turn resumes the parent thread (c.threadID, unchanged by the
+	// subtasks — they run in their own sessions) and records its integration
+	// report as provider.output on c.sid. It goes straight through run with
+	// opening=false: no task.turn (this is not the user's ask), no protocol, and
+	// its output is not read for a further proposal.
+	return c.run(prompt, false)
+}
+
+// feedTailChars caps each subtask's output tail carried into the fold-back
+// prompt (ADR-0028 実装時ノブ). A subtask can emit a whole transcript, but the
+// parent only needs the ending — its conclusion — to integrate it, so the tail
+// is truncated deterministically rather than summarized by an LLM (Decision 5
+// rejects a summary: it inserts a judgment and costs a run). The cap is
+// per-subtask; with subtask.Max=5 the aggregate stays on the order of
+// internal/perceive's maxSessionChars=12000 and deliberately below it, so the
+// fold-back turn is a digest the parent thread can hold, not a dump.
+const feedTailChars = 2000
+
+// feedPrompt builds the deterministic harness that folds the subtask results
+// back into the parent thread (ADR-0028 Decision 5). It lists every proposed
+// subtask with its instruction and output tail; a subtask a fail-stop never
+// started is named as 未着手 rather than omitted — the parent thread must not be
+// left believing the whole split ran. Harness text, like subtask.Prompt and
+// stepPrompt: it lives in the prompt only, never the ledger.
+func (c *chat) feedPrompt(parentIntent string, subs []string) (string, error) {
+	children, err := c.s.ChildSessions(c.sid)
+	if err != nil {
+		return "", fmt.Errorf("split fold-back: reading subtask sessions: %w", err)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "[tomobit] タスク「%s」を%d個のサブタスクに分割して実行した。各サブタスクの指示と結果は次の通り。\n",
+		parentIntent, len(subs))
+	for i, sub := range subs {
+		fmt.Fprintf(&b, "\n## サブタスク %d/%d: %s\n", i+1, len(subs), sub)
+		if i >= len(children) {
+			b.WriteString("（未着手 — 前のサブタスクが失敗したため実行されなかった）\n")
+			continue
+		}
+		evs, err := c.s.EventsBySession(children[i])
+		if err != nil {
+			return "", fmt.Errorf("split fold-back: reading subtask %d: %w", i+1, err)
+		}
+		text, failed := subtaskResult(evs)
+		if failed {
+			b.WriteString("（失敗）\n")
+		}
+		switch {
+		case text != "":
+			b.WriteString(tailRunes(text, feedTailChars))
+			b.WriteString("\n")
+		case !failed:
+			b.WriteString("（出力なし）\n")
+		}
+	}
+	b.WriteString("\nこれらの結果を統合して、ユーザーへの報告としてまとめよ。失敗・未着手のサブタスクがあれば、それも省かず正直に述べよ。")
+	return b.String(), nil
+}
+
+// subtaskResult reads one subtask session's provider output (concatenated in
+// stream order) and whether it recorded a provider.error — the objective failure
+// signal a subtask carries instead of a subjective Feedback (ADR-0028 Decision 5).
+func subtaskResult(evs []*store.Event) (text string, failed bool) {
+	var parts []string
+	for _, e := range evs {
+		switch e.Type {
+		case executor.EventProviderOutput:
+			if t, ok := e.Payload["text"].(string); ok && t != "" {
+				parts = append(parts, t)
+			}
+		case executor.EventProviderError:
+			failed = true
+		}
+	}
+	return strings.Join(parts, "\n"), failed
+}
+
+// tailRunes returns the last max runes of s, marking the elided head so the
+// reader knows the opening was cut. The fold-back keeps each subtask's ending —
+// where its conclusion lands — not its opening (ADR-0028 Decision 5: 最終出力の
+// 末尾). Rune-based so a multi-byte character straddling the cut is never split.
+func tailRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return "…[前略]\n" + string(r[len(r)-max:])
 }
 
 // closeTask ends the open task and runs the boundary organs. A task where
@@ -429,7 +589,7 @@ func (c *chat) closeTask() error {
 }
 
 func chatUsage(w io.Writer) {
-	fmt.Fprint(w, `/new [prompt]     ここまでを区切って次のタスクへ(採用確認 → 知覚 → Tomo)
+	fmt.Fprint(w, `/new [prompt]     ここまでを区切って次のタスクへ(Feedback → 知覚 → Tomo)
 /provider <name>  次のタスクのProvider (claude-code|codex|human|auto)
 /cap <name>       次のタスクのcapability (既定 implement)
 /size <s|m|l>     次のタスクの判断の温度 (--provider auto のとき効く)

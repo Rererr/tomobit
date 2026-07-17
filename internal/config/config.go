@@ -40,6 +40,14 @@ type Config struct {
 	// false = ephemeral (the window self-closes once no chat/do is alive); an
 	// explicit true keeps the old ADR-0025 behavior (stays until Esc/Q).
 	FaceResident *bool `json:"face_resident,omitempty"`
+	// SplitProtocol is the ADR-0028 kill switch (Decision 1). A pointer for the
+	// same absent-vs-set reason as the face fields, but the default is on: nil =
+	// key absent = the split protocol rides every eligible do (always-on), and an
+	// explicit false is the opt-out that stops it without reverting to opt-in
+	// (judgment stays zero — a machine either splits by Provider judgment or not
+	// at all). A plain bool's zero value would read a config that predates the
+	// key as "disabled", silently downgrading every existing machine.
+	SplitProtocol *bool `json:"split_protocol,omitempty"`
 }
 
 // Path is ~/.tomobit/config.json — beside the default DB, never inside it.

@@ -14,26 +14,25 @@ import (
 
 // TestDuelEligible: the offer belongs to the unpinned/auto path only — a bare
 // `do` (default provider, not explicit) is eligible, an explicit pin or human
-// or --split is not (ADR-0026 Decision 2).
+// is not (ADR-0026 Decision 2). The split protocol no longer gates it
+// (ADR-0028 made it always-on).
 func TestDuelEligible(t *testing.T) {
 	cases := []struct {
 		name             string
 		providerExplicit bool
 		providerName     string
-		split            bool
 		want             bool
 	}{
-		{"bare do (default, unpinned)", false, "claude-code", false, true},
-		{"explicit --provider auto", true, "auto", false, true},
-		{"explicit pin", true, "codex", false, false},
-		{"human", true, "human", false, false},
-		{"default provider but --split", false, "claude-code", true, false},
-		{"unpinned human default is not human", false, "claude-code", false, true},
+		{"bare do (default, unpinned)", false, "claude-code", true},
+		{"explicit --provider auto", true, "auto", true},
+		{"explicit pin", true, "codex", false},
+		{"human", true, "human", false},
+		{"unpinned human default is not human", false, "claude-code", true},
 	}
 	for _, c := range cases {
-		if got := duelEligible(c.providerExplicit, c.providerName, c.split); got != c.want {
-			t.Errorf("%s: duelEligible(%v,%q,%v) = %v, want %v",
-				c.name, c.providerExplicit, c.providerName, c.split, got, c.want)
+		if got := duelEligible(c.providerExplicit, c.providerName); got != c.want {
+			t.Errorf("%s: duelEligible(%v,%q) = %v, want %v",
+				c.name, c.providerExplicit, c.providerName, got, c.want)
 		}
 	}
 }

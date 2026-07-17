@@ -18,6 +18,58 @@ func openTest(t *testing.T) *Store {
 	return s
 }
 
+// TestRecentProviderCosts pins the sample the ADR-0028 gate's cost estimate
+// draws from: only provider.finished events with a cost_usd (claude-code
+// reports it, codex does not — a null must be excluded), newest first, capped
+// at the limit.
+func TestRecentProviderCosts(t *testing.T) {
+	s := openTest(t)
+
+	// Oldest to newest, interleaved with cost-less finishes (codex) that must
+	// not appear in the sample.
+	must := func(sid string, ts int64, payload map[string]any) {
+		if err := s.AppendEvent(sid, "provider.finished", ts, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must("a", 100, map[string]any{"cost_usd": 0.10})
+	must("b", 200, map[string]any{"duration_ms": 5}) // codex: no cost_usd → excluded
+	must("c", 300, map[string]any{"cost_usd": 0.30})
+	must("d", 400, map[string]any{"cost_usd": 0.20})
+
+	got, err := s.RecentProviderCosts(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []float64{0.20, 0.30, 0.10} // newest first, the cost-less one dropped
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v (null cost excluded)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("index %d: got %v, want %v (newest first)", i, got[i], want[i])
+		}
+	}
+
+	// The limit caps how many are returned, keeping the newest.
+	capped, err := s.RecentProviderCosts(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capped) != 2 || capped[0] != 0.20 || capped[1] != 0.30 {
+		t.Errorf("limit 2 should keep the two newest [0.20 0.30], got %v", capped)
+	}
+
+	// An empty ledger yields no sample — the gate then honestly says "概算なし".
+	empty, err := openTest(t).RecentProviderCosts(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("no provider.finished should yield no sample, got %v", empty)
+	}
+}
+
 func TestEventsRejectUpdateAndDelete(t *testing.T) {
 	s := openTest(t)
 	if err := s.AppendEvent("sess", "task.started", 100, nil); err != nil {
