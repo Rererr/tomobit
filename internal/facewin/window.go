@@ -272,7 +272,12 @@ func (g *Game) drawThoughts(screen *ebiten.Image, thoughts []Thought, spriteX, s
 	headX := float32(spriteX + spriteSize*g.scale/2)
 	headY := float32(spriteY)
 
-	const edge, gap = 4, 6
+	const edge, gap = 10, 8
+	// Sit the clouds just above Tomo's head so the ⚪︎つなぎ trail stays short and
+	// they read as *its* thoughts, not banners pinned to the ceiling. A shared
+	// bottom line aligns the two bases; a taller cloud grows upward. The gap
+	// scales with the sprite so the spacing holds at any --scale.
+	bottomY := headY - float32(7*g.scale)
 	total := float32(g.w - 2*edge)
 	bw := total
 	if len(thoughts) == 2 {
@@ -283,16 +288,17 @@ func (g *Game) drawThoughts(screen *ebiten.Image, thoughts []Thought, spriteX, s
 		if i == 1 {
 			x += bw + gap
 		}
-		g.drawThought(screen, th, x, edge, bw, headX, headY)
+		g.drawThought(screen, th, x, bottomY, bw, headX, headY)
 	}
 }
 
-// drawThought draws one thinking bubble at (x,y) of the given width and a
-// three-circle tail shrinking from its underside toward (toX,toY). The circles
-// — not a pointed tail — are what say "thinking, not speaking" (ADR-0026
-// Decision 5). Colors come from the sprite palette so it reads as the same
-// asset family as the speech bubble.
-func (g *Game) drawThought(screen *ebiten.Image, th Thought, x, y, width, toX, toY float32) {
+// drawThought draws one thinking cloud whose bottom sits at bottomY (so a row
+// of clouds aligns on a shared baseline just above the head) and a three-circle
+// ⚪︎つなぎ tail rising from Tomo's head (toX,toY) to it. The circles — not a
+// pointed tail — are what say "thinking, not speaking" (ADR-0026 Decision 5).
+// Colors come from the sprite palette so it reads as the same asset family as
+// the speech bubble.
+func (g *Game) drawThought(screen *ebiten.Image, th Thought, x, bottomY, width, toX, toY float32) {
 	face := &text.GoTextFace{Source: g.font, Size: fontSize}
 	lineH := face.Metrics().HAscent + face.Metrics().HDescent + 3
 
@@ -308,31 +314,70 @@ func (g *Game) drawThought(screen *ebiten.Image, th Thought, x, y, width, toX, t
 
 	white := color.NRGBA{0xFA, 0xFA, 0xFA, 0xFF} // palette W
 	dark := color.NRGBA{0x2E, 0x2E, 0x2E, 0xFF}  // palette k
-	// The label sits on its own line above the fragment.
+	// The label sits on its own line above the fragment; the cloud grows upward
+	// from its fixed bottom.
 	boxH := float32(2*bubblePad) + float32(lineH*float64(len(lines)+1))
-	vector.DrawFilledRect(screen, x, y, width, boxH, white, false)
-	vector.StrokeRect(screen, x, y, width, boxH, 2, dark, false)
+	top := bottomY - boxH
+	drawCloud(screen, x, top, width, boxH, white, dark)
 
-	// ⚪︎つなぎ: three shrinking circles from the box down toward Tomo.
-	fromX, fromY := x+width/2, y+boxH
-	for i, r := range []float32{4, 3, 2} {
-		t := float32(i+1) / float32(len(lines)+3)
-		cx := fromX + (toX-fromX)*t
-		cy := fromY + (toY-fromY)*t
-		vector.DrawFilledCircle(screen, cx, cy, r, dark, true)
+	// ⚪︎つなぎ: a chain of circles from Tomo's head up to the cloud, growing as
+	// they near it — "thinking", read bottom-up. Anchored at both ends so the
+	// cloud reads as *this* head's thought, not a dot floating mid-air.
+	bx, by := x+width/2, bottomY
+	for _, c := range []struct{ t, r float32 }{{0.30, 2}, {0.54, 3}, {0.78, 4.5}} {
+		cx := toX + (bx-toX)*c.t
+		cy := toY + (by-toY)*c.t
+		vector.DrawFilledCircle(screen, cx, cy, c.r, dark, true)
 	}
 
 	lbl := &text.DrawOptions{}
-	lbl.GeoM.Translate(float64(x)+bubblePad, float64(y)+bubblePad)
+	lbl.GeoM.Translate(float64(x)+bubblePad, float64(top)+bubblePad)
 	lbl.LineSpacing = lineH
 	lbl.ColorScale.ScaleWithColor(color.NRGBA{0x8A, 0x8A, 0x8A, 0xFF}) // dim, like a tool name
 	text.Draw(screen, label, face, lbl)
 
 	body := &text.DrawOptions{}
-	body.GeoM.Translate(float64(x)+bubblePad, float64(y)+bubblePad+lineH)
+	body.GeoM.Translate(float64(x)+bubblePad, float64(top)+bubblePad+lineH)
 	body.LineSpacing = lineH
 	body.ColorScale.ScaleWithColor(color.NRGBA{0x1A, 0x1A, 0x1A, 0xFF}) // palette e
 	text.Draw(screen, joinLines(lines), face, body)
+}
+
+// drawCloud paints a scalloped thought-cloud with a clean outline and no inner
+// seams (ADR-0026 Decision 5: 雲型で「考える」を形でも語る). It fills the whole
+// lumpy silhouette in the outline color, then the same silhouette inset by the
+// stroke width in the fill color — a border falls out for free, for any union
+// of lobes, without tracing the boundary by hand.
+func drawCloud(dst *ebiten.Image, x, y, w, h float32, fill, outline color.Color) {
+	const sw = 2
+	rl := h * 0.30
+	switch {
+	case rl > 15:
+		rl = 15
+	case rl < 6:
+		rl = 6
+	}
+	cx0, cx1 := x+rl, x+w-rl
+	cy0, cy1 := y+rl, y+h-rl
+	n := int((cx1 - cx0) / (rl * 1.1))
+	if n < 1 {
+		n = 1
+	}
+	var lobes [][2]float32
+	for i := 0; i <= n; i++ {
+		cx := cx0 + (cx1-cx0)*float32(i)/float32(n)
+		lobes = append(lobes, [2]float32{cx, cy0}, [2]float32{cx, cy1})
+	}
+	lobes = append(lobes, [2]float32{cx0, y + h/2}, [2]float32{cx1, y + h/2})
+
+	paint := func(r, inset float32, clr color.Color) {
+		for _, c := range lobes {
+			vector.DrawFilledCircle(dst, c[0], c[1], r, clr, true)
+		}
+		vector.DrawFilledRect(dst, x+inset, y+inset, w-2*inset, h-2*inset, clr, false)
+	}
+	paint(rl+sw, rl-sw, outline) // silhouette, slightly larger
+	paint(rl, rl, fill)          // inset fill leaves the outline as a rim
 }
 
 // thoughtFragment collapses a provider's latest text to a single short line —
