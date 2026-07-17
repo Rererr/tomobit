@@ -337,7 +337,7 @@ func cmdDo(args []string) error {
 			defer stop()
 			extractor := &perceive.Ollama{URL: *url, Model: *model}
 			return runDuel(ctx, s, gap, prompt, *capability, *size, *permMode, *timeout,
-				os.Stdout, extractor)
+				stdin, os.Stdout, extractor)
 		}
 	}
 
