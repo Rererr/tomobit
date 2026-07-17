@@ -34,7 +34,7 @@ import (
 	"golang.org/x/term"
 )
 
-const extractorVer = 3 // bump when the extraction prompt/schema changes
+const extractorVer = 4 // bump when the extraction prompt/schema changes
 
 // providers holds the registered adapters (SCHEMA.md R3 provider names).
 // `--provider <name>` is the human's explicit pick; `--provider auto` hands
@@ -178,17 +178,20 @@ usage:
                    [--permission-mode <mode>] [--timeout 0] [--size ...] ["<prompt>"]
                    対話セッション(ADR-0022)。1つの会話 = 1つのタスク = 1つの経験。
                    ターンは同じスレッドを継ぐ。/new か /exit で区切ると
-                   採用確認 → 知覚 → Tomoの質問 が走る。/help でコマンド一覧
+                   Feedback → 知覚 → Tomoの質問 が走る。/help でコマンド一覧
   tomobit do       [--cap implement] [--timeout 0] [--permission-mode <mode>]
                    [--provider claude-code|codex|human|auto]
                    [--plan auto|full|direct|quick|<steps>] [--size small|medium|large]
-                   [--model qwen3:8b] [--url http://localhost:11434] [--split] "<prompt>"
+                   [--model qwen3:8b] [--url http://localhost:11434] "<prompt>"
                    --provider auto: 決定エンジン(ADR-0012)が能力ゲート+TSで選ぶ
                    （humanも候補 — ADR-0018）。--provider human: 自分でやって
                    同じ台帳に乗せる。--plan auto: 手順も台帳が選ぶ(ADR-0014、
-                   例 analyze>implement>test)。--size は判断の温度 n(stakes)
-                   --split: providerが分割すべきと判断したら提案を受けて
-                   サブタスクを逐次実行する(ADR-0023、--plan・humanとは併用不可)
+                   例 analyze>implement>test)。--size は判断の温度 n(stakes)。
+                   providerが「大きすぎる/独立に分けられる」と判断すれば分割提案を
+                   受けてサブタスクを実行(ADR-0023/0028、常時ON。--plan・humanでは
+                   付けない。config split_protocol=false で止める)。独立群を宣言されたら
+                   実行直前に y/N で並走可否を聞く(既定N=全逐次。概算コストを実測
+                   中央値から提示。並走ストリームは[n:provider]表示。非TTYは常に逐次)
   tomobit record   --session <id> --type <event.type> [--json '{...}']
   tomobit perceive [--model qwen3:8b] [--url http://localhost:11434]
   tomobit rebuild
@@ -284,7 +287,6 @@ func cmdDo(args []string) error {
 	size := fs.String("size", "", "task size for decision stakes: small|medium|large (--provider auto)")
 	model := fs.String("model", ollamaModelDefault(), "ollama model for best-effort perception")
 	url := fs.String("url", cfg.OllamaURL, "ollama base url (default http://localhost:11434)")
-	split := fs.Bool("split", false, "let the provider propose subtasks instead of doing a too-large task (ADR-0023)")
 	fs.Parse(args)
 
 	// Whether --provider was set explicitly, so the duel offer can tell an
@@ -300,19 +302,14 @@ func cmdDo(args []string) error {
 	if prompt == "" {
 		return fmt.Errorf("do: a prompt is required")
 	}
-	// Checked before anything is recorded (ADR-0023 Decision 3): a rejected
-	// combination must leave no trace in the ledger.
-	if err := splitCombinationError(*split, *providerName, *planArg); err != nil {
-		return err
-	}
 	// A named provider fails fast, before the store is even opened.
 	if *providerName != "auto" && *providerName != "human" {
 		if _, err := resolveProvider(*providerName); err != nil {
 			return err
 		}
 	}
-	// After validation, like chat: a `do` that fails its args (bad provider,
-	// bad --split combo) must not leave a detached window behind.
+	// After validation, like chat: a `do` that fails its args (a bad provider)
+	// must not leave a detached window behind.
 	// Take presence before spawning the face (ADR-0027 Decision 2/3): the run is
 	// live from the moment the window opens until it finishes. split/duel run as
 	// children of this `do`, so the parent's single presence covers them all.
@@ -334,7 +331,7 @@ func cmdDo(args []string) error {
 	// (ADR-0026): if an open Preference Gap covers this capability, it asks to
 	// run both providers and settle the preference by real work. Y takes the
 	// duel path and returns; anything else falls through to the normal run.
-	if duelEligible(providerExplicit, *providerName, *split) {
+	if duelEligible(providerExplicit, *providerName) {
 		now := time.Now().UnixMilli()
 		if gap, accepted := duelOffer(s, *capability, stdin, os.Stdout,
 			isTTY(os.Stdin) && isTTY(os.Stdout), now); accepted {
@@ -360,6 +357,13 @@ func cmdDo(args []string) error {
 		}
 	}
 
+	// Whether the split protocol rides this do target run (ADR-0028 Decision
+	// 1). Always-on now — whether to split is the Provider's call on every
+	// task, not a flag the user must remember. A subtask's or duel's own run
+	// never gets it either, but those frame their prompts elsewhere (runSplit /
+	// runDuel), so depth stays 1 (ADR-0023 Decision 4).
+	splitProtocol := splitProtocolEligible(splitProtocolEnabled(), human, planName)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
@@ -372,8 +376,10 @@ func cmdDo(args []string) error {
 			return runErr
 		}
 	} else {
+		runPrompt := prompt
 		var collect *[]string
-		if *split {
+		if splitProtocol {
+			runPrompt = subtask.Instruction(prompt)
 			collect = &texts
 		}
 		sink := providerSink(s, sid, os.Stdout, collect)
@@ -383,15 +389,6 @@ func cmdDo(args []string) error {
 		ex := &executor.Executor{Adapter: adapter, Stderr: os.Stderr, Warn: os.Stderr}
 		if os.Getenv("TOMOBIT_DEBUG") != "" {
 			ex.Debug = os.Stderr
-		}
-
-		// The split protocol text only goes on the harness's own prompt, never
-		// a plan step's (mutually exclusive with --plan, checked above) and
-		// never a subtask's (runSplit frames those with subtask.Prompt instead
-		// — ADR-0023 Decision 4: depth stays 1).
-		runPrompt := prompt
-		if *split {
-			runPrompt = subtask.Instruction(prompt)
 		}
 
 		// One provider run per plan step (ADR-0014); no plan = one plain
@@ -415,7 +412,7 @@ func cmdDo(args []string) error {
 	}
 
 	// SIGINT: the child was already signalled; record the cancellation and
-	// stop, skipping the adoption prompt. The session stays pending, so
+	// stop, skipping the Feedback question. The session stays pending, so
 	// `tomobit perceive` can still learn from it later.
 	if ctx.Err() != nil {
 		return s.AppendEvent(sid, "task.cancelled", time.Now().UnixMilli(), nil)
@@ -435,41 +432,24 @@ func cmdDo(args []string) error {
 	// "\n" join assumes adapters emit message-level text (both current ones
 	// do): a token-delta adapter could split the marker key across events,
 	// and the joined text would no longer contain it.
-	if *split && runErr == nil && result.ExitCode == 0 {
-		subs, parseErr := subtask.Parse(strings.Join(texts, "\n"))
+	if splitProtocol && runErr == nil && result.ExitCode == 0 {
+		groups, parseErr := subtask.Parse(strings.Join(texts, "\n"))
 		if parseErr != nil {
 			fmt.Fprintln(os.Stderr, "split: proposal ignored —", parseErr)
-		} else if subs != nil {
-			return runSplit(ctx, s, sid, subs, prompt, *providerName, *capability, *size,
-				*permMode, *timeout, stdin, os.Stdout, extractor)
+		} else if groups != nil {
+			return runSplit(ctx, s, sid, groups, prompt, *providerName, *capability, *size,
+				*permMode, *timeout, stdin, os.Stdout, isTTY(os.Stdin) && isTTY(os.Stdout), extractor)
 		}
 	}
 
 	return finishTask(s, sid, stdin, os.Stdout, result.Started, extractor)
 }
 
-// splitCombinationError rejects the two --split combinations ADR-0023
-// Decision 3 calls ambiguous or pointless: a plan step's output is not
-// unambiguously "the proposal", and a human run has no provider stream to
-// read one from.
-func splitCombinationError(split bool, providerName, planArg string) error {
-	if !split {
-		return nil
-	}
-	if planArg != "" {
-		return fmt.Errorf("do: --split and --plan are mutually exclusive — which step's output would count as the proposal is ambiguous")
-	}
-	if providerName == "human" {
-		return fmt.Errorf("do: --split has no effect with --provider human — a human has no proposal stream to read")
-	}
-	return nil
-}
-
 // providerSink builds the Executor Sink shared by a plain `do` run and each
-// ADR-0023 subtask run: assistant text is echoed to out so the user (or, for
-// --split, subtask.Parse) can read it, and every event lands in sid in
+// ADR-0023 subtask run: assistant text is echoed to out so the user (or
+// subtask.Parse, ADR-0028) can read it, and every event lands in sid in
 // stream order. collect, when non-nil, also gathers the echoed text — the
-// concatenation a --split run hands to subtask.Parse.
+// concatenation a split-protocol run hands to subtask.Parse.
 func providerSink(s *store.Store, sid string, out io.Writer, collect *[]string) executor.Sink {
 	return func(ev executor.Event, ts int64) error {
 		if ev.Type == executor.EventProviderOutput {
@@ -523,99 +503,100 @@ func openSubtask(s *store.Store, providerName, capability, size, sub, parentSID 
 	return subSID, providers[dec.Provider], false, nil
 }
 
-// runSplit executes an accepted split proposal (ADR-0023): each subtask
-// becomes its own task session — same ledger, same gate, same rehabilitation
-// as any other task — run in the proposed order. A subtask's failure (runErr
-// or a non-zero exit) stops the loop before the next one opens: an
-// unopened session leaves no half-started task in the ledger, and the
-// proposal's full text already lives in task.split, so nothing is lost
-// (Decision 4).
+// runSplit executes an accepted split proposal (ADR-0023, groups and
+// parallelism since ADR-0028). The proposal arrives as groups a Provider
+// declared independent; a wide group (Decision 2) triggers the one permission
+// gate (Decision 3): a yes runs each wide group's members in parallel (groups
+// still sequential between themselves, fail-stopping the next group), a no — or
+// a non-interactive run — flattens the whole thing back to the ADR-0023
+// sequential order. Either way each subtask becomes its own task session — same
+// ledger, same rehabilitation as any other task.
 //
-// judged=false on the closing finishTask: the parent's own artifact was the
-// split proposal itself, not something to adopt — each subtask already got
-// its own adoption question.
-func runSplit(ctx context.Context, s *store.Store, parentSID string, subs []string,
+// Subtasks carry no subjective Feedback (ADR-0028 Decision 5): each child's
+// task.finished is empty, like a duel child — only objective signals
+// (provider.error / exit≠0) become its experience, so per-provider learning
+// stays unblurred without a question per subtask. judged=false on the closing
+// finishTask: the parent's own artifact was the split proposal itself, not
+// something to grade.
+func runSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]string,
 	parentIntent, providerName, capability, size, permMode string, timeout time.Duration,
-	in *bufio.Reader, out io.Writer, extractor perceive.Extractor) error {
-	if err := s.AppendEvent(parentSID, "task.split", time.Now().UnixMilli(),
-		map[string]any{"subtasks": subs}); err != nil {
+	in *bufio.Reader, out io.Writer, interactive bool, extractor perceive.Extractor) error {
+	_, cancelled, err := executeSplit(ctx, s, parentSID, groups, parentIntent,
+		providerName, capability, size, permMode, timeout, in, out, interactive)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "split: %d個のサブタスクとして実行\n", len(subs))
-
-	for i, sub := range subs {
-		fmt.Fprintf(out, "-- subtask %d/%d: %s --\n", i+1, len(subs), truncate(sub, 60))
-
-		subSID, adapter, human, err := openSubtask(s, providerName, capability, size, sub, parentSID)
-		if err != nil {
-			return err
-		}
-
-		subtaskPrompt := subtask.Prompt(parentIntent, sub, i, len(subs))
-		var result executor.Result
-		var runErr error
-		if human {
-			fmt.Fprintln(out, subtaskPrompt)
-			result, runErr = runHuman(s, subSID, in)
-			if runErr != nil {
-				return runErr
-			}
-		} else {
-			sink := providerSink(s, subSID, out, nil)
-			ex := &executor.Executor{Adapter: adapter, Stderr: os.Stderr, Warn: os.Stderr}
-			if os.Getenv("TOMOBIT_DEBUG") != "" {
-				ex.Debug = os.Stderr
-			}
-			result, runErr = ex.Run(ctx, executor.Request{
-				Prompt: subtaskPrompt, PermissionMode: permMode, Timeout: timeout,
-			}, sink)
-		}
-
-		if ctx.Err() != nil {
-			if err := s.AppendEvent(subSID, "task.cancelled", time.Now().UnixMilli(), nil); err != nil {
-				return err
-			}
-			return s.AppendEvent(parentSID, "task.cancelled", time.Now().UnixMilli(), nil)
-		}
-
-		if payload, need := providerErrorPayload(runErr, result); need {
-			if err := s.AppendEvent(subSID, "provider.error", time.Now().UnixMilli(), payload); err != nil {
-				return err
-			}
-		}
-
-		payload := map[string]any{}
-		if result.Started {
-			payload = adoptionPayload(in, out)
-		}
-		if err := s.AppendEvent(subSID, "task.finished", time.Now().UnixMilli(), payload); err != nil {
-			return err
-		}
-
-		if runErr != nil || result.ExitCode != 0 {
-			fmt.Fprintf(out, "split: subtask %d/%d failed — remaining subtasks not started\n", i+1, len(subs))
-			break
-		}
+	if cancelled {
+		return nil // children and parent already hold task.cancelled; skip finishTask
 	}
-
 	return finishTask(s, parentSID, in, out, false, extractor)
 }
 
+// flattenGroups turns the Provider's declared group structure into the flat
+// proposal-order execution list Phase 1 runs, plus the index groups recorded
+// in task.split's payload (groups [["a"],["b","c"]] → subs [a,b,c], idxGroups
+// [[0],[1,2]] — SCHEMA.md R4). The index form keeps the flat execution order
+// and the independence declaration both auditable from one event.
+func flattenGroups(groups [][]string) (subs []string, idxGroups [][]int) {
+	idxGroups = make([][]int, 0, len(groups))
+	for _, g := range groups {
+		idx := make([]int, 0, len(g))
+		for _, sub := range g {
+			idx = append(idx, len(subs))
+			subs = append(subs, sub)
+		}
+		idxGroups = append(idxGroups, idx)
+	}
+	return subs, idxGroups
+}
+
+// splitProtocolEligible reports whether the split protocol rides a do target
+// run (ADR-0028 Decision 1): the kill switch must be on, and the run must be
+// neither a plan step's output (not unambiguously "the proposal") nor a human
+// run (no provider stream to read one from). Pure — enabled is injected — so the
+// cases pin without a real run or a config file, symmetric with duelEligible.
+func splitProtocolEligible(enabled, human bool, planName string) bool {
+	return enabled && !human && planName == ""
+}
+
+// splitProtocolEnabled resolves the ADR-0028 kill switch (config split_protocol,
+// default true). The pointer distinguishes an absent key (nil = default on, so a
+// config predating the key is never silently downgraded) from an explicit false
+// (the opt-out that stops the always-on protocol — Decision 1).
+func splitProtocolEnabled() bool {
+	if cfg.SplitProtocol == nil {
+		return true
+	}
+	return *cfg.SplitProtocol
+}
+
+// declaresGroups reports whether the proposal declared any independent group —
+// a group wider than one subtask (ADR-0028 Decision 2). A flat proposal (every
+// element a lone subtask) declares none, and its task.split omits groups.
+func declaresGroups(groups [][]string) bool {
+	for _, g := range groups {
+		if len(g) > 1 {
+			return true
+		}
+	}
+	return false
+}
+
 // finishTask is the tail every task boundary shares (ADR-0022 Decision 1):
-// 採用確認 → best-effort知覚 → Tomoの質問 → 鏡. `do` reaches it when its one
+// Feedback → best-effort知覚 → Tomoの質問 → 鏡. `do` reaches it when its one
 // run ends; a chat session reaches it at /new, /exit or Ctrl-D. The boundary
 // moved, the organs did not.
 //
 // judged says the session produced something a human can judge — a run that
 // never started (e.g. the claude binary is missing) produced nothing, so the
-// adoption question is skipped and the outcome carries no signal.
+// Feedback question is skipped and the outcome carries no signal.
 func finishTask(s *store.Store, sid string, in *bufio.Reader, out io.Writer, judged bool, extractor perceive.Extractor) error {
-	// The adoption question runs at the end of every completed task (ADR-0006
-	// Decision 4): exit 0 is not adoption, and even a failed run may have
+	// The Feedback question runs at the end of every completed task (ADR-0006
+	// Decision 4): exit 0 is not a verdict, and even a failed run may have
 	// produced something the user keeps.
 	payload := map[string]any{}
 	if judged {
-		payload = adoptionPayload(in, out)
+		payload = feedbackPayload(in, out)
 	}
 	if err := s.AppendEvent(sid, "task.finished", time.Now().UnixMilli(), payload); err != nil {
 		return err
@@ -967,15 +948,17 @@ func providerErrorPayload(runErr error, result executor.Result) (payload map[str
 	return map[string]any{"message": msg}, true
 }
 
-// adoptionPayload asks the one closing question and maps the answer to a
-// task.finished payload (ADR-0006 Decision 4). The question is a verdict on the
-// session's quality, not a retention action: by the time a do finishes the user
-// has already iterated in-dialogue until satisfied, so "keep it?" is moot — what
-// the ledger still wants is how good the result was. 1/2/3 grade it; Enter and
-// any other input (including EOF on non-interactive stdin) carry no signal, so
-// the payload is empty. The no-signal default is deliberate — a mindless Enter
-// or a headless run must never inflate the ledger with praise.
-func adoptionPayload(in *bufio.Reader, out io.Writer) map[string]any {
+// feedbackPayload asks the one closing Feedback question and maps the answer
+// to a task.finished payload (ADR-0006 Decision 4; 呼称の統一 ADR-0028). The
+// question is a verdict on the session's quality, not a retention action: by
+// the time a do finishes the user has already iterated in-dialogue until
+// satisfied, so "keep it?" is moot — what the ledger still wants is how good
+// the result was. 1/2/3 grade it; Enter and any other input (including EOF on
+// non-interactive stdin) carry no signal, so the payload is empty. The
+// no-signal default is deliberate — a mindless Enter or a headless run must
+// never inflate the ledger with praise. The payload keys stay adopted/reverted
+// (SCHEMA + rebuild unchanged — ADR-0028): only the vocabulary moved.
+func feedbackPayload(in *bufio.Reader, out io.Writer) map[string]any {
 	fmt.Fprint(out, "今回、どうだった? [1=文句なし / 2=まあまあ（手を焼いた） / 3=だめだった / Enter=まだ言えない] ")
 	line, err := in.ReadString('\n')
 	if err != nil {

@@ -26,13 +26,15 @@ import (
 )
 
 // duelEligible reports whether a `do` may offer an A/B experiment (ADR-0026
-// Decision 2). The offer belongs to the unpinned/auto path: --split rebuilds
-// the run into subtasks, an explicit --provider (or human) means the user took
-// the wheel, and in both cases Tomo has no room to propose a pair. The default
-// provider counts as unpinned — a bare `tomobit do "…"` is the common path the
-// offer is meant to reach.
-func duelEligible(providerExplicit bool, providerName string, split bool) bool {
-	if split || providerName == "human" {
+// Decision 2). The offer belongs to the unpinned/auto path: an explicit
+// --provider (or human) means the user took the wheel, so Tomo has no room to
+// propose a pair. The default provider counts as unpinned — a bare
+// `tomobit do "…"` is the common path the offer is meant to reach. The split
+// protocol no longer gates this (ADR-0028 made it always-on and so unknowable
+// before the run): a declined duel just falls through to a normal run that
+// carries the protocol.
+func duelEligible(providerExplicit bool, providerName string) bool {
+	if providerName == "human" {
 		return false
 	}
 	return !providerExplicit || providerName == "auto"

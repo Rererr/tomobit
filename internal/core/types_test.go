@@ -23,6 +23,19 @@ func TestOutcomeWeight(t *testing.T) {
 		{"execution cancelled", KindExecution, Outcome{Cancelled: true, Adopted: "as-is"}, 0, false},
 		{"verdict up overrides objective signals", KindExecution, Outcome{Verdict: "up", Reverted: true, TestsPassed: boolp(false)}, 1, true},
 		{"verdict down overrides adoption", KindExecution, Outcome{Verdict: "down", Adopted: "as-is"}, 0, true},
+		// ADR-0028 Decision 5 (C2): the objective failure signal scores 0 only
+		// when no subjective Feedback was given — a subtask/duel child (Adopted
+		// "") scores 0 off its error alone. But a human's Feedback outranks a
+		// transient provider.error (ADR-0018 experience sovereignty): a graded
+		// session keeps its grade rather than being crushed to 0 by an early
+		// error it recovered from. Failure stays under an explicit verdict and
+		// under Cancelled (a cancel is no signal at all).
+		{"failed alone (subtask/duel child) scores zero", KindExecution, Outcome{Failed: true}, 0, true},
+		{"failed but adopted as-is: the human's Feedback wins", KindExecution, Outcome{Failed: true, Adopted: "as-is"}, 1.0, true},
+		{"failed but adopted with-edits: the human's Feedback wins", KindExecution, Outcome{Failed: true, Adopted: "with-edits"}, 0.7, true},
+		{"failed and reverted scores zero", KindExecution, Outcome{Failed: true, Reverted: true}, 0, true},
+		{"verdict up overrides failure", KindExecution, Outcome{Verdict: "up", Failed: true}, 1, true},
+		{"cancelled precedes failure", KindExecution, Outcome{Cancelled: true, Failed: true}, 0, false},
 		{"reverted", KindExecution, Outcome{Reverted: true, Adopted: "as-is"}, 0, true},
 		{"tests failed", KindExecution, Outcome{TestsPassed: boolp(false), Adopted: "as-is"}, 0, true},
 		{"adopted as-is", KindExecution, Outcome{Adopted: "as-is"}, 1.0, true},

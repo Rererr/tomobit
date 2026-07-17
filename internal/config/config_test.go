@@ -95,6 +95,36 @@ func TestFaceAutoLaunchAbsentVsExplicit(t *testing.T) {
 	}
 }
 
+// TestSplitProtocolAbsentVsExplicit mirrors the face fields' absent-vs-set
+// contract for the ADR-0028 kill switch: an absent key loads as nil so the
+// default (on) can hold, and an explicit false survives the round trip so a
+// config predating the key is never confused with a deliberate opt-out.
+func TestSplitProtocolAbsentVsExplicit(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+
+	if err := SaveFile(p, Config{DB: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SplitProtocol != nil {
+		t.Errorf("absent split_protocol must load as nil (default on): %v", *c.SplitProtocol)
+	}
+
+	no := false
+	if err := SaveFile(p, Config{SplitProtocol: &no}); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = LoadFile(p); err != nil {
+		t.Fatal(err)
+	}
+	if c.SplitProtocol == nil || *c.SplitProtocol {
+		t.Errorf("explicit false must survive the round trip (the kill switch): %v", c.SplitProtocol)
+	}
+}
+
 func TestSaveFileCreatesParentDir(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "nested", "config.json")
 	if err := SaveFile(p, Config{DB: "x"}); err != nil {
