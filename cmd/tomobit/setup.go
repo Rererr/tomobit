@@ -55,6 +55,9 @@ func cmdSetup(args []string) error {
 	if err := askFaceAutoLaunch(in, out, &c); err != nil {
 		return err
 	}
+	if err := askFaceResident(in, out, &c); err != nil {
+		return err
+	}
 
 	if err := config.Save(c); err != nil {
 		return fmt.Errorf("setup: %w", err)
@@ -235,6 +238,39 @@ func askFaceAutoLaunch(in *bufio.Reader, out io.Writer, c *config.Config) error 
 	case "off", "n", "no":
 		no := false
 		c.FaceAutoLaunch = &no
+	default:
+		fmt.Fprintf(out, "  on か off で — 現状(%s)を維持\n", cur)
+	}
+	return nil
+}
+
+// askFaceResident asks whether the face window stays after the conversation
+// ends (ADR-0027 Decision 4). "off" stores nil, not &false: absent already
+// means ephemeral (the new default), so keeping it nil avoids pinning a value
+// that only restates the default — the mirror of askFaceAutoLaunch's "on ⇒ nil".
+// An unrecognized answer keeps the current value rather than aborting a setup
+// whose earlier answers are not saved yet.
+func askFaceResident(in *bufio.Reader, out io.Writer, c *config.Config) error {
+	cur := "off(既定・対話終了で自閉)"
+	if c.FaceResident != nil {
+		if *c.FaceResident {
+			cur = "on"
+		} else {
+			cur = "off"
+		}
+	}
+	fmt.Fprintf(out, "\n顔窓を対話終了後も常駐させる? [on/off, 現在: %s / Enterで維持] > ", cur)
+	line, err := readLine(in)
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(line) {
+	case "":
+	case "on", "y", "yes":
+		yes := true
+		c.FaceResident = &yes
+	case "off", "n", "no":
+		c.FaceResident = nil
 	default:
 		fmt.Fprintf(out, "  on か off で — 現状(%s)を維持\n", cur)
 	}

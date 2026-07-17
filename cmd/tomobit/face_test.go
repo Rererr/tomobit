@@ -36,6 +36,33 @@ func TestResolveFaceAutoLaunchEnvOverConfig(t *testing.T) {
 	}
 }
 
+func TestResolveFaceResidentEnvOverConfig(t *testing.T) {
+	yes, no := true, false
+	cases := []struct {
+		name   string
+		envVal string
+		envSet bool
+		config *bool
+		want   bool
+	}{
+		{"unset+nil config is the default off (ephemeral)", "", false, nil, false},
+		{"unset honors config true", "", false, &yes, true},
+		{"unset honors config false", "", false, &no, false},
+		{"env 1 overrides config false", "1", true, &no, true},
+		{"env 0 overrides config true", "0", true, &yes, false},
+		{"bogus env falls through to config true", "resident", true, &yes, true},
+		{"bogus env falls through to default off", "resident", true, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveFaceResident(tc.envVal, tc.envSet, tc.config, io.Discard)
+			if got != tc.want {
+				t.Errorf("resolveFaceResident = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFindFaceBinaryPrefersSiblingThenPath(t *testing.T) {
 	dir := t.TempDir()
 	fromPath := func(string) (string, error) { return "/usr/bin/tomobit-face", nil }

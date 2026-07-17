@@ -313,6 +313,11 @@ func cmdDo(args []string) error {
 	}
 	// After validation, like chat: a `do` that fails its args (bad provider,
 	// bad --split combo) must not leave a detached window behind.
+	// Take presence before spawning the face (ADR-0027 Decision 2/3): the run is
+	// live from the moment the window opens until it finishes. split/duel run as
+	// children of this `do`, so the parent's single presence covers them all.
+	releasePresence := registerPresence(os.Stderr)
+	defer releasePresence()
 	maybeLaunchFace(*db)
 	stdin := bufio.NewReader(os.Stdin)
 	if err := ensureClaudeProfile(stdin, *providerName); err != nil {

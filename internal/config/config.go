@@ -34,6 +34,12 @@ type Config struct {
 	// an explicit false is the user turning the face window off. A plain bool
 	// could not tell "left at the default" from "deliberately disabled".
 	FaceAutoLaunch *bool `json:"face_auto_launch,omitempty"`
+	// FaceResident is the same absent-vs-set pointer, orthogonal to
+	// FaceAutoLaunch (ADR-0027): the latter is "open the window", this is "keep
+	// the window after the conversation ends". nil = the default, which is
+	// false = ephemeral (the window self-closes once no chat/do is alive); an
+	// explicit true keeps the old ADR-0025 behavior (stays until Esc/Q).
+	FaceResident *bool `json:"face_resident,omitempty"`
 }
 
 // Path is ~/.tomobit/config.json — beside the default DB, never inside it.
