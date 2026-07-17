@@ -154,7 +154,7 @@ func recordDuelOffer(s *store.Store, gap curiosity.Gap, accepted bool, now int64
 // Phase 2 (ADR-0026 Decision 3) will present both results here and record the
 // user's preference; for now each sibling becomes an ordinary execution
 // experience and the parent closes quietly.
-func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, capability, size, permMode string, timeout time.Duration, out io.Writer, extractor perceive.Extractor) error {
+func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, capability, size, permMode string, timeout time.Duration, in *bufio.Reader, out io.Writer, extractor perceive.Extractor) error {
 	now := time.Now().UnixMilli()
 	parentSID := store.NewID(now)
 	if err := s.AppendEvent(parentSID, "task.started", now,
@@ -212,13 +212,15 @@ func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, cap
 		return s.AppendEvent(parentSID, "task.cancelled", time.Now().UnixMilli(), nil)
 	}
 
+	bothProduced := true
 	for i, sid := range childSID {
 		if payload, need := providerErrorPayload(runErr[i], result[i]); need {
+			bothProduced = false
 			if err := s.AppendEvent(sid, "provider.error", time.Now().UnixMilli(), payload); err != nil {
 				return err
 			}
 		}
-		// No per-child adoption question: the pairwise judgment (Phase 2) is the
+		// No per-child adoption question: the pairwise judgment below is the
 		// duel's one adoption. An empty task.finished still makes the session
 		// perceivable (store.PendingSessions).
 		if err := s.AppendEvent(sid, "task.finished", time.Now().UnixMilli(), map[string]any{}); err != nil {
@@ -226,13 +228,86 @@ func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, cap
 		}
 	}
 
-	// Phase 2 (ADR-0026 Decision 3) inserts the pairwise judgment here.
+	// Judgment (ADR-0026 Decision 3): the user compares the two real outputs and
+	// their verdict becomes a preference experience at the gap scope — the duel
+	// pays off by grounding a preference in work, not a hypothetical. It runs
+	// only when both sides produced something to compare: a failed side is
+	// judged by its own execution experience (its capability drops), never by
+	// forfeit. A draw (Enter) records nothing.
+	if !bothProduced {
+		fmt.Fprintln(out, "duel: 片方が完走しなかったので好みは記録しない（両者は経験に残る）")
+	} else if in != nil {
+		if preferred, over, judged := duelVerdict(in, out, gap); judged {
+			en := &core.Engine{Repo: s}
+			if err := recordDuelVerdict(s, en, gap, preferred, over, time.Now().UnixMilli()); err != nil {
+				return err
+			}
+		}
+	}
 
 	if err := s.AppendEvent(parentSID, "task.finished", time.Now().UnixMilli(), map[string]any{}); err != nil {
 		return err
 	}
 	perceiveBestEffort(s, extractor)
 	return nil
+}
+
+// duelVerdict asks which of the two real outputs the user preferred (ADR-0026
+// Decision 3). 1/2 name the winner; Enter (or anything else) is a draw that
+// records nothing — the same skip-is-cheap shape as the curiosity question.
+func duelVerdict(in *bufio.Reader, out io.Writer, gap curiosity.Gap) (preferred, over string, judged bool) {
+	fmt.Fprintf(out, "\nどっちが good だった? [1=%s / 2=%s / Enter=引き分け] ", gap.A, gap.B)
+	line, _ := in.ReadString('\n')
+	switch strings.TrimSpace(line) {
+	case "1":
+		return gap.A, gap.B, true
+	case "2":
+		return gap.B, gap.A, true
+	default:
+		return "", "", false
+	}
+}
+
+// recordDuelVerdict turns the verdict into a preference experience the same way
+// the curiosity question does (ADR-0007 Decision 4), but grounded in real work
+// rather than a hypothetical: its own session (no task.finished, so deferred
+// perception skips it), context fixed to the gap scope, applied straight into
+// the preference ledger the next decide.Choose will read.
+func recordDuelVerdict(s *store.Store, en *core.Engine, gap curiosity.Gap, preferred, over string, now int64) error {
+	verdictSID := store.NewID(now)
+	if err := s.AppendEvent(verdictSID, "user.preference", now, map[string]any{
+		"preferred": preferred, "over": over, "source": "duel",
+	}); err != nil {
+		return fmt.Errorf("record duel preference: %w", err)
+	}
+	exp := &core.Experience{
+		ID: store.NewID(now), SessionID: verdictSID, TS: now,
+		Kind: core.KindPreference, ExtractorVer: extractorVer,
+		ExtractorModel: "deterministic",
+		Context:        scopeToContext(gap.Scope),
+		Outcome:        core.Outcome{Preferred: preferred, Over: over},
+		Source:         "learning",
+	}
+	if err := s.InsertExperiences([]*core.Experience{exp}); err != nil {
+		return fmt.Errorf("insert duel preference: %w", err)
+	}
+	if err := en.Apply(exp); err != nil {
+		return fmt.Errorf("apply duel preference: %w (experience saved; `tomobit rebuild` repairs the projection)", err)
+	}
+	return nil
+}
+
+// scopeToContext parses a gap scope's "k=v" tokens back into a context map, so
+// the preference experience inherits exactly the gap's scope (mirrors
+// curiosity's own scopeContext).
+func scopeToContext(scope core.Scope) map[string]string {
+	ctx := map[string]string{}
+	for _, tok := range scope {
+		if k, v, ok := strings.Cut(tok, "="); ok && k != "" && v != "" {
+			ctx[k] = v
+		}
+	}
+	return ctx
 }
 
 // duelSink records one child's stream to its own session and echoes its text to

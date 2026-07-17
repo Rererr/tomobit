@@ -129,7 +129,8 @@ func TestRunDuelRunsBothProvidersToCompletion(t *testing.T) {
 	s := openTestStore(t)
 
 	gap := curiosity.Gap{A: "prov-a", B: "prov-z", Scope: core.NewScope("cap=implement")}
-	if err := runDuel(context.Background(), s, gap, "do the thing", "implement", "", "", 0, io.Discard, nil); err != nil {
+	noInput := bufio.NewReader(strings.NewReader(""))
+	if err := runDuel(context.Background(), s, gap, "do the thing", "implement", "", "", 0, noInput, io.Discard, nil); err != nil {
 		t.Fatalf("runDuel: %v", err)
 	}
 
@@ -195,6 +196,60 @@ func TestDuelOfferFiresOnRealOpenGap(t *testing.T) {
 	// Second offer in the same window is now budget-blocked.
 	if ok, _ := duelBudgetOK(s, now+1); ok {
 		t.Error("the recorded offer should block a second offer in-window")
+	}
+}
+
+// TestRunDuelRecordsPreferenceFromVerdict: when both sides complete and the
+// user picks one, the verdict becomes a preference experience at the gap scope
+// and is applied into the preference ledger (ADR-0026 Decision 3) — this is
+// where the duel pays off and decide.Choose can start reading it.
+func TestRunDuelRecordsPreferenceFromVerdict(t *testing.T) {
+	registerFakeProvider(t, "prov-a", &fakeSplitAdapter{name: "prov-a", line: "A thinking", exitCode: 0})
+	registerFakeProvider(t, "prov-b", &fakeSplitAdapter{name: "prov-b", line: "B thinking", exitCode: 0})
+	s := openTestStore(t)
+
+	gap := curiosity.Gap{A: "prov-a", B: "prov-b", Scope: core.NewScope("cap=implement")}
+	verdict := bufio.NewReader(strings.NewReader("1\n")) // prefer A
+	if err := runDuel(context.Background(), s, gap, "do the thing", "implement", "", "", 0, verdict, io.Discard, nil); err != nil {
+		t.Fatalf("runDuel: %v", err)
+	}
+
+	if n := countEventsOfType(t, s, "user.preference"); n != 1 {
+		t.Fatalf("a verdict should record exactly one user.preference, got %d", n)
+	}
+	var preferred, over string
+	if err := s.DB.QueryRow(`SELECT json_extract(outcome,'$.preferred'), json_extract(outcome,'$.over')
+		FROM experiences WHERE kind = 'preference'`).Scan(&preferred, &over); err != nil {
+		t.Fatalf("a preference experience should exist: %v", err)
+	}
+	if preferred != "prov-a" || over != "prov-b" {
+		t.Errorf("preference = %s over %s, want prov-a over prov-b", preferred, over)
+	}
+	var conns int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM connections WHERE kind = 'preference'`).Scan(&conns); err != nil {
+		t.Fatal(err)
+	}
+	if conns < 1 {
+		t.Error("the verdict must grow a preference connection the next decision reads")
+	}
+}
+
+// TestRunDuelSkipsPreferenceWhenOneSideFails: a failed side is judged by its
+// own execution experience, not by forfeit — no preference is recorded and no
+// verdict is asked (ADR-0026 Decision 3).
+func TestRunDuelSkipsPreferenceWhenOneSideFails(t *testing.T) {
+	registerFakeProvider(t, "prov-a", &fakeSplitAdapter{name: "prov-a", line: "A", exitCode: 0})
+	registerFakeProvider(t, "prov-z", &fakeSplitAdapter{name: "prov-z", line: "Z", exitCode: 1})
+	s := openTestStore(t)
+
+	gap := curiosity.Gap{A: "prov-a", B: "prov-z", Scope: core.NewScope("cap=implement")}
+	// A "1" here must be ignored: the failure short-circuits before any verdict.
+	verdict := bufio.NewReader(strings.NewReader("1\n"))
+	if err := runDuel(context.Background(), s, gap, "do the thing", "implement", "", "", 0, verdict, io.Discard, nil); err != nil {
+		t.Fatalf("runDuel: %v", err)
+	}
+	if n := countEventsOfType(t, s, "user.preference"); n != 0 {
+		t.Errorf("a duel with a failed side must record no preference, got %d", n)
 	}
 }
 
