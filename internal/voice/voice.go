@@ -42,3 +42,16 @@ func Asked(scope core.Scope, a, b string) string {
 	return fmt.Sprintf("最近 %s で %s と %s 両方使ってるけど、どっちが好みだった?",
 		ScopeDisplay(scope), a, b)
 }
+
+// DuelOffer is Tomo proposing an A/B experiment (ADR-0026 Decision 2): not
+// "which did you prefer?" (Asked — a hypothetical), but "may I try both and
+// find out?". The terminal wraps it with a [y/N] gate; a declined offer still
+// spends the curiosity budget. A blank scope drops the "で" clause rather than
+// speaking a dangling particle.
+func DuelOffer(scope core.Scope, a, b string) string {
+	if where := ScopeDisplay(scope); where != "" {
+		return fmt.Sprintf("最近 %s で %s と %s、どっちが good か確かめたい。両方に同じことをやらせてみていい?",
+			where, a, b)
+	}
+	return fmt.Sprintf("%s と %s、どっちが good か確かめたい。両方に同じことをやらせてみていい?", a, b)
+}

@@ -287,6 +287,15 @@ func cmdDo(args []string) error {
 	split := fs.Bool("split", false, "let the provider propose subtasks instead of doing a too-large task (ADR-0023)")
 	fs.Parse(args)
 
+	// Whether --provider was set explicitly, so the duel offer can tell an
+	// intentional pin from the default (ADR-0026 Decision 2).
+	providerExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "provider" {
+			providerExplicit = true
+		}
+	})
+
 	prompt := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if prompt == "" {
 		return fmt.Errorf("do: a prompt is required")
@@ -315,6 +324,22 @@ func cmdDo(args []string) error {
 		return err
 	}
 	defer s.Close()
+
+	// Before committing to one provider, Tomo may offer an A/B experiment
+	// (ADR-0026): if an open Preference Gap covers this capability, it asks to
+	// run both providers and settle the preference by real work. Y takes the
+	// duel path and returns; anything else falls through to the normal run.
+	if duelEligible(providerExplicit, *providerName, *split) {
+		now := time.Now().UnixMilli()
+		if gap, accepted := duelOffer(s, *capability, stdin, os.Stdout,
+			isTTY(os.Stdin) && isTTY(os.Stdout), now); accepted {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+			defer stop()
+			extractor := &perceive.Ollama{URL: *url, Model: *model}
+			return runDuel(ctx, s, gap, prompt, *capability, *size, *permMode, *timeout,
+				os.Stdout, extractor)
+		}
+	}
 
 	sid, adapter, human, err := openTask(s, *providerName, *capability, *size, prompt)
 	if err != nil {
