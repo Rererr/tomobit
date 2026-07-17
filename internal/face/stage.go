@@ -2,8 +2,9 @@
 // Knowledge Network (ADR-0008). Nothing here is stored: the same connections
 // always reduce to the same stage and mood, and a changed world can walk a
 // stage back down — that is honesty, not a bug. The stage/mood these produce
-// feed both the terminal's `Tomo · <stage>` line and the desktop window's
-// sprite (ADR-0025); the terminal sprite that used to live here is gone.
+// drive the desktop window's sprite (its shape and face, ADR-0025); the
+// terminal shows the stage only when it changes (voice.Growth), no longer as a
+// standing `Tomo · <stage>` line.
 package face
 
 import (

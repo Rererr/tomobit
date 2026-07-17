@@ -1187,10 +1187,11 @@ func cmdRebuild(args []string) error {
 	return nil
 }
 
-// cmdStatus is the companion view (ADR-0008 Consequences): the `Tomo · <stage>`
-// line with its mood marker, one spoken line, then the connections table — the
-// avatar itself now lives in the desktop window (ADR-0025). It backs both
-// `tomobit status` and bare `tomobit`, and spawns the face window on a TTY.
+// cmdStatus is the companion view (ADR-0008 Consequences): one `Tomo 「…」`
+// spoken line, then the connections table. Growth and mood now read off the
+// desktop sprite alone (ADR-0025) — its shape is the stage, its face the mood —
+// so the terminal no longer spells either in text. It backs both `tomobit
+// status` and bare `tomobit`, and spawns the face window on a TTY.
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	db := dbFlag(fs)
@@ -1212,23 +1213,18 @@ func showStatus(s *store.Store) error {
 		return err
 	}
 	now := time.Now().UnixMilli()
-	stage, err := face.StageFrom(s, now)
-	if err != nil {
-		return err
-	}
 
 	// A pipe or redirect wants the machine-readable table only — no speech
 	// (ADR-0008 Decision 4). The avatar is gone (ADR-0025): the desktop window
-	// draws the face now, and the `Tomo · <stage>` text line below carries
-	// growth in the terminal.
+	// draws the face now, and it alone carries growth and mood — the terminal
+	// keeps only Tomo's one spoken line.
 	tty := isTTY(os.Stdout)
 	if tty {
 		greetIfReturned(os.Stdout, s, conns, now)
 	}
 	if len(conns) == 0 {
 		if tty {
-			fmt.Printf("Tomo · %s\n\n", face.StageName(stage))
-			fmt.Printf("%s\n\n", voice.FirstMeeting())
+			fmt.Printf("Tomo %s\n\n", voice.FirstMeeting())
 		}
 		fmt.Println("no connections yet — record a session and run `tomobit perceive`")
 		return nil
@@ -1245,14 +1241,14 @@ func showStatus(s *store.Store) error {
 	}
 
 	if tty {
-		states := make([]string, len(cands))
-		for i, c := range cands {
-			states[i] = c.State
-		}
-		_, marker := face.Mood(states)
-		fmt.Printf("Tomo · %s %s\n\n", face.StageName(stage), marker)
+		// Stage and mood used to print here; the desktop sprite now carries both
+		// (ADR-0025), so the terminal keeps only the one spoken line. With no
+		// remark to make (a preference-only network), Tomo still names itself —
+		// the companion's presence is the view, even in silence (ADR-0008).
 		if text, ok := voice.Suggest(cands, now); ok {
-			fmt.Printf("「%s」\n\n", text)
+			fmt.Printf("Tomo 「%s」\n\n", text)
+		} else {
+			fmt.Printf("Tomo\n\n")
 		}
 	}
 	return printConnections(os.Stdout, cands, now, tty)
