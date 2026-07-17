@@ -963,22 +963,25 @@ func providerErrorPayload(runErr error, result executor.Result) (payload map[str
 }
 
 // adoptionPayload asks the one closing question and maps the answer to a
-// task.finished payload (ADR-0006 Decision 4). "s" and unreadable input
-// (including EOF on non-interactive stdin) carry no learning signal, so the
-// payload is empty — EOF must never be read as "Enter" (both trim to ""),
-// or a headless run with no terminal would be silently recorded as adopted.
+// task.finished payload (ADR-0006 Decision 4). The question is a verdict on the
+// session's quality, not a retention action: by the time a do finishes the user
+// has already iterated in-dialogue until satisfied, so "keep it?" is moot — what
+// the ledger still wants is how good the result was. 1/2/3 grade it; Enter and
+// any other input (including EOF on non-interactive stdin) carry no signal, so
+// the payload is empty. The no-signal default is deliberate — a mindless Enter
+// or a headless run must never inflate the ledger with praise.
 func adoptionPayload(in *bufio.Reader, out io.Writer) map[string]any {
-	fmt.Fprint(out, "採用? [Enter=そのまま / e=手直しあり / r=破棄 / s=わからない] ")
+	fmt.Fprint(out, "今回、どうだった? [1=文句なし / 2=まあまあ（手を焼いた） / 3=だめだった / Enter=まだ言えない] ")
 	line, err := in.ReadString('\n')
 	if err != nil {
 		return map[string]any{}
 	}
-	switch strings.TrimSpace(strings.ToLower(line)) {
-	case "":
+	switch strings.TrimSpace(line) {
+	case "1":
 		return map[string]any{"adopted": "as-is", "reverted": false}
-	case "e":
+	case "2":
 		return map[string]any{"adopted": "with-edits", "reverted": false}
-	case "r":
+	case "3":
 		return map[string]any{"adopted": "", "reverted": true}
 	default:
 		return map[string]any{}

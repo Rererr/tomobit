@@ -19,42 +19,51 @@ import (
 	"github.com/Rererr/tomobit/internal/subtask"
 )
 
-func TestAdoptionPayloadEnterMeansAsIs(t *testing.T) {
-	got := adoptionPayload(bufio.NewReader(strings.NewReader("\n")), io.Discard)
+func TestAdoptionPayloadOneMeansAsIs(t *testing.T) {
+	got := adoptionPayload(bufio.NewReader(strings.NewReader("1\n")), io.Discard)
 	if got["adopted"] != "as-is" || got["reverted"] != false {
-		t.Errorf("Enter: got %v", got)
+		t.Errorf("1: got %v", got)
 	}
 }
 
-func TestAdoptionPayloadEMeansWithEdits(t *testing.T) {
-	got := adoptionPayload(bufio.NewReader(strings.NewReader("e\n")), io.Discard)
+func TestAdoptionPayloadTwoMeansWithEdits(t *testing.T) {
+	got := adoptionPayload(bufio.NewReader(strings.NewReader("2\n")), io.Discard)
 	if got["adopted"] != "with-edits" || got["reverted"] != false {
-		t.Errorf("e: got %v", got)
+		t.Errorf("2: got %v", got)
 	}
 }
 
-func TestAdoptionPayloadRMeansReverted(t *testing.T) {
-	got := adoptionPayload(bufio.NewReader(strings.NewReader("r\n")), io.Discard)
+func TestAdoptionPayloadThreeMeansReverted(t *testing.T) {
+	got := adoptionPayload(bufio.NewReader(strings.NewReader("3\n")), io.Discard)
 	if got["adopted"] != "" || got["reverted"] != true {
-		t.Errorf("r: got %v", got)
+		t.Errorf("3: got %v", got)
 	}
 }
 
-func TestAdoptionPayloadSCarriesNoSignal(t *testing.T) {
-	got := adoptionPayload(bufio.NewReader(strings.NewReader("s\n")), io.Discard)
+// TestAdoptionPayloadEnterCarriesNoSignal pins the deliberate default (案A):
+// a bare Enter is "まだ言えない", not top-grade praise — the ledger learns
+// nothing rather than being inflated by a mindless keypress.
+func TestAdoptionPayloadEnterCarriesNoSignal(t *testing.T) {
+	got := adoptionPayload(bufio.NewReader(strings.NewReader("\n")), io.Discard)
 	if len(got) != 0 {
-		t.Errorf("s: got %v, want empty payload", got)
+		t.Errorf("Enter: got %v, want empty payload", got)
+	}
+}
+
+func TestAdoptionPayloadUnknownCarriesNoSignal(t *testing.T) {
+	got := adoptionPayload(bufio.NewReader(strings.NewReader("x\n")), io.Discard)
+	if len(got) != 0 {
+		t.Errorf("unknown: got %v, want empty payload", got)
 	}
 }
 
 // TestAdoptionPayloadEOFCarriesNoSignal guards against EOF (non-interactive
-// stdin, e.g. a headless invocation with no terminal attached) being read as
-// an empty line and mistaken for Enter — which would fabricate "as-is"
-// adoption nobody actually confirmed.
+// stdin, e.g. a headless invocation with no terminal attached) fabricating a
+// verdict nobody confirmed — it must stay an empty payload, never a grade.
 func TestAdoptionPayloadEOFCarriesNoSignal(t *testing.T) {
 	got := adoptionPayload(bufio.NewReader(strings.NewReader("")), io.Discard)
 	if len(got) != 0 {
-		t.Errorf("EOF: got %v, want empty payload (not as-is)", got)
+		t.Errorf("EOF: got %v, want empty payload", got)
 	}
 }
 
@@ -754,7 +763,7 @@ func TestRunSplitNormalFlowRecordsParentAndPerSubtaskLedger(t *testing.T) {
 	}
 
 	subs := []string{"subtask A", "subtask B"}
-	in := bufio.NewReader(strings.NewReader("\n\n")) // adoption Enter, twice
+	in := bufio.NewReader(strings.NewReader("1\n1\n")) // adoption "1"=文句なし, once per subtask
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
