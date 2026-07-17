@@ -192,14 +192,14 @@ func TestChatNewTaskStartsAFreshThreadAndSession(t *testing.T) {
 func TestChatCloseAsksAdoptionAndRecordsIt(t *testing.T) {
 	s := openTestStore(t)
 	a := &threadAdapter{}
-	c, out := newTestChat(t, s, a, "e\n")
+	c, out := newTestChat(t, s, a, "2\n")
 
 	c.turn("implement it")
 	if err := c.closeTask(); err != nil {
 		t.Fatal(err)
 	}
 
-	if !strings.Contains(out.String(), "採用?") {
+	if !strings.Contains(out.String(), "今回、どうだった?") {
 		t.Errorf("the adoption question must be asked at the boundary: %q", out.String())
 	}
 	p := payloadOf(t, s, "task.finished")
@@ -211,7 +211,7 @@ func TestChatCloseAsksAdoptionAndRecordsIt(t *testing.T) {
 	}
 }
 
-// Nothing ran to completion, so there is nothing to judge: asking "採用?"
+// Nothing ran to completion, so there is nothing to judge: asking "今回、どうだった?"
 // about work that never happened would fabricate a signal (ADR-0003).
 func TestChatCloseWithNoCompletedTurnRecordsCancelled(t *testing.T) {
 	s := openTestStore(t)
@@ -236,7 +236,7 @@ func TestChatCloseWithNoCompletedTurnRecordsCancelled(t *testing.T) {
 	if n := countEventsOfType(t, s, "task.finished"); n != 0 {
 		t.Errorf("no task.finished expected, got %d", n)
 	}
-	if strings.Contains(out.String(), "採用?") {
+	if strings.Contains(out.String(), "今回、どうだった?") {
 		t.Errorf("nothing ran, so nothing may be asked: %q", out.String())
 	}
 }
@@ -321,7 +321,7 @@ func TestChatHumanProviderRecordsRoutingAndRunsNothing(t *testing.T) {
 	if err := c.closeTask(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "採用?") {
+	if !strings.Contains(out.String(), "今回、どうだった?") {
 		t.Errorf("the human's own work is judged like any provider's: %q", out.String())
 	}
 }
@@ -331,7 +331,7 @@ func TestChatHumanProviderRecordsRoutingAndRunsNothing(t *testing.T) {
 func TestChatFailedTurnStillReachesTheAdoptionQuestion(t *testing.T) {
 	s := openTestStore(t)
 	a := &threadAdapter{fail: true}
-	c, out := newTestChat(t, s, a, "r\n")
+	c, out := newTestChat(t, s, a, "3\n")
 
 	if err := c.turn("break it"); err != nil {
 		t.Fatal(err)
@@ -342,7 +342,7 @@ func TestChatFailedTurnStillReachesTheAdoptionQuestion(t *testing.T) {
 	if n := countEventsOfType(t, s, "provider.error"); n != 1 {
 		t.Errorf("provider.error: got %d, want 1", n)
 	}
-	if !strings.Contains(out.String(), "採用?") {
+	if !strings.Contains(out.String(), "今回、どうだった?") {
 		t.Errorf("a failed run is still judged: %q", out.String())
 	}
 	if p := payloadOf(t, s, "task.finished"); p["reverted"] != true {
