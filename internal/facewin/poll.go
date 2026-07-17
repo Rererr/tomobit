@@ -192,15 +192,21 @@ func (p *Poller) snapshot(nowMs int64) (Snapshot, error) {
 	}, nil
 }
 
-// activeThoughts derives the providers running right now (ADR-0026 Decision 5):
-// task sessions that started but have not finished or cancelled, each folded to
-// its latest provider name and assistant text. A session with no assistant text
-// yet contributes nothing (there is no thought to show). Ordered by session id
-// so two duel siblings keep a stable left/right; the caller caps how many draw.
+// activeThoughts derives the providers thinking right now (ADR-0026 Decision 5):
+// a task session with a turn in flight, folded to its provider name and the text
+// it is streaming. "In flight" means the session's last turn-lifecycle event is a
+// provider.output; a later provider.finished/error clears the thought, because
+// the turn is over even if the session is not.
 //
-// A duel's parent session is task.started-but-unfinished too, but it carries no
-// provider.output of its own (its children do), so it folds to no thought — the
-// bubbles are the children's, never the parent's.
+// The gate is the turn, not the task: a chat task session (ADR-0022) stays
+// task.started across idle gaps between turns and after a terminal closed
+// without /exit, so keying on "unfinished session" would pin the last answer as
+// a phantom thought forever (a stale chat kept "thinking" its final line hours
+// later). task.finished/cancelled already exclude closed sessions; this narrows
+// the rest to the ones actually streaming. A duel's parent carries no
+// provider.output of its own, so it still folds to no thought. Ordered by
+// session id so two duel siblings keep a stable left/right; the caller caps how
+// many draw.
 func (p *Poller) activeThoughts() ([]Thought, error) {
 	rows, err := p.s.DB.Query(`
 		SELECT session_id, type, payload FROM events
@@ -208,7 +214,7 @@ func (p *Poller) activeThoughts() ([]Thought, error) {
 			SELECT session_id FROM events WHERE type = 'task.started'
 			EXCEPT
 			SELECT session_id FROM events WHERE type IN ('task.finished','task.cancelled')
-		) AND type IN ('provider.selected','provider.output')
+		) AND type IN ('provider.selected','provider.output','provider.finished','provider.error')
 		ORDER BY session_id, seq`)
 	if err != nil {
 		return nil, fmt.Errorf("facewin: active thoughts: %w", err)
@@ -242,8 +248,10 @@ func (p *Poller) activeThoughts() ([]Thought, error) {
 			}
 		case "provider.output":
 			if v, ok := m["text"].(string); ok && v != "" {
-				get(sid).Text = v
+				get(sid).Text = v // a turn is streaming
 			}
+		case "provider.finished", "provider.error":
+			get(sid).Text = "" // the turn ended; nothing is in flight
 		}
 	}
 	if err := rows.Err(); err != nil {
