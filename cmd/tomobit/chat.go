@@ -726,6 +726,14 @@ type turnView struct {
 	out  io.Writer
 	name string
 	tty  bool
+	// styled gates markdown rendering and tool-output display the same way
+	// package-level styled() does, but is captured once at construction
+	// instead of re-read live: go test's stdout is never a terminal, so
+	// styled() itself always takes the colourless branch and a test could
+	// never reach the tool_result path it needs to pin (ADR-0031
+	// Consequences). Injecting the bool makes that path reachable from a
+	// bytes.Buffer.
+	styled bool
 
 	mu    sync.Mutex
 	shown bool // a spinner frame is currently on the line
@@ -734,10 +742,27 @@ type turnView struct {
 	cost    float64
 	stopCh  chan struct{}
 	doneCh  chan struct{}
+
+	// toolBudget is the turn's remaining tool_result display budget in lines
+	// (ADR-0031 Decision 1): full at the start of a turn, spent as results
+	// are shown, never replenished — so it resets naturally because a
+	// turnView is itself built fresh per turn. elided marks that the
+	// one-line omission notice already fired, so the budget's silence after
+	// that stays silence rather than repeating itself.
+	//
+	// Neither field rides mu, deliberately: show() runs only on executor.Run's
+	// single stdout-reading goroutine (the spinner goroutine touches shown
+	// alone, under mu), so a lock here would claim a concurrency that does
+	// not exist and invite show() to be called from more than one.
+	toolBudget int
+	elided     bool
 }
 
 func newTurnView(out io.Writer, name string) *turnView {
-	return &turnView{out: out, name: name, tty: isTTY(os.Stdout)}
+	return &turnView{
+		out: out, name: name, tty: isTTY(os.Stdout),
+		styled: styled(), toolBudget: turnToolResultMaxLines,
+	}
 }
 
 func (v *turnView) begin() {
@@ -794,17 +819,30 @@ func (v *turnView) line(s string) {
 }
 
 // toolResultMaxRunes and toolResultMaxLines cap how much of one tool's output
-// the view shows (ADR-0030 Decision 3), whichever bites first. A short colour
-// demo is near neither, so the caps only fire on a runaway, keeping one result
-// from pushing the turn's answer off the screen. The rune cap bounds a single
-// enormous line (the executor once drained 5MB of child stdout); the line cap
-// bounds height for short-line output — a diff, a test log — where the rune cap
-// would let thousands of rows through. Per-result: a turn with many tool calls
-// still shows each, capped. Both are implementation knobs, tuned on real output.
+// the view shows (ADR-0030 Decision 3), whichever bites first — a guard
+// against one runaway result. It is not a guard against many small ones: a
+// turn that calls a tool N times still shows every result, each capped, so
+// the total climbs to N×toolResultMaxLines and can still push the turn's own
+// answer off the screen. That is exactly what happened in practice (a
+// teardown task with a dozen-plus small command outputs), so
+// turnToolResultMaxLines (ADR-0031 Decision 1) caps the turn as a whole —
+// spent as results are shown, never replenished within the turn.
+//
+// The values are calibrated on a real stream, not guessed (ADR-0031 Decision
+// 2): an efficient three-tool-call task measured 46 visible lines across its
+// results, so a 48-line turn budget — about one terminal screen — lets that
+// pass almost whole while a flood of a dozen-plus calls is capped well short
+// of it. The per-result caps came down with it: 40 lines alone gave one
+// result half a screen, and the measured median result (19 lines, a
+// `wc`-style listing) reads fine cut at 16; a colour-sample motivating case
+// is nowhere near either cap.
 const (
-	toolResultMaxRunes = 4000
-	toolResultMaxLines = 40
+	toolResultMaxRunes = 2000
+	toolResultMaxLines = 16
 )
+
+// turnToolResultMaxLines is the turn-wide budget above.
+const turnToolResultMaxLines = 48
 
 // show renders one canonical event. The user must read the assistant text to
 // judge adoption; tool names are the proof that something is happening, and
@@ -815,8 +853,10 @@ func (v *turnView) show(ev executor.Event) {
 		if text, ok := ev.Payload["text"].(string); ok && text != "" {
 			// Markdown-lite is display only (ADR-0024 Decision 5): the ledger
 			// records the raw text, and a pipe gets it untouched — same gate
-			// as dim, for the same reason.
-			if styled() {
+			// as dim, for the same reason. Text is the answer the user judges
+			// for adoption, so it is exempt from the tool budget below
+			// (ADR-0031 Decision 1) — never touch toolBudget here.
+			if v.styled {
 				text = mdlite.Render(text)
 			}
 			v.line(text)
@@ -826,15 +866,43 @@ func (v *turnView) show(ev executor.Event) {
 			// A tool's own output — a Bash colour demo, a diff — carries its
 			// own ANSI, so it skips mdlite (prose rendering would mangle it) and
 			// keeps only SGR (ADR-0030). Colour is the whole point, so it shows
-			// only when styled(): under a pipe or NO_COLOR nothing is drawn here
+			// only when styled: under a pipe or NO_COLOR nothing is drawn here
 			// (the tool's own tool_use event already showed its name), and the
 			// ledger never held the output either way.
-			if styled() {
-				out, truncated := mdlite.ToolOutput(res, toolResultMaxRunes, toolResultMaxLines)
-				if truncated {
-					out += "\n" + dim("…（ツール出力は先頭のみ）")
+			if v.styled {
+				switch {
+				case v.toolBudget <= 0:
+					// The turn's budget is spent (ADR-0031 Decision 1). Say so
+					// once, honestly — not silently — then stay quiet: a
+					// second result met with an empty budget is not news.
+					if !v.elided {
+						v.line(dim("…（以降のツール出力は省略）"))
+						v.elided = true
+					}
+				default:
+					// A result met with less than the per-result cap is cut to
+					// what remains, so one result cannot spend more than the
+					// turn has left — toolBudget > 0 here, so lines is always
+					// at least 1 and mdlite.ToolOutput never sees the
+					// "unlimited" 0.
+					lines := toolResultMaxLines
+					if v.toolBudget < lines {
+						lines = v.toolBudget
+					}
+					out, truncated := mdlite.ToolOutput(res, toolResultMaxRunes, lines)
+					if truncated {
+						out += "\n" + dim("…（ツール出力は先頭のみ）")
+					}
+					// Charged after the marker joins: the marker is a display
+					// line like any other, and a free marker would leak one
+					// line past the budget per cut. Only the final, straddling
+					// result can overdraw — by its one marker line, with the
+					// budget ≤ 0 after — so the turn's tool output is bounded
+					// by turnToolResultMaxLines + 2 including the elision
+					// notice (the bound ADR-0031's Consequences records).
+					v.toolBudget -= strings.Count(out, "\n") + 1
+					v.line(out)
 				}
-				v.line(out)
 			}
 			return
 		}

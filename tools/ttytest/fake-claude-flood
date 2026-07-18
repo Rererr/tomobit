@@ -1,0 +1,28 @@
+#!/bin/sh
+# A stand-in for the claude CLI (see tools/ttytest/fake-claude): emits a
+# stream-json flood of tool_result events so a ttytest can drive turnView's
+# turn-wide tool-output budget (ADR-0031) on a real pty with no API call.
+# Six tool calls each return 13 lines (R{n}-L01..R{n}-L13) -- the measured
+# shape ADR-0031 Decision 2 calibrated against, small results piling up by
+# count rather than any single one being huge -- for 78 lines total against
+# the view's 48-line turn budget. 13 is deliberately not a divisor of 48: the
+# budget runs out in the middle of the fourth result, so the straddling cut
+# and its per-result marker are exercised too, not just the whole-result
+# elision a multiple-of-budget fixture would show.
+cat <<'EOF'
+{"type":"system","subtype":"init","session_id":"th-fake","model":"fake"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"step1"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"R1-L01\nR1-L02\nR1-L03\nR1-L04\nR1-L05\nR1-L06\nR1-L07\nR1-L08\nR1-L09\nR1-L10\nR1-L11\nR1-L12\nR1-L13"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"step2"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"R2-L01\nR2-L02\nR2-L03\nR2-L04\nR2-L05\nR2-L06\nR2-L07\nR2-L08\nR2-L09\nR2-L10\nR2-L11\nR2-L12\nR2-L13"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"step3"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"R3-L01\nR3-L02\nR3-L03\nR3-L04\nR3-L05\nR3-L06\nR3-L07\nR3-L08\nR3-L09\nR3-L10\nR3-L11\nR3-L12\nR3-L13"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"step4"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"R4-L01\nR4-L02\nR4-L03\nR4-L04\nR4-L05\nR4-L06\nR4-L07\nR4-L08\nR4-L09\nR4-L10\nR4-L11\nR4-L12\nR4-L13"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"step5"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"R5-L01\nR5-L02\nR5-L03\nR5-L04\nR5-L05\nR5-L06\nR5-L07\nR5-L08\nR5-L09\nR5-L10\nR5-L11\nR5-L12\nR5-L13"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"step6"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"R6-L01\nR6-L02\nR6-L03\nR6-L04\nR6-L05\nR6-L06\nR6-L07\nR6-L08\nR6-L09\nR6-L10\nR6-L11\nR6-L12\nR6-L13"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}
+{"type":"result","subtype":"success","session_id":"th-fake","duration_ms":10,"total_cost_usd":0}
+EOF

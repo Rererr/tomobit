@@ -27,6 +27,12 @@ expect tools/ttytest/input-style.exp /tmp/tomobit
 # 常に無色側しか通らない——この経路はここでしか守れない
 expect tools/ttytest/tool-output.exp /tmp/tomobit
 
+# ターンのツール出力予算（外部サービス不要・数秒）。fake-claude-floodが13行の
+# tool_resultを6本吐き（13は48の非約数——予算切れが4本目の途中に落ちる）、
+# 境界の1本がマーカー付きで切られ、省略行が一度出て沈黙し、ターン本文（"done"）は
+# 予算切れ後も届くことを検証（ADR-0031）
+expect tools/ttytest/tool-output-budget.exp /tmp/tomobit
+
 # Ctrl-Zサスペンド（外部サービス不要・数秒）。バイナリ直spawnはセッションリーダーになり
 # orphaned process groupへの停止シグナルをカーネルが破棄するため、対話シェルを挟んで
 # 実ユーザーと同じ「シェルのジョブ」として検証する

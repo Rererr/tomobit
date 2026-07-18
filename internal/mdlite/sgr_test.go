@@ -99,8 +99,22 @@ func TestToolOutputTruncatesPastTheLineCap(t *testing.T) {
 	if !truncated {
 		t.Fatalf("10 rows under a line cap of 3 must truncate: %q", out)
 	}
-	if got := strings.Count(out, "\n"); got != 3 {
-		t.Errorf("the line cap should keep 3 rows, got %d: %q", got, out)
+	// 3 kept rows and no trailing newline: the caller's marker sits directly
+	// under the last row, and a budgeting caller counts 3 lines, not 4.
+	if out != "x\nx\nx" {
+		t.Errorf("the line cap should keep 3 rows and end without a newline: %q", out)
+	}
+}
+
+// A line-cap cut can land while a colour is open; the cut still ends reset,
+// so no unclosed style reaches the marker the caller appends under it.
+func TestToolOutputLineCapTruncationClosesOpenColour(t *testing.T) {
+	out, truncated := ToolOutput("\x1b[41mAAA\nBBB\nCCC\x1b[0m", 0, 2)
+	if !truncated {
+		t.Fatalf("3 rows under a line cap of 2 must truncate: %q", out)
+	}
+	if out != "\x1b[41mAAA\x1b[0m\n\x1b[41mBBB\x1b[0m" {
+		t.Errorf("the cut keeps 2 rows, reopens colour on the second, and ends reset: %q", out)
 	}
 }
 

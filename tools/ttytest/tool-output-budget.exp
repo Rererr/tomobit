@@ -1,0 +1,72 @@
+#!/usr/bin/expect -f
+# The turn-wide tool-output budget on a real pty (ADR-0031): a per-result cap
+# alone cannot stop a turn that calls a tool many times from flooding the
+# turn's own text off screen, so turnView also spends a shared budget across
+# the whole turn. fake-claude-flood emits six 13-line tool_result events
+# (78 lines) against the view's 48-line budget — 13 is not a divisor of 48,
+# so the budget runs out mid-result and the straddling cut is exercised, not
+# just whole-result elision. This must observe the flood actually stop
+# mid-stream on a real terminal — the layer go test cannot reach, same
+# reason as tool-output.exp: styled() reads the process's own os.Stdout,
+# which is never a terminal under go test.
+# usage: expect tools/ttytest/tool-output-budget.exp <tomobit binary> [db]
+set bin [lindex $argv 0]
+if {$bin eq ""} { puts "usage: expect tool-output-budget.exp <tomobit binary> \[db\]"; exit 2 }
+set db [lindex $argv 1]
+if {$db eq ""} { set db "/tmp/tomobit-tooloutputbudget.db" }
+file delete $db $db-wal $db-shm $db.history
+
+# Put the fake claude first on PATH so `claude` resolves to it.
+set here [file dirname [file normalize [info script]]]
+set tmpdir [exec mktemp -d]
+exec cp $here/fake-claude-flood $tmpdir/claude
+exec chmod +x $tmpdir/claude
+set env(PATH) "$tmpdir:$env(PATH)"
+set env(TOMOBIT_FACE) "0"
+# A present (even empty) config dir means the profile is chosen — inherit the
+# parent env — so the chat does not stop to ask which claude profile to use.
+set env(TOMOBIT_CLAUDE_CONFIG_DIR) ""
+
+set timeout 10
+log_user 0
+
+proc check {name pattern} {
+    expect {
+        -re $pattern { puts "PASS: $name" }
+        timeout      { puts "FAIL: $name (timeout waiting for $pattern)"; exit 1 }
+        eof          { puts "FAIL: $name (eof)"; exit 1 }
+    }
+}
+
+# Seed the task on the command line: one turn runs immediately against the fake.
+spawn $bin chat --db $db --provider claude-code "clean up the workspace"
+
+# The first result's own first line must reach the screen — the budget only
+# bites once it runs out, not from the start.
+check "the flood's first line reaches the screen" "R1-L01"
+
+# The budget (48) runs out inside the fourth 13-line result (3 x 13 = 39, so
+# 9 lines remain): the straddle is cut to those 9 and carries the per-result
+# truncation marker rather than dropping its tail without saying so.
+check "the straddling result is cut with the per-result marker" \
+    {R4-L09.*ツール出力は先頭のみ}
+
+# After the straddle the budget is spent, and the view says so once,
+# honestly, rather than dropping the remaining results in silence.
+check "the elision notice fires once the budget is spent" {以降のツール出力は省略}
+
+# Whichever pattern the transcript matches first settles it: if the budget
+# failed to silence the tail of the flood — the straddle's own cut lines or
+# any later result — that content would reach the screen before the turn's
+# own closing text does.
+expect {
+    -re "R4-L10|R5-L01|R6-L01" { puts "FAIL: silenced content reached the screen before the turn's text"; exit 1 }
+    -re "done"   { puts "PASS: the turn's own text lands with the flood silenced" }
+    timeout      { puts "FAIL: timeout waiting for the turn's closing text"; exit 1 }
+    eof          { puts "FAIL: eof waiting for the turn's closing text"; exit 1 }
+}
+
+# The assertions have landed; leave without driving the task boundary (its
+# organs would reach for a perception backend this test does not stand up).
+puts "ALL PASS"
+exit 0

@@ -26,8 +26,11 @@ import "strings"
 // measures visible width, not the escapes that colour it nor the rows — so the
 // line cap is what bounds height for short-line output (a diff, a test log). A
 // cut never lands inside a sequence, because a sequence is copied whole or not
-// at all. A non-positive cap disables that dimension. The result always ends
-// reset when it opened any colour, so no unclosed style reaches the next line.
+// at all. A cut also never ends in a newline: the marker the caller appends
+// belongs directly under the last kept line, and the lines shown must equal
+// the lines a budgeting caller is charged (ADR-0031). A non-positive cap
+// disables that dimension. The result always ends reset when it opened any
+// colour, so no unclosed style reaches the next line.
 func ToolOutput(s string, maxVisible, maxLines int) (out string, truncated bool) {
 	runes := []rune(s)
 	var b strings.Builder
@@ -64,18 +67,25 @@ func ToolOutput(s string, maxVisible, maxLines int) (out string, truncated bool)
 			// other C0 controls carry no display and can misbehave. Drop both.
 			i++
 		case r == '\n':
+			lines++
+			if maxLines > 0 && lines >= maxLines {
+				// The cap lands on this break: stop before writing it, so the
+				// caller's truncation marker sits directly under the last kept
+				// line (a kept newline drew a blank row above the marker —
+				// visible on a real turn) and a caller charging height by
+				// lines shown is not billed for a row that never rendered
+				// (ADR-0031's turn budget counts them). Any open colour is
+				// closed by the reset below, as at any other end.
+				truncated = true
+				i = len(runes)
+				break
+			}
 			if active.Len() > 0 && !pending {
 				b.WriteString(ansiReset) // close colour so the break stays plain
 			}
 			b.WriteByte('\n')
 			pending = active.Len() > 0 // reopened lazily on the next line
-			lines++
-			if maxLines > 0 && lines >= maxLines {
-				truncated = true
-				i = len(runes)
-			} else {
-				i++
-			}
+			i++
 		case maxVisible > 0 && visible >= maxVisible:
 			truncated = true
 			i = len(runes) // stop: the visible budget is spent

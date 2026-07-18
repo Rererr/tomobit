@@ -57,7 +57,8 @@
 - [ADR-0027](docs/decisions/ADR-0027-face-lifetime.md) — 顔窓の寿命（窓は対話が生きている間だけ居る＝既定エフェメラル / 在席は`~/.tomobit/sessions/<pid>.lock`のflockで測る / 常駐は`face_resident`でオプトイン）
 - [ADR-0028](docs/decisions/ADR-0028-auto-split-parallel.md) — 判断ゼロの分割と並走（分割プロトコルは常時ON＝判断は毎回Provider / 独立群はProviderが宣言・既定は逐次 / 並走だけ実行直前にy/Nで人が許す＝コストは実測中央値 / chatは成果を親スレッドにfeedし親Providerが統合 / 子は客観信号のみ・主観Feedbackは区切りの親に1回）
 - [ADR-0029](docs/decisions/ADR-0029-perception-backend-choice.md) — 知覚バックエンドの選択（`perceive.MLXLM`をOllamaと並ぶExtractorとして追加 / mlx-lmは構造化出力が無くプロンプト＋Go側検証で「形」を保証 / configは`perceive_backend`＋バックエンド別URL・モデル / `--backend`フラグとextractor生成の1箇所集約 / setupはバックエンド選択→URL・モデル→診断）
-- [ADR-0030](docs/decisions/ADR-0030-provider-tool-output.md) — Providerのツール出力を表示専用で受け取る（tool_resultは表示専用キーで運び台帳はR3不変 / mdliteに通さずSGRのみ通す＝色は残しレイアウト破壊を防ぐ / 先頭優先で上限に切る / codexも対称）
+- [ADR-0030](docs/decisions/ADR-0030-provider-tool-output.md) — Providerのツール出力を表示専用で受け取る（tool_resultは表示専用キーで運び台帳はR3不変 / mdliteに通さずSGRのみ通す＝色は残しレイアウト破壊を防ぐ / 先頭優先で上限に切る / codexも対称。ターン総量はADR-0031が追補）
+- [ADR-0031](docs/decisions/ADR-0031-turn-tool-output-budget.md) — ターンのツール出力表示予算（per-result上限はNで積む洪水を縛れない / turnViewにターン累積予算＝先頭優先のターンスケール拡張 / 予算切れは一度だけ省略行を出し以後沈黙・detail行と本文textは予算外 / 上限値は実stream計測で較正）
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。

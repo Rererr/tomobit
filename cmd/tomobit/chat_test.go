@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -464,6 +465,205 @@ func TestTurnViewLeavesMarkdownRawWhenPiped(t *testing.T) {
 		Payload: map[string]any{"text": "**bold** and `code`"}})
 	if got := out.String(); got != "**bold** and `code`\n" {
 		t.Errorf("piped text must be untouched: %q", got)
+	}
+}
+
+// floodLines builds one tool_result's content: n lines identifying
+// themselves as R{result}-L{01..n}, so a test can tell exactly which lines
+// of which result reached the output.
+func floodLines(result, n int) string {
+	lines := make([]string, n)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("R%d-L%02d", result, i+1)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func toolResultEvent(content string) executor.Event {
+	return executor.Event{Type: executor.EventProviderOutput,
+		Payload: map[string]any{executor.PayloadToolResult: content}}
+}
+
+const elisionNotice = "…（以降のツール出力は省略）"
+
+// ADR-0031 Decision 1: a per-result cap alone cannot stop a turn that calls a
+// tool many times from flooding the answer off screen — the turn itself
+// carries a budget, spent across every result it shows.
+func TestTurnViewToolBudgetCapsAccumulatedLinesAcrossResults(t *testing.T) {
+	out := &bytes.Buffer{}
+	v := &turnView{out: out, styled: true, toolBudget: turnToolResultMaxLines}
+
+	for i := 1; i <= 6; i++ {
+		v.show(toolResultEvent(floodLines(i, 12)))
+	}
+	got := out.String()
+
+	if n := strings.Count(got, "-L"); n != turnToolResultMaxLines {
+		t.Errorf("total tool_result lines shown: got %d, want %d", n, turnToolResultMaxLines)
+	}
+	for _, want := range []string{"R1-L01", "R2-L01", "R3-L01", "R4-L01", "R4-L12"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("result within budget must reach the screen: %q missing from %q", want, got)
+		}
+	}
+	for _, absent := range []string{"R5-L01", "R6-L01"} {
+		if strings.Contains(got, absent) {
+			t.Errorf("result past the exhausted budget must not print: %q found in %q", absent, got)
+		}
+	}
+}
+
+// ADR-0031 Decision 1: the omission is announced once, honestly, and then
+// stays quiet — a repeated notice for every further silenced result would be
+// noise, not honesty.
+func TestTurnViewToolBudgetElisionNoticeFiresOnlyOnce(t *testing.T) {
+	out := &bytes.Buffer{}
+	v := &turnView{out: out, styled: true, toolBudget: turnToolResultMaxLines}
+
+	for i := 1; i <= 6; i++ {
+		v.show(toolResultEvent(floodLines(i, 12)))
+	}
+
+	if n := strings.Count(out.String(), elisionNotice); n != 1 {
+		t.Errorf("elision notice: got %d occurrences, want 1: %q", n, out.String())
+	}
+}
+
+// A result that straddles the budget boundary is cut to whatever remains,
+// like a per-result truncation, and carries the same per-result marker —
+// the budget does not silently drop the tail without saying so. The marker
+// spends the budget too, so the straddle leaves it overdrawn and the next
+// result meets only the elision notice.
+func TestTurnViewToolBudgetCutsAResultStraddlingTheBoundary(t *testing.T) {
+	out := &bytes.Buffer{}
+	v := &turnView{out: out, styled: true, toolBudget: 5}
+
+	v.show(toolResultEvent(floodLines(1, 12)))
+	got := out.String()
+
+	for _, want := range []string{"R1-L01", "R1-L02", "R1-L03", "R1-L04", "R1-L05"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("lines within the remaining budget must show: %q missing from %q", want, got)
+		}
+	}
+	if strings.Contains(got, "R1-L06") {
+		t.Errorf("lines past the remaining budget must not show: %q", got)
+	}
+	if !strings.Contains(got, "…（ツール出力は先頭のみ）") {
+		t.Errorf("a result cut by the budget still carries the per-result truncation marker: %q", got)
+	}
+	if n := strings.Count(got, "\n"); n != 6 {
+		t.Errorf("the straddle draws its kept lines plus the marker, nothing more: got %d lines: %q", n, got)
+	}
+
+	v.show(toolResultEvent(floodLines(2, 3)))
+	after := out.String()[len(got):]
+	if strings.Contains(after, "R2-") || after != elisionNotice+"\n" {
+		t.Errorf("after the straddle the budget is spent: only the elision notice may follow: %q", after)
+	}
+}
+
+// The per-result cap still bites on its own: one over-tall result is cut at
+// toolResultMaxLines even when the turn budget has room to spare, and its
+// marker line is charged like any other display line.
+func TestTurnViewPerResultCapCutsAnOvertallResultWithBudgetToSpare(t *testing.T) {
+	out := &bytes.Buffer{}
+	v := &turnView{out: out, styled: true, toolBudget: turnToolResultMaxLines}
+
+	v.show(toolResultEvent(floodLines(1, toolResultMaxLines+4)))
+	got := out.String()
+
+	if !strings.Contains(got, fmt.Sprintf("R1-L%02d", toolResultMaxLines)) {
+		t.Errorf("lines up to the per-result cap must show: %q", got)
+	}
+	if strings.Contains(got, fmt.Sprintf("R1-L%02d", toolResultMaxLines+1)) {
+		t.Errorf("lines past the per-result cap must not show: %q", got)
+	}
+	if !strings.Contains(got, "…（ツール出力は先頭のみ）") {
+		t.Errorf("a per-result cut carries the truncation marker: %q", got)
+	}
+	if want := turnToolResultMaxLines - (toolResultMaxLines + 1); v.toolBudget != want {
+		t.Errorf("the cut lines and the marker spend the budget: got %d, want %d", v.toolBudget, want)
+	}
+}
+
+// ADR-0031 Consequences: markers are display lines and spend the budget, so
+// the turn's whole tool output is bounded by the budget plus two lines (the
+// final straddle's marker and the one elision notice). Free markers would
+// leak one extra line per cut result and break the bound.
+func TestTurnViewToolBudgetBoundsTheTurnIncludingMarkers(t *testing.T) {
+	out := &bytes.Buffer{}
+	v := &turnView{out: out, styled: true, toolBudget: turnToolResultMaxLines}
+
+	for i := 1; i <= 4; i++ {
+		v.show(toolResultEvent(floodLines(i, toolResultMaxLines+4)))
+	}
+	got := out.String()
+
+	if n := strings.Count(got, "\n"); n > turnToolResultMaxLines+2 {
+		t.Errorf("the turn's tool output must stay within budget+2 lines: got %d: %q", n, got)
+	}
+	if n := strings.Count(got, elisionNotice); n != 1 {
+		t.Errorf("the flood past the bound collapses to one elision notice: got %d: %q", n, got)
+	}
+}
+
+// ADR-0031 Decision 1: detail lines and the turn's own text are outside the
+// tool budget entirely — a spent budget silences only tool_result.
+func TestTurnViewToolBudgetExhaustedStillShowsDetailAndText(t *testing.T) {
+	out := &bytes.Buffer{}
+	v := &turnView{out: out, styled: true, toolBudget: 0}
+
+	v.show(executor.Event{Type: executor.EventProviderOutput,
+		Payload: map[string]any{"tool": "Bash", executor.PayloadDetail: "ls -la"}})
+	v.show(executor.Event{Type: executor.EventProviderOutput,
+		Payload: map[string]any{"text": "**done**"}})
+	got := out.String()
+
+	if !strings.Contains(got, "· Bash ls -la") {
+		t.Errorf("tool detail must show even with the budget spent: %q", got)
+	}
+	if strings.Contains(got, "**done**") {
+		t.Errorf("text must still render through mdlite, not pass through raw: %q", got)
+	}
+}
+
+// The motivating case (ADR-0030's colour sample, ADR-0031's Context): a short
+// result must reach the screen whole, untouched by the turn budget.
+func TestTurnViewToolBudgetLeavesAShortResultWhole(t *testing.T) {
+	out := &bytes.Buffer{}
+	v := &turnView{out: out, styled: true, toolBudget: turnToolResultMaxLines}
+
+	v.show(toolResultEvent(floodLines(1, 3)))
+	got := out.String()
+
+	for _, want := range []string{"R1-L01", "R1-L02", "R1-L03"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("a short result must show whole: %q missing from %q", want, got)
+		}
+	}
+	if strings.Contains(got, "先頭のみ") || strings.Contains(got, elisionNotice) {
+		t.Errorf("a short result must trip neither truncation marker: %q", got)
+	}
+	if v.toolBudget != turnToolResultMaxLines-3 {
+		t.Errorf("budget must fall by exactly the lines shown: got %d, want %d", v.toolBudget, turnToolResultMaxLines-3)
+	}
+}
+
+// Off a terminal (or NO_COLOR) tool_result draws nothing at all (ADR-0030
+// Decision 1's styled() gate) — and, since nothing draws, the turn budget
+// this ADR adds must not move either.
+func TestTurnViewUnstyledSkipsToolResultAndLeavesBudgetUntouched(t *testing.T) {
+	out := &bytes.Buffer{}
+	v := &turnView{out: out, styled: false, toolBudget: turnToolResultMaxLines}
+
+	v.show(toolResultEvent(floodLines(1, 12)))
+
+	if out.String() != "" {
+		t.Errorf("unstyled must draw nothing: %q", out.String())
+	}
+	if v.toolBudget != turnToolResultMaxLines {
+		t.Errorf("unstyled must not spend the budget: got %d, want %d", v.toolBudget, turnToolResultMaxLines)
 	}
 }
 
