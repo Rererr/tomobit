@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,7 +50,7 @@ func cmdSetup(args []string) error {
 		return err
 	}
 	reportCLIs(out)
-	if err := askOllama(in, out, &c); err != nil {
+	if err := askPerceiveBackend(in, out, &c, resolvePerceiveBackend(cfg)); err != nil {
 		return err
 	}
 	if err := askFaceAutoLaunch(in, out, &c); err != nil {
@@ -82,12 +83,46 @@ func askClaudeProfile(in *bufio.Reader, out io.Writer) error {
 	if err := askProfile(in, out, &c); err != nil {
 		return err
 	}
+	// A partial save must still uphold "every config this binary writes
+	// carries perceive_backend" (ADR-0029 Decision 3) — resolved from the
+	// on-disk config as it stood before this save, so the save's own
+	// behavior is pinned unchanged: an already-wired machine still resolves
+	// to ollama, a virgin Mac still resolves to mlx-lm.
+	if c.PerceiveBackend == "" {
+		c.PerceiveBackend = resolvePerceiveBackend(cfg)
+	}
 	if err := config.Save(c); err != nil {
 		return err
 	}
 	cfg, cfgErr = c, nil
 	wireClaude()
 	return nil
+}
+
+// resolvePerceiveBackend resolves the backend from onDisk — the config as
+// loaded at process start (package var cfg), never a question's in-progress
+// working copy: ADR-0029 Decision 3's legacy-detection branch makes an empty
+// perceive_backend's meaning depend on the WHOLE config, so resolving
+// against a copy an earlier question in this same run already touched (e.g.
+// claude profile) would make a virgin machine's config look already-wired
+// and misresolve it to ollama. Taking the snapshot as a parameter (instead
+// of reading the package var here) keeps the resolution testable without
+// global state and safe if a daemonized future (ADR-0004) ever calls it off
+// the main goroutine.
+func resolvePerceiveBackend(onDisk config.Config) string {
+	resolved, err := onDisk.ResolveBackend(runtime.GOOS)
+	if err != nil {
+		// An on-disk perceive_backend that is itself invalid still needs a
+		// sane fallback: blank only the broken key and re-resolve, so every
+		// legacy-detection branch (the ollama_* keys AND the any-other-field
+		// check) still sees the machine's real wiring. Rebuilding a Config
+		// from just the ollama_* fields here would misread a defaults-wired
+		// machine as virgin — the exact regression Decision 3's revision was
+		// measured to prevent.
+		onDisk.PerceiveBackend = ""
+		resolved, _ = onDisk.ResolveBackend(runtime.GOOS)
+	}
+	return resolved
 }
 
 // askProfile asks which CLAUDE_CONFIG_DIR profile claude-code runs under.
@@ -158,21 +193,67 @@ func askClaudeArgs(in *bufio.Reader, out io.Writer, c *config.Config) error {
 // config to write — presence is a fact of the machine, not a choice.
 func reportCLIs(out io.Writer) {
 	fmt.Fprintln(out)
-	for _, cli := range []string{"claude", "codex", "ollama"} {
+	for _, cli := range []string{"claude", "codex", "ollama", "mlx_lm.server"} {
 		if p, err := exec.LookPath(cli); err == nil {
-			fmt.Fprintf(out, "  %-6s ✓ %s\n", cli, p)
+			fmt.Fprintf(out, "  %-14s ✓ %s\n", cli, p)
 		} else {
-			fmt.Fprintf(out, "  %-6s ✗ 見つからない(PATH)\n", cli)
+			fmt.Fprintf(out, "  %-14s ✗ 見つからない(PATH)\n", cli)
 		}
 	}
+}
+
+// askPerceiveBackend asks which local perception server this machine uses
+// (ADR-0029 Decision 5): a backend choice first, then that backend's URL and
+// model, then a backend-specific diagnosis. resolved is what ResolveBackend
+// derives from the ON-DISK config (resolvePerceiveBackend), not from
+// c — c may already carry an earlier question's edits from this same run
+// (e.g. the claude profile), and resolving against that could make a virgin
+// machine's config look already-wired, misresolving it to ollama.
+//
+// Enter WRITES perceive_backend explicitly here, unlike this setup's other
+// "Enter = leave unwritten" questions (askFaceAutoLaunch etc.): ADR-0029
+// Decision 3's legacy-detection branch makes an absent perceive_backend's
+// meaning depend on the rest of the config, so leaving it unwritten would
+// make a config this very run just saved indistinguishable from one that
+// predates the key. An unrecognized answer pins the same displayed default
+// for the same reason, instead of the usual "print a hint and move on".
+func askPerceiveBackend(in *bufio.Reader, out io.Writer, c *config.Config, resolved string) error {
+	// Anything but the two valid names falls back to resolved — not just "":
+	// a corrupt on-disk value would otherwise be displayed as the current
+	// choice and, on Enter, written straight back (measured on a scripted
+	// setup run). Setup doubles as the diagnosis, so rerunning it must heal
+	// a broken key, not preserve it.
+	cur := c.PerceiveBackend
+	if cur != "ollama" && cur != "mlx-lm" {
+		cur = resolved
+	}
+	fmt.Fprintf(out, "\n知覚バックエンド [ollama/mlx-lm, 現在: %s / Enterで維持] > ", cur)
+	line, err := readLine(in)
+	if err != nil {
+		return err
+	}
+	switch line {
+	case "ollama", "mlx-lm":
+		c.PerceiveBackend = line
+	default:
+		if line != "" {
+			fmt.Fprintf(out, "  ollama か mlx-lm で — 現状(%s)を維持\n", cur)
+		}
+		c.PerceiveBackend = cur
+	}
+
+	if c.PerceiveBackend == "mlx-lm" {
+		return askMLXLM(in, out, c)
+	}
+	return askOllama(in, out, c)
 }
 
 func askOllama(in *bufio.Reader, out io.Writer, c *config.Config) error {
 	urlDef := c.OllamaURL
 	if urlDef == "" {
-		urlDef = "http://localhost:11434"
+		urlDef = defaultOllamaURL
 	}
-	fmt.Fprintf(out, "\nOllama の URL [%s / Enterで維持] > ", urlDef)
+	fmt.Fprintf(out, "Ollama の URL [%s / Enterで維持] > ", urlDef)
 	line, err := readLine(in)
 	if err != nil {
 		return err
@@ -183,7 +264,7 @@ func askOllama(in *bufio.Reader, out io.Writer, c *config.Config) error {
 
 	modelDef := c.OllamaModel
 	if modelDef == "" {
-		modelDef = "qwen3:8b"
+		modelDef = defaultOllamaModel
 	}
 	fmt.Fprintf(out, "知覚モデル [%s / Enterで維持] > ", modelDef)
 	if line, err = readLine(in); err != nil {
@@ -195,10 +276,10 @@ func askOllama(in *bufio.Reader, out io.Writer, c *config.Config) error {
 
 	url, model := c.OllamaURL, c.OllamaModel
 	if url == "" {
-		url = "http://localhost:11434"
+		url = defaultOllamaURL
 	}
 	if model == "" {
-		model = "qwen3:8b"
+		model = defaultOllamaModel
 	}
 	switch has, err := ollamaHasModel(url, model); {
 	case err != nil:
@@ -207,6 +288,54 @@ func askOllama(in *bufio.Reader, out io.Writer, c *config.Config) error {
 		fmt.Fprintf(out, "  ollama ✓ %s が居る\n", model)
 	default:
 		fmt.Fprintf(out, "  ollama ✗ %s が居ない → `ollama pull %s`\n", model, model)
+	}
+	return nil
+}
+
+func askMLXLM(in *bufio.Reader, out io.Writer, c *config.Config) error {
+	urlDef := c.MLXURL
+	if urlDef == "" {
+		urlDef = defaultMLXURL
+	}
+	fmt.Fprintf(out, "MLX LM Server の URL [%s / Enterで維持] > ", urlDef)
+	line, err := readLine(in)
+	if err != nil {
+		return err
+	}
+	if line != "" {
+		c.MLXURL = strings.TrimRight(line, "/")
+	}
+
+	modelDef := c.MLXModel
+	if modelDef == "" {
+		modelDef = defaultMLXModel
+	}
+	fmt.Fprintf(out, "知覚モデル [%s / Enterで維持] > ", modelDef)
+	if line, err = readLine(in); err != nil {
+		return err
+	}
+	if line != "" {
+		c.MLXModel = line
+	}
+
+	url, model := c.MLXURL, c.MLXModel
+	if url == "" {
+		url = defaultMLXURL
+	}
+	if model == "" {
+		model = defaultMLXModel
+	}
+	// An unreached server is diagnosis, not an error to fix now (知覚は
+	// Deferred); an unrecognized model at a reachable server is not an error
+	// either — mlx-lm loads it from Hugging Face on demand at first use
+	// (ADR-0029 Context).
+	switch has, err := mlxHasModel(url, model); {
+	case err != nil:
+		fmt.Fprintf(out, "  mlx-lm ✗ 届かない(%v) — 知覚はDeferredなので後でよい\n", err)
+	case has:
+		fmt.Fprintf(out, "  mlx-lm ✓ %s がキャッシュ済み\n", model)
+	default:
+		fmt.Fprintf(out, "  mlx-lm ・ %s は未キャッシュ → 初回知覚時にHFからダウンロードされる\n", model)
 	}
 	return nil
 }
@@ -313,6 +442,34 @@ func ollamaHasModel(url, model string) (bool, error) {
 	}
 	for _, m := range tags.Models {
 		if m.Name == model || strings.TrimSuffix(m.Name, ":latest") == model {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// mlxHasModel asks GET /v1/models (the OpenAI-compatible listing of
+// mlx-lm's HF-cached models) whether model is already cached. A short
+// timeout: setup must never hang on a daemon that isn't there. false with a
+// nil error means "reachable but not cached yet" — mlx-lm downloads
+// on-demand at first use, so that is diagnosis, not failure.
+func mlxHasModel(url, model string) (bool, error) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url + "/v1/models")
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	var list struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return false, err
+	}
+	for _, m := range list.Data {
+		if m.ID == model {
 			return true, nil
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -175,28 +176,32 @@ usage:
                    (config face_auto_launch / env TOMOBIT_FACE=0 で止める)。
                    姿は窓、声とテキストは端末。パイプ・リダイレクトなら見せて終わる
   tomobit chat     [--cap implement] [--provider claude-code|codex|human|auto]
-                   [--permission-mode <mode>] [--timeout 0] [--size ...] ["<prompt>"]
+                   [--permission-mode <mode>] [--timeout 0] [--size ...]
+                   [--backend ollama|mlx-lm] [--model <name>] [--url <addr>] ["<prompt>"]
                    対話セッション(ADR-0022)。1つの会話 = 1つのタスク = 1つの経験。
                    ターンは同じスレッドを継ぐ。/new か /exit で区切ると
                    Feedback → 知覚 → Tomoの質問 が走る。/help でコマンド一覧
+                   --backend/--model/--url は知覚(best-effort)の配線 — do と同じ解決順
   tomobit do       [--cap implement] [--timeout 0] [--permission-mode <mode>]
                    [--provider claude-code|codex|human|auto]
                    [--plan auto|full|direct|quick|<steps>] [--size small|medium|large]
-                   [--model qwen3:8b] [--url http://localhost:11434] "<prompt>"
+                   [--backend ollama|mlx-lm] [--model <name>] [--url <addr>] "<prompt>"
                    --provider auto: 決定エンジン(ADR-0012)が能力ゲート+TSで選ぶ
                    （humanも候補 — ADR-0018）。--provider human: 自分でやって
                    同じ台帳に乗せる。--plan auto: 手順も台帳が選ぶ(ADR-0014、
                    例 analyze>implement>test)。--size は判断の温度 n(stakes)。
+                   --backend/--model/--url は知覚(best-effort)の配線 — 既定は
+                   config、更にその既定はconfig未配線ならOSごとに解決(ADR-0029)。
                    providerが「大きすぎる/独立に分けられる」と判断すれば分割提案を
                    受けてサブタスクを実行(ADR-0023/0028、常時ON。--plan・humanでは
                    付けない。config split_protocol=false で止める)。独立群を宣言されたら
                    実行直前に y/N で並走可否を聞く(既定N=全逐次。概算コストを実測
                    中央値から提示。並走ストリームは[n:provider]表示。非TTYは常に逐次)
   tomobit record   --session <id> --type <event.type> [--json '{...}']
-  tomobit perceive [--model qwen3:8b] [--url http://localhost:11434]
+  tomobit perceive [--backend ollama|mlx-lm] [--model <name>] [--url <addr>]
   tomobit rebuild
   tomobit status   same as no args
-  tomobit setup    対話式でこの機械の配線を決める(claude profile / ollama / 顔窓)。
+  tomobit setup    対話式でこの機械の配線を決める(claude profile / 知覚バックエンド / 顔窓)。
                    再実行すれば診断を兼ねる。書き先は ~/.tomobit/config.json
 
 companion markers: "?" = a connection is questioned / "z" = dormant (long quiet)
@@ -225,13 +230,57 @@ func dbFlag(fs *flag.FlagSet) *string {
 	return fs.String("db", def, "database file")
 }
 
-// ollamaModelDefault is the --model default: config, then the ADR-0005
-// measured pick.
-func ollamaModelDefault() string {
-	if cfg.OllamaModel != "" {
-		return cfg.OllamaModel
+// Hardcoded perception defaults (ADR-0029 Decision 3): the floor under
+// config when a backend's url/model was never wired at all.
+const (
+	defaultOllamaURL   = "http://localhost:11434"
+	defaultOllamaModel = "qwen3:8b" // ADR-0005 measured pick
+	defaultMLXURL      = "http://localhost:8080"
+	defaultMLXModel    = "mlx-community/Qwen3-8B-4bit" // ADR-0029 Decision 3
+)
+
+// newExtractor is the one place do/chat/perceive/duel build a perception
+// Extractor (ADR-0029 Decision 1/4), so the backend switch lives once instead
+// of repeating &perceive.Ollama{...} at every call site. backend/url/model are
+// the raw --backend/--url/--model flag values (possibly "", since a flag's
+// default cannot depend on a backend not yet known at flag-definition time);
+// each empty field falls through url/model > config's key for the resolved
+// backend > the hardcoded default above.
+func newExtractor(backend, url, model string) (perceive.Extractor, error) {
+	b := backend
+	if b == "" {
+		var err error
+		if b, err = cfg.ResolveBackend(runtime.GOOS); err != nil {
+			return nil, err
+		}
 	}
-	return "qwen3:8b"
+	switch b {
+	case "ollama":
+		if url == "" {
+			url = firstNonEmpty(cfg.OllamaURL, defaultOllamaURL)
+		}
+		if model == "" {
+			model = firstNonEmpty(cfg.OllamaModel, defaultOllamaModel)
+		}
+		return &perceive.Ollama{URL: url, Model: model}, nil
+	case "mlx-lm":
+		if url == "" {
+			url = firstNonEmpty(cfg.MLXURL, defaultMLXURL)
+		}
+		if model == "" {
+			model = firstNonEmpty(cfg.MLXModel, defaultMLXModel)
+		}
+		return &perceive.MLXLM{URL: url, Model: model}, nil
+	default:
+		return nil, fmt.Errorf("unknown --backend %q (ollama, mlx-lm)", b)
+	}
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 func openStore(path string) (*store.Store, error) {
@@ -285,8 +334,9 @@ func cmdDo(args []string) error {
 	providerName := fs.String("provider", "claude-code", "adapter to run: claude-code|codex|auto")
 	planArg := fs.String("plan", "", "plan: auto, a label (full|direct|quick), or steps like analyze>implement>test")
 	size := fs.String("size", "", "task size for decision stakes: small|medium|large (--provider auto)")
-	model := fs.String("model", ollamaModelDefault(), "ollama model for best-effort perception")
-	url := fs.String("url", cfg.OllamaURL, "ollama base url (default http://localhost:11434)")
+	backend := fs.String("backend", "", "perception backend for best-effort perception: ollama|mlx-lm (default: resolved from config)")
+	model := fs.String("model", "", "perception model for best-effort perception (default depends on --backend)")
+	url := fs.String("url", "", "perception backend url for best-effort perception (default depends on --backend)")
 	fs.Parse(args)
 
 	// Whether --provider was set explicitly, so the duel offer can tell an
@@ -337,7 +387,10 @@ func cmdDo(args []string) error {
 			isTTY(os.Stdin) && isTTY(os.Stdout), now); accepted {
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 			defer stop()
-			extractor := &perceive.Ollama{URL: *url, Model: *model}
+			extractor, err := newExtractor(*backend, *url, *model)
+			if err != nil {
+				return err
+			}
 			return runDuel(ctx, s, gap, prompt, *capability, *size, *permMode, *timeout,
 				stdin, os.Stdout, extractor)
 		}
@@ -424,7 +477,10 @@ func cmdDo(args []string) error {
 		}
 	}
 
-	extractor := &perceive.Ollama{URL: *url, Model: *model}
+	extractor, err := newExtractor(*backend, *url, *model)
+	if err != nil {
+		return err
+	}
 
 	// A clean run's output is read for a split proposal (ADR-0023 Decision
 	// 1): a broken run (runErr, non-zero exit, already excluded by ctx.Err()
@@ -1062,8 +1118,9 @@ func perceiveBestEffort(s *store.Store, extractor perceive.Extractor) []reflecti
 func cmdPerceive(args []string) error {
 	fs := flag.NewFlagSet("perceive", flag.ExitOnError)
 	db := dbFlag(fs)
-	model := fs.String("model", ollamaModelDefault(), "ollama model for context extraction")
-	url := fs.String("url", cfg.OllamaURL, "ollama base url (default http://localhost:11434)")
+	backend := fs.String("backend", "", "perception backend: ollama|mlx-lm (default: resolved from config)")
+	model := fs.String("model", "", "perception model for context extraction (default depends on --backend)")
+	url := fs.String("url", "", "perception backend url (default depends on --backend)")
 	fs.Parse(args)
 
 	s, err := openStore(*db)
@@ -1072,9 +1129,13 @@ func cmdPerceive(args []string) error {
 	}
 	defer s.Close()
 
+	extractor, err := newExtractor(*backend, *url, *model)
+	if err != nil {
+		return err
+	}
 	p := &perceive.Perceiver{
 		Store:     s,
-		Extractor: &perceive.Ollama{URL: *url, Model: *model},
+		Extractor: extractor,
 		Ver:       extractorVer,
 	}
 	snap, snapErr := reflection.TakeSnapshot(s, time.Now().UnixMilli())

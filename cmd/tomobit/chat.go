@@ -70,8 +70,9 @@ func cmdChat(args []string) error {
 	permMode := fs.String("permission-mode", "", "permission mode passthrough (claude --permission-mode / codex --sandbox)")
 	providerName := fs.String("provider", "claude-code", "adapter to run: claude-code|codex|human|auto")
 	size := fs.String("size", "", "task size for decision stakes: small|medium|large (--provider auto)")
-	model := fs.String("model", ollamaModelDefault(), "ollama model for best-effort perception")
-	url := fs.String("url", cfg.OllamaURL, "ollama base url (default http://localhost:11434)")
+	backend := fs.String("backend", "", "perception backend for best-effort perception: ollama|mlx-lm (default: resolved from config)")
+	model := fs.String("model", "", "perception model for best-effort perception (default depends on --backend)")
+	url := fs.String("url", "", "perception backend url for best-effort perception (default depends on --backend)")
 	fs.Parse(args)
 
 	// Both fail before the store is even opened, like `do`: a chat that
@@ -106,11 +107,15 @@ func cmdChat(args []string) error {
 		fmt.Fprintln(os.Stderr, "warning:", err)
 	}
 
+	extractor, err := newExtractor(*backend, *url, *model)
+	if err != nil {
+		return err
+	}
 	c := &chat{
 		s: s, ed: ed, in: ed.Reader(), out: os.Stdout,
 		providerName: *providerName, capability: *capability,
 		permMode: *permMode, timeout: *timeout, size: *size,
-		extractor:   &perceive.Ollama{URL: *url, Model: *model},
+		extractor:   extractor,
 		interactive: isTTY(os.Stdin) && isTTY(os.Stdout),
 	}
 	ed.Completer = c.complete

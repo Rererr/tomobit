@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -125,9 +126,62 @@ func TestSplitProtocolAbsentVsExplicit(t *testing.T) {
 	}
 }
 
+func TestResolveBackend(t *testing.T) {
+	cases := []struct {
+		name    string
+		c       Config
+		goos    string
+		want    string
+		wantErr bool
+	}{
+		{"explicit ollama wins outright", Config{PerceiveBackend: "ollama"}, "darwin", "ollama", false},
+		{"explicit mlx-lm wins outright", Config{PerceiveBackend: "mlx-lm"}, "linux", "mlx-lm", false},
+		{"unwired ollama_url pins ollama regardless of goos", Config{OllamaURL: "http://x:1"}, "darwin", "ollama", false},
+		{"unwired ollama_model pins ollama regardless of goos", Config{OllamaModel: "qwen3:8b"}, "darwin", "ollama", false},
+		{"claude-only config (the measured regression) pins ollama even on darwin", Config{ClaudeConfigDir: strPtr("/x")}, "darwin", "ollama", false},
+		{"mlx fields alone (config predates perceive_backend) pin ollama", Config{MLXURL: "http://y:2"}, "darwin", "ollama", false},
+		{"completely empty config (virgin machine) defaults to mlx-lm on darwin", Config{}, "darwin", "mlx-lm", false},
+		{"completely empty config (virgin machine) defaults to ollama off darwin", Config{}, "linux", "ollama", false},
+		{"invalid perceive_backend errors", Config{PerceiveBackend: "bogus"}, "darwin", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.c.ResolveBackend(tc.goos)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got backend %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHasAnyOtherFieldSetEnumeratesEveryConfigField pins Config's field
+// count: hasAnyOtherFieldSet lists its fields by hand (all but the three the
+// caller checks first), and nothing else forces that list to grow with the
+// struct. A new field left out of it would make a machine wired only through
+// that field look virgin — and silently move it off Ollama, the exact
+// regression ResolveBackend's legacy branch exists to prevent. When this
+// fails: add the new field to hasAnyOtherFieldSet, then bump the count.
+func TestHasAnyOtherFieldSetEnumeratesEveryConfigField(t *testing.T) {
+	const known = 11 // 3 checked by ResolveBackend + 8 in hasAnyOtherFieldSet
+	if n := reflect.TypeOf(Config{}).NumField(); n != known {
+		t.Errorf("Config grew to %d fields (knew %d): update hasAnyOtherFieldSet and this count together", n, known)
+	}
+}
+
 func TestSaveFileCreatesParentDir(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "nested", "config.json")
 	if err := SaveFile(p, Config{DB: "x"}); err != nil {
 		t.Fatalf("save must create the parent dir: %v", err)
 	}
 }
+
+func strPtr(s string) *string { return &s }

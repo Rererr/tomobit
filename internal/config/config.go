@@ -1,5 +1,6 @@
 // Package config is the machine-local wiring file (ADR-0021): which Claude
-// profile runs, where the truth DB lives, which Ollama serves perception.
+// profile runs, where the truth DB lives, which local perception server
+// (Ollama / MLX LM, ADR-0029) serves perception.
 // It deliberately lives OUTSIDE the experience DB — the SQLite file is the
 // portable experience (ADR-0018: 住む・持ち運べる形), while paths and
 // profiles describe this machine and must not travel with it.
@@ -29,6 +30,13 @@ type Config struct {
 	DB              string   `json:"db,omitempty"`
 	OllamaURL       string   `json:"ollama_url,omitempty"`
 	OllamaModel     string   `json:"ollama_model,omitempty"`
+	// PerceiveBackend selects the local perception server (ADR-0029): "ollama"
+	// or "mlx-lm". A plain string (not a pointer) is enough here — unlike
+	// ClaudeConfigDir, the domain has no valid empty value to confuse with
+	// absence, so "" unambiguously means "let ResolveBackend decide".
+	PerceiveBackend string `json:"perceive_backend,omitempty"`
+	MLXURL          string `json:"mlx_url,omitempty"`
+	MLXModel        string `json:"mlx_model,omitempty"`
 	// FaceAutoLaunch is a pointer for the same absent-vs-set reason as
 	// ClaudeConfigDir: nil = never chosen, so the ADR-0025 default (on) holds;
 	// an explicit false is the user turning the face window off. A plain bool
@@ -48,6 +56,58 @@ type Config struct {
 	// at all). A plain bool's zero value would read a config that predates the
 	// key as "disabled", silently downgrading every existing machine.
 	SplitProtocol *bool `json:"split_protocol,omitempty"`
+}
+
+// ResolveBackend picks which perception backend serves this machine
+// (ADR-0029 Decision 3). goos is injected (rather than read from runtime.GOOS
+// here) so the "unwired machine" branch is pinnable in a test without
+// actually running on darwin.
+func (c Config) ResolveBackend(goos string) (string, error) {
+	switch c.PerceiveBackend {
+	case "ollama", "mlx-lm":
+		return c.PerceiveBackend, nil
+	case "":
+		// fall through to the legacy/goos resolution below
+	default:
+		return "", fmt.Errorf("config: unknown perceive_backend %q (ollama, mlx-lm)", c.PerceiveBackend)
+	}
+	// A machine already wired to Ollama before perceive_backend existed keeps
+	// running on Ollama — key-absence must never silently move a configured
+	// machine to a different backend, Mac or not.
+	if c.OllamaURL != "" || c.OllamaModel != "" {
+		return "ollama", nil
+	}
+	// Measured on the dev machine (Mac, Ollama run at its own defaults): its
+	// on-disk config held only claude_config_dir/claude_args — ollama_url and
+	// ollama_model were never written because the defaults already worked, so
+	// "this machine has been using Ollama" is NOT detectable from the
+	// ollama_* keys alone (a defaults-only wiring leaves no trace in config).
+	// Without this check that config misread as a virgin Mac and jumped to
+	// mlx-lm — a 404 against whatever unrelated process happened to be
+	// listening on :8080. So ANY other field already set means this config
+	// predates perceive_backend and must not be silently moved off Ollama.
+	if c.hasAnyOtherFieldSet() {
+		return "ollama", nil
+	}
+	if goos == "darwin" {
+		return "mlx-lm", nil
+	}
+	return "ollama", nil
+}
+
+// hasAnyOtherFieldSet reports whether any field besides PerceiveBackend and
+// the already-checked Ollama fields carries a value — the signal that this
+// config was written before perceive_backend existed (a config nobody has
+// ever touched is exactly zero in every field).
+func (c Config) hasAnyOtherFieldSet() bool {
+	return c.ClaudeConfigDir != nil ||
+		len(c.ClaudeArgs) > 0 ||
+		c.DB != "" ||
+		c.MLXURL != "" ||
+		c.MLXModel != "" ||
+		c.FaceAutoLaunch != nil ||
+		c.FaceResident != nil ||
+		c.SplitProtocol != nil
 }
 
 // Path is ~/.tomobit/config.json — beside the default DB, never inside it.

@@ -1,0 +1,240 @@
+package perceive
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/Rererr/tomobit/internal/store"
+)
+
+func TestMLXExtractContextBuildsRequestAndParsesResponse(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("path: got %q, want /v1/chat/completions", r.URL.Path)
+		}
+		b, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(b, &gotBody); err != nil {
+			t.Fatalf("request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"content":"{\"lang\":\"rust\",\"framework\":\"\",\"topic\":\"lifetime\",\"size\":\"small\"}"}}]}`)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "mlx-community/Qwen3-8B-4bit"}
+	events := []*store.Event{ev("capability.started", map[string]any{"capability": "impl"})}
+	vocab := map[string][]string{"lang": {"rust", "go"}, "framework": {}, "topic": {}, "size": {}}
+
+	out, err := m.ExtractContext(events, vocab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["lang"] != "rust" || out["topic"] != "lifetime" || out["size"] != "small" {
+		t.Errorf("parsed content mismatch: %v", out)
+	}
+	if len(out) != 4 {
+		t.Errorf("result must carry exactly the 4 semantic keys, got %v", out)
+	}
+
+	if gotBody["model"] != "mlx-community/Qwen3-8B-4bit" {
+		t.Errorf("model: got %v", gotBody["model"])
+	}
+	if gotBody["stream"] != false {
+		t.Errorf("stream should be false, got %v", gotBody["stream"])
+	}
+	if gotBody["temperature"] != float64(0) {
+		t.Errorf("temperature should be 0, got %v", gotBody["temperature"])
+	}
+	if gotBody["max_tokens"] != float64(512) {
+		t.Errorf("max_tokens should be 512, got %v", gotBody["max_tokens"])
+	}
+	kwargs, ok := gotBody["chat_template_kwargs"].(map[string]any)
+	if !ok || kwargs["enable_thinking"] != false {
+		t.Errorf("chat_template_kwargs should disable thinking, got %v", gotBody["chat_template_kwargs"])
+	}
+	messages, _ := gotBody["messages"].([]any)
+	if len(messages) < 1 {
+		t.Fatal("expected at least a system message")
+	}
+	sys, _ := messages[0].(map[string]any)
+	if sys["role"] != "system" {
+		t.Errorf("first message role: got %v", sys["role"])
+	}
+	content, _ := sys["content"].(string)
+	if !strings.Contains(content, "rust") || !strings.Contains(content, "Known vocabulary") {
+		t.Errorf("system prompt should embed the vocabulary, got %q", content)
+	}
+	if !strings.Contains(content, "JSON object") {
+		t.Errorf("system prompt should carry the MLX shape block, got %q", content)
+	}
+}
+
+func TestMLXExtractContextStripsCodeFenceAroundTheObject(t *testing.T) {
+	content := "```json\n{\"lang\":\"go\",\"framework\":\"\",\"topic\":\"worker-pool\",\"size\":\"medium\"}\n```"
+	body, err := json.Marshal(map[string]any{
+		"choices": []map[string]any{{"message": map[string]any{"content": content}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "m"}
+	out, gotErr := m.ExtractContext(nil, map[string][]string{})
+	if gotErr != nil {
+		t.Fatal(gotErr)
+	}
+	if out["lang"] != "go" || out["size"] != "medium" {
+		t.Errorf("fenced JSON should still parse: %v", out)
+	}
+}
+
+func TestMLXExtractContextStripsLeadingProseBeforeTheObject(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"content":"Sure, here is the JSON: {\"lang\":\"go\",\"framework\":\"\",\"topic\":\"x\",\"size\":\"\"}"}}]}`)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "m"}
+	out, err := m.ExtractContext(nil, map[string][]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["lang"] != "go" {
+		t.Errorf("leading prose should be skipped to reach the object: %v", out)
+	}
+}
+
+func TestMLXExtractContextSkipsStrayBracesToReachTheRealObjectFurtherOn(t *testing.T) {
+	content := `Braces like { this } are punctuation, but here is the real one: ` +
+		`{"lang":"go","framework":"","topic":"worker-pool","size":"medium"}`
+	body, err := json.Marshal(map[string]any{
+		"choices": []map[string]any{{"message": map[string]any{"content": content}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "m"}
+	out, gotErr := m.ExtractContext(nil, map[string][]string{})
+	if gotErr != nil {
+		t.Fatal(gotErr)
+	}
+	if out["lang"] != "go" || out["size"] != "medium" {
+		t.Errorf("a stray brace in prose must not stop the search for the real object: %v", out)
+	}
+}
+
+func TestMLXExtractContextNormalizesSizeCaseInsteadOfErroring(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"content":"{\"lang\":\"go\",\"framework\":\"\",\"topic\":\"x\",\"size\":\"Medium\"}"}}]}`)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "m"}
+	out, err := m.ExtractContext(nil, map[string][]string{})
+	if err != nil {
+		t.Fatalf("a case-different enum value must not error: %v", err)
+	}
+	if out["size"] != "medium" {
+		t.Errorf("size must be normalized to lowercase, got %q", out["size"])
+	}
+}
+
+func TestMLXExtractContextErrorsWhenContentKeyIsAbsent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// mlx_lm.server omits "content" entirely when the text is empty.
+		io.WriteString(w, `{"choices":[{"message":{"reasoning":"thinking..."}}]}`)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "m"}
+	_, err := m.ExtractContext(nil, map[string][]string{})
+	if err == nil || !strings.Contains(err.Error(), "no content") {
+		t.Errorf("expected a no-content error, got %v", err)
+	}
+}
+
+func TestMLXExtractContextErrorsOnMissingKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"content":"{\"lang\":\"go\",\"framework\":\"\",\"topic\":\"x\"}"}}]}`)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "m"}
+	_, err := m.ExtractContext(nil, map[string][]string{})
+	if err == nil || !strings.Contains(err.Error(), `missing key "size"`) {
+		t.Errorf("expected a missing-key error, got %v", err)
+	}
+}
+
+func TestMLXExtractContextErrorsOnSizeOutsideEnum(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"content":"{\"lang\":\"go\",\"framework\":\"\",\"topic\":\"x\",\"size\":\"huge\"}"}}]}`)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "m"}
+	_, err := m.ExtractContext(nil, map[string][]string{})
+	if err == nil || !strings.Contains(err.Error(), "invalid value") {
+		t.Errorf("expected a size-enum error, got %v", err)
+	}
+}
+
+func TestMLXExtractContextErrorsOnNonJSONContent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"content":"not json at all"}}]}`)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "m"}
+	_, err := m.ExtractContext(nil, map[string][]string{})
+	if err == nil || !strings.Contains(err.Error(), "no JSON object") {
+		t.Errorf("expected a no-JSON-object error, got %v", err)
+	}
+}
+
+func TestMLXExtractContextErrorsOnBraceThatNeverDecodesAsJSON(t *testing.T) {
+	content := `{lang: "go", framework: "", topic: "x", size: ""}` // unquoted keys — invalid JSON
+	body, err := json.Marshal(map[string]any{
+		"choices": []map[string]any{{"message": map[string]any{"content": content}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "m"}
+	_, gotErr := m.ExtractContext(nil, map[string][]string{})
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "non-JSON") {
+		t.Errorf("a brace that never decodes as JSON must error as non-JSON content, got %v", gotErr)
+	}
+}
+
+func TestMLXExtractContextErrorsOnNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "m"}
+	_, err := m.ExtractContext(nil, map[string][]string{})
+	if err == nil || !strings.Contains(err.Error(), "status") {
+		t.Errorf("expected a status error, got %v", err)
+	}
+}

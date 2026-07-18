@@ -15,6 +15,7 @@ import (
 	"github.com/Rererr/tomobit/internal/config"
 	"github.com/Rererr/tomobit/internal/core"
 	"github.com/Rererr/tomobit/internal/executor"
+	"github.com/Rererr/tomobit/internal/perceive"
 	"github.com/Rererr/tomobit/internal/store"
 	"github.com/Rererr/tomobit/internal/subtask"
 )
@@ -927,6 +928,93 @@ func TestSplitProtocolEnabledDefaultsOnWhenAbsent(t *testing.T) {
 	cfg = config.Config{SplitProtocol: &yes}
 	if !splitProtocolEnabled() {
 		t.Error("an explicit true must enable the protocol")
+	}
+}
+
+// TestNewExtractorFillsFlagThenConfigThenHardcodedDefault pins the ADR-0029
+// Decision 4 precedence: an explicit flag value always wins, an unset one
+// falls to the resolved backend's config key, and an unconfigured key falls
+// to the ADR-0029 Decision 3 hardcoded default.
+func TestNewExtractorFillsFlagThenConfigThenHardcodedDefault(t *testing.T) {
+	saved := cfg
+	t.Cleanup(func() { cfg = saved })
+
+	cfg = config.Config{}
+	ex, err := newExtractor("ollama", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, ok := ex.(*perceive.Ollama)
+	if !ok {
+		t.Fatalf("backend ollama must build a *perceive.Ollama, got %T", ex)
+	}
+	if o.URL != defaultOllamaURL || o.Model != defaultOllamaModel {
+		t.Errorf("unconfigured ollama must fall to the hardcoded default: %+v", o)
+	}
+
+	cfg = config.Config{OllamaURL: "http://cfg:1", OllamaModel: "cfg-model"}
+	ex, err = newExtractor("ollama", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o = ex.(*perceive.Ollama)
+	if o.URL != "http://cfg:1" || o.Model != "cfg-model" {
+		t.Errorf("config must fill an empty flag: %+v", o)
+	}
+
+	ex, err = newExtractor("ollama", "http://flag:2", "flag-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o = ex.(*perceive.Ollama)
+	if o.URL != "http://flag:2" || o.Model != "flag-model" {
+		t.Errorf("an explicit flag must win over config: %+v", o)
+	}
+
+	cfg = config.Config{}
+	ex, err = newExtractor("mlx-lm", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := ex.(*perceive.MLXLM)
+	if !ok {
+		t.Fatalf("backend mlx-lm must build a *perceive.MLXLM, got %T", ex)
+	}
+	if m.URL != defaultMLXURL || m.Model != defaultMLXModel {
+		t.Errorf("unconfigured mlx-lm must fall to the hardcoded default: %+v", m)
+	}
+}
+
+// TestNewExtractorEmptyBackendResolvesFromConfig pins that an empty --backend
+// hands the choice to cfg.ResolveBackend rather than picking a fixed backend
+// itself — newExtractor must not duplicate that decision.
+func TestNewExtractorEmptyBackendResolvesFromConfig(t *testing.T) {
+	saved := cfg
+	t.Cleanup(func() { cfg = saved })
+
+	cfg = config.Config{PerceiveBackend: "mlx-lm"}
+	ex, err := newExtractor("", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ex.(*perceive.MLXLM); !ok {
+		t.Errorf("empty --backend must resolve via config, got %T", ex)
+	}
+}
+
+func TestNewExtractorRejectsAnUnknownBackend(t *testing.T) {
+	if _, err := newExtractor("bogus", "", ""); err == nil {
+		t.Error("an unknown --backend must error, not silently default")
+	}
+}
+
+func TestNewExtractorPropagatesAnInvalidConfigBackend(t *testing.T) {
+	saved := cfg
+	t.Cleanup(func() { cfg = saved })
+
+	cfg = config.Config{PerceiveBackend: "bogus"}
+	if _, err := newExtractor("", "", ""); err == nil {
+		t.Error("an invalid config perceive_backend must error, not silently default")
 	}
 }
 
