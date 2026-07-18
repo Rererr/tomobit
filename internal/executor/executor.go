@@ -38,11 +38,20 @@ const (
 // pressure maxEventChars/maxSessionChars and force an extractor_ver bump.
 const PayloadDetail = "detail"
 
+// PayloadToolResult is a view-only payload key (ADR-0030): a tool's own output
+// — a Bash colour demo, a diff, a test result — that a turn view shows so the
+// human can judge an answer that IS terminal output, not just its assistant
+// text. Like PayloadDetail it never reaches the ledger: SCHEMA.md R3 keeps the
+// tool name only, and recording tool output would spend the perception digest
+// budget (maxEventChars/maxSessionChars) on what R3 deliberately drops. It
+// carries the provider's raw ANSI; the view sanitises it (mdlite.ToolOutput).
+const PayloadToolResult = "tool_result"
+
 // viewOnlyKeys are the payload keys that exist only for display. A Sink must
 // drop them before recording (StripViewOnly); the vocabulary lives here, with
 // the event types, so an adapter cannot invent a display key the store side
 // silently persists.
-var viewOnlyKeys = []string{PayloadDetail}
+var viewOnlyKeys = []string{PayloadDetail, PayloadToolResult}
 
 // Event is one canonical event: an R4 type plus its payload. Adapters produce
 // these as pure data from a single stream line; the Executor assigns ts and

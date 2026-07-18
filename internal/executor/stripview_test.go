@@ -16,6 +16,19 @@ func TestStripViewOnlyRemovesDetailForTheLedger(t *testing.T) {
 	}
 }
 
+// A tool's output is display-only too (ADR-0030): it must never reach the
+// ledger, or the perception digest would carry what R3 deliberately drops.
+func TestStripViewOnlyRemovesToolResultForTheLedger(t *testing.T) {
+	in := map[string]any{"tool": "Bash", PayloadToolResult: "\x1b[31mRED\x1b[0m"}
+	got := StripViewOnly(in)
+	if _, ok := got[PayloadToolResult]; ok {
+		t.Errorf("tool output must not reach the ledger: %v", got)
+	}
+	if got["tool"] != "Bash" {
+		t.Errorf("non-view keys must survive: %v", got)
+	}
+}
+
 // TestStripViewOnlyDoesNotMutateInput guards the chat's show-then-record order:
 // the event is displayed with its detail before the sink strips it, so the
 // argument map must still carry the detail after the call.

@@ -1,9 +1,12 @@
-// Package mdlite renders a provider's markdown text into ANSI for a terminal
-// (ADR-0024 Decision 5): bold, inline code, headings, bullets, and code
-// fences, and nothing more. It is the line-based, self-written conversion the
-// ADR chose over a markdown-renderer dependency (glamour et al.) — the chat
-// crosses the line into markup only far enough to make the answer readable,
-// not to typeset it, so links, tables, and numbered lists are left untouched.
+// Package mdlite prepares a provider's output for a terminal. Render converts
+// the assistant's markdown prose to ANSI (ADR-0024 Decision 5): bold, inline
+// code, headings, bullets, and code fences, and nothing more — the line-based,
+// self-written conversion the ADR chose over a markdown-renderer dependency
+// (glamour et al.), crossing into markup only far enough to make the answer
+// readable, not to typeset it (links, tables, and numbered lists are left
+// untouched). ToolOutput (ADR-0030) handles the other kind of provider output —
+// a tool's own already-ANSI result — keeping its colour but stripping the
+// escapes that would break the chat's layout.
 //
 // Render carries no environment knowledge: whether a stream is a TTY, whether
 // NO_COLOR is set, is the caller's gate (the same one dim() uses), not this

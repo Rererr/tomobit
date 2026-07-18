@@ -1,0 +1,52 @@
+#!/usr/bin/expect -f
+# The tool-output display path on a real pty (ADR-0030): a colour a tool opens
+# and leaves across a newline reaches the screen, and the gutter on the next
+# line stays unstyled — the block-background shape that would otherwise bleed
+# into the 2-column gutter. A fake claude (tools/ttytest/fake-claude) emits the
+# stream-json, so no API is hit and the whole Adapter.Translate → Executor →
+# turnView.show → indent → terminal path runs for real. This is the layer
+# go test cannot reach: styled() reads the process's own os.Stdout, so a
+# non-terminal test always takes the colourless branch.
+# usage: expect tools/ttytest/tool-output.exp <tomobit binary> [db]
+set bin [lindex $argv 0]
+if {$bin eq ""} { puts "usage: expect tool-output.exp <tomobit binary> \[db\]"; exit 2 }
+set db [lindex $argv 1]
+if {$db eq ""} { set db "/tmp/tomobit-tooloutput.db" }
+file delete $db $db-wal $db-shm $db.history
+
+# Put the fake claude first on PATH so `claude` resolves to it.
+set here [file dirname [file normalize [info script]]]
+set tmpdir [exec mktemp -d]
+exec cp $here/fake-claude $tmpdir/claude
+exec chmod +x $tmpdir/claude
+set env(PATH) "$tmpdir:$env(PATH)"
+set env(TOMOBIT_FACE) "0"
+# A present (even empty) config dir means the profile is chosen — inherit the
+# parent env — so the chat does not stop to ask which claude profile to use.
+set env(TOMOBIT_CLAUDE_CONFIG_DIR) ""
+
+set timeout 10
+log_user 0
+
+proc check {name pattern} {
+    expect {
+        -re $pattern { puts "PASS: $name" }
+        timeout      { puts "FAIL: $name (timeout waiting for $pattern)"; exit 1 }
+        eof          { puts "FAIL: $name (eof)"; exit 1 }
+    }
+}
+
+# Seed the task on the command line: one turn runs immediately against the fake.
+spawn $bin chat --db $db --provider claude-code "show me colours"
+
+# The tool's background colour (SGR 41) reaches the screen wrapping LINE-ONE,
+# closes (0m) before the line break, and reopens after the 2-column gutter on
+# LINE-TWO — the gutter itself carries no colour. One pattern proves both that
+# the colour survived the sanitiser and that it did not bleed into the gutter.
+check "tool output colour reaches the screen without bleeding into the gutter" \
+    "\x1b\\\[41mLINE-ONE\x1b\\\[0m\r?\n  \x1b\\\[41mLINE-TWO"
+
+# The assertion has landed; leave without driving the task boundary (its organs
+# would reach for a perception backend this test does not stand up).
+puts "ALL PASS"
+exit 0

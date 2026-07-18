@@ -1,0 +1,15 @@
+#!/bin/sh
+# A stand-in for the claude CLI: emits a fixed `--output-format stream-json`
+# transcript so a ttytest can drive the real chat display path (Adapter.Translate
+# -> Executor -> turnView.show -> indent -> terminal) with no API call. It
+# ignores every argument. The tool_result carries a background colour opened on
+# one line and closed on the next -- the block-background shape ADR-0030's
+# gutter-bleed guard exists for. In the JSON, \u001b is ESC and \n is a newline
+# inside the tool output.
+cat <<'EOF'
+{"type":"system","subtype":"init","session_id":"th-fake","model":"fake"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"printf colors"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"\u001b[41mLINE-ONE\nLINE-TWO\u001b[0m"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}
+{"type":"result","subtype":"success","session_id":"th-fake","duration_ms":10,"total_cost_usd":0}
+EOF

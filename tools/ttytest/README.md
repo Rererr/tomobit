@@ -18,8 +18,14 @@ go build -o /tmp/tomobit ./cmd/tomobit
 expect tools/ttytest/lineedit.exp /tmp/tomobit
 
 # 入力背景の色層（外部サービス不要・数秒）。プロンプトの後ろでだけ背景が開き、
-# テキストを包んでカーソル移動の前に閉じる — マーカーとカーソルは枠の外
+# テキストを包んで右端まで塗り、カーソル移動の前に閉じる — マーカーとカーソルは枠の外
 expect tools/ttytest/input-style.exp /tmp/tomobit
+
+# Providerツール出力の表示（外部サービス不要・数秒）。fake-claudeがstream-jsonを吐き、
+# ツール出力の色が画面に届くこと・複数行にまたがる背景色が2列ガターへ漏れないこと
+# （ADR-0030）を実描画で検証。styled()は自プロセスのos.Stdoutを見るためgo testでは
+# 常に無色側しか通らない——この経路はここでしか守れない
+expect tools/ttytest/tool-output.exp /tmp/tomobit
 
 # Ctrl-Zサスペンド（外部サービス不要・数秒）。バイナリ直spawnはセッションリーダーになり
 # orphaned process groupへの停止シグナルをカーネルが破棄するため、対話シェルを挟んで

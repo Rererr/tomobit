@@ -516,11 +516,27 @@ func providerSink(s *store.Store, sid string, out io.Writer, collect *[]string) 
 				}
 			}
 		}
-		// View-only keys (tool detail) stay out of the ledger here too
-		// (ADR-0024 Decision 6) — both sinks must strip, or `do` and chat
-		// would record different shapes for the same provider stream.
-		return s.AppendEvent(sid, ev.Type, ts, executor.StripViewOnly(ev.Payload))
+		// View-only keys (tool detail, tool output) stay out of the ledger
+		// (ADR-0024 Decision 6, ADR-0030) — recordEvent strips them, and every
+		// sink routes through it so `do` and chat record the same shape.
+		return recordEvent(s, sid, ev, ts)
 	}
+}
+
+// recordEvent strips an event's view-only keys and appends it to the ledger,
+// but skips an event that carries nothing but display (ADR-0030): a tool_result
+// is view-only, so after the strip its payload is empty, and recording that
+// empty provider.output would spend the perception digest budget on a
+// zero-information row — the very cost Decision 1 refused. A tool_use survives
+// the strip with its {"tool": name}, so only the tool_result-only events fall
+// out here. Shared by every sink (do, chat, split, duel) so the skip rule
+// cannot drift between them.
+func recordEvent(s *store.Store, sid string, ev executor.Event, ts int64) error {
+	payload := executor.StripViewOnly(ev.Payload)
+	if len(payload) == 0 && len(ev.Payload) > 0 {
+		return nil // purely view-only: shown to the human, not recorded
+	}
+	return s.AppendEvent(sid, ev.Type, ts, payload)
 }
 
 // openSubtask opens one split subtask's own task session (ADR-0023 Decision

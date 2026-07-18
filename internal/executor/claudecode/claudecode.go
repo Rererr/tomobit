@@ -63,7 +63,7 @@ type streamLine struct {
 	Model     string `json:"model"`
 	SessionID string `json:"session_id"`
 
-	// assistant
+	// assistant / user
 	Message struct {
 		Content []struct {
 			Type string `json:"type"`
@@ -73,6 +73,11 @@ type streamLine struct {
 			// payload (SCHEMA.md R3 keeps the tool name only); it is read
 			// solely to derive the view-only detail (ADR-0024 Decision 6).
 			Input map[string]any `json:"input"`
+			// Content is a tool_result's output (on a `user` message). A string
+			// for most tools; occasionally an array of content blocks. Read as
+			// raw and decoded by toolResultText, which handles both. It rides
+			// the view-only channel (ADR-0030), never the ledger.
+			Content json.RawMessage `json:"content"`
 		} `json:"content"`
 	} `json:"message"`
 
@@ -167,12 +172,63 @@ func (a *Adapter) Translate(line []byte) ([]executor.Event, error) {
 		}
 		return out, nil
 
+	case "user":
+		// A user message carries the tool_result: the output of a tool the
+		// assistant ran (ADR-0030). It rides the view-only channel so the human
+		// can judge an answer that IS terminal output — a Bash colour demo, a
+		// diff — while the ledger keeps only the tool name (R3). The raw ANSI is
+		// carried through untouched; the view sanitises it (mdlite.ToolOutput).
+		var out []executor.Event
+		for _, c := range s.Message.Content {
+			if c.Type != "tool_result" {
+				continue
+			}
+			if text := toolResultText(c.Content); text != "" {
+				out = append(out, executor.Event{
+					Type:    executor.EventProviderOutput,
+					Payload: map[string]any{executor.PayloadToolResult: text},
+				})
+			}
+		}
+		return out, nil
+
 	default:
-		// user (tool_result) and any unknown type: dropped, not an error, so a
-		// new stream type never breaks a run (forward compatible). The Executor
-		// surfaces dropped lines under Debug.
+		// Any unknown type: dropped, not an error, so a new stream type never
+		// breaks a run (forward compatible). The Executor surfaces dropped
+		// lines under Debug.
 		return nil, nil
 	}
+}
+
+// toolResultText decodes a tool_result's content, which the CLI sends either as
+// a plain string (the common case — a Bash command's stdout) or as an array of
+// content blocks (e.g. a tool that returns text alongside an image). Both forms
+// reduce to the concatenated text; anything else (a null, an image-only block)
+// yields "". Errors are swallowed to "": a shape this adapter does not model is
+// a dropped line, never a failed run (the same forward-compatibility the
+// unknown-type default keeps).
+func toolResultText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var str string
+	if err := json.Unmarshal(raw, &str); err == nil {
+		return str
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, bl := range blocks {
+		if bl.Type == "text" {
+			b.WriteString(bl.Text)
+		}
+	}
+	return b.String()
 }
 
 // detailKeys are the tool_use input fields, in priority order, that answer

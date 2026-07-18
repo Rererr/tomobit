@@ -224,9 +224,55 @@ func TestTranslateThinkingBlockIsDroppedButTextSurvives(t *testing.T) {
 	}
 }
 
-func TestTranslateToolResultIsDropped(t *testing.T) {
-	if evs := translate(t, `{"type":"user","message":{"content":[{"type":"tool_result","content":"file contents"}]}}`); len(evs) != 0 {
-		t.Errorf("tool_result must be dropped, got %v", evs)
+// A tool_result now rides the view-only channel (ADR-0030): its output — the
+// raw text, ANSI and all — is surfaced so the human can judge an answer that is
+// terminal output, while the ledger keeps only the tool name (the sink strips
+// PayloadToolResult before recording, pinned on the store side).
+func TestTranslateToolResultSurfacesAsViewOnlyOutput(t *testing.T) {
+	evs := translate(t, `{"type":"user","message":{"content":[{"type":"tool_result","content":"\u001b[31mRED\u001b[0m"}]}}`)
+	if len(evs) != 1 || evs[0].Type != executor.EventProviderOutput {
+		t.Fatalf("expected one provider.output, got %v", evs)
+	}
+	if _, ok := evs[0].Payload["text"]; ok {
+		t.Errorf("tool output must not use the ledger's text key: %v", evs[0].Payload)
+	}
+	if got := evs[0].Payload[executor.PayloadToolResult]; got != "\x1b[31mRED\x1b[0m" {
+		t.Errorf("tool_result must carry the raw output verbatim (ANSI kept): got %q", got)
+	}
+}
+
+// tool_result content is a string for most tools but an array of content blocks
+// for some; both reduce to the concatenated text (ADR-0030).
+func TestTranslateToolResultContentBlocks(t *testing.T) {
+	evs := translate(t, `{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}]}}`)
+	if len(evs) != 1 || evs[0].Payload[executor.PayloadToolResult] != "ab" {
+		t.Fatalf("array content blocks should concatenate their text: got %v", evs)
+	}
+}
+
+// An empty tool_result (a tool that produced nothing) is not an event: an empty
+// output line would only add a blank to the view.
+func TestTranslateEmptyToolResultIsDropped(t *testing.T) {
+	if evs := translate(t, `{"type":"user","message":{"content":[{"type":"tool_result","content":""}]}}`); len(evs) != 0 {
+		t.Errorf("empty tool_result should produce no event, got %v", evs)
+	}
+}
+
+// An image-only tool_result (a tool that returned only an image block) has no
+// text for the terminal view, so it produces no event rather than an empty line.
+func TestTranslateImageOnlyToolResultIsDropped(t *testing.T) {
+	evs := translate(t, `{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"image","source":{"data":"abc"}}]}]}}`)
+	if len(evs) != 0 {
+		t.Errorf("an image-only tool_result should produce no event, got %v", evs)
+	}
+}
+
+// A mixed tool_result keeps only its text blocks; an image alongside is not
+// something the terminal view can render.
+func TestTranslateMixedToolResultKeepsTextOnly(t *testing.T) {
+	evs := translate(t, `{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"see"},{"type":"image","source":{}}]}]}}`)
+	if len(evs) != 1 || evs[0].Payload[executor.PayloadToolResult] != "see" {
+		t.Fatalf("mixed content should keep only the text, got %v", evs)
 	}
 }
 

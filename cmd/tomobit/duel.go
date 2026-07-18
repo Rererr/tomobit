@@ -326,6 +326,6 @@ func duelSink(s *store.Store, sid string, out io.Writer, mu *sync.Mutex, label s
 				mu.Unlock()
 			}
 		}
-		return s.AppendEvent(sid, ev.Type, ts, executor.StripViewOnly(ev.Payload))
+		return recordEvent(s, sid, ev, ts)
 	}
 }

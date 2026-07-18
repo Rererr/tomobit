@@ -481,10 +481,12 @@ func (c *chat) run(prompt string, opening bool) error {
 				texts = append(texts, text)
 			}
 		}
-		// The ledger gets the payload without its view-only keys (ADR-0024
-		// Decision 6): tool detail is for the human watching, and recording it
-		// would spend the perception digest budget on what R3 already excludes.
-		return c.s.AppendEvent(c.sid, ev.Type, ts, executor.StripViewOnly(ev.Payload))
+		// The ledger gets the payload without its view-only keys (tool detail,
+		// tool output — ADR-0024 Decision 6, ADR-0030): they are for the human
+		// watching, and recording them would spend the perception digest budget
+		// on what R3 already excludes. recordEvent also drops an event left
+		// empty by the strip, so a tool_result adds no zero-information row.
+		return recordEvent(c.s, c.sid, ev, ts)
 	}
 
 	ex := &executor.Executor{Adapter: c.adapter, Stderr: os.Stderr, Warn: os.Stderr}
@@ -789,6 +791,19 @@ func (v *turnView) line(s string) {
 	fmt.Fprintln(v.out, s)
 }
 
+// toolResultMaxRunes and toolResultMaxLines cap how much of one tool's output
+// the view shows (ADR-0030 Decision 3), whichever bites first. A short colour
+// demo is near neither, so the caps only fire on a runaway, keeping one result
+// from pushing the turn's answer off the screen. The rune cap bounds a single
+// enormous line (the executor once drained 5MB of child stdout); the line cap
+// bounds height for short-line output — a diff, a test log — where the rune cap
+// would let thousands of rows through. Per-result: a turn with many tool calls
+// still shows each, capped. Both are implementation knobs, tuned on real output.
+const (
+	toolResultMaxRunes = 4000
+	toolResultMaxLines = 40
+)
+
 // show renders one canonical event. The user must read the assistant text to
 // judge adoption; tool names are the proof that something is happening, and
 // stay dim — they are not the answer.
@@ -803,6 +818,22 @@ func (v *turnView) show(ev executor.Event) {
 				text = mdlite.Render(text)
 			}
 			v.line(text)
+			return
+		}
+		if res, ok := ev.Payload[executor.PayloadToolResult].(string); ok && res != "" {
+			// A tool's own output — a Bash colour demo, a diff — carries its
+			// own ANSI, so it skips mdlite (prose rendering would mangle it) and
+			// keeps only SGR (ADR-0030). Colour is the whole point, so it shows
+			// only when styled(): under a pipe or NO_COLOR nothing is drawn here
+			// (the tool's own tool_use event already showed its name), and the
+			// ledger never held the output either way.
+			if styled() {
+				out, truncated := mdlite.ToolOutput(res, toolResultMaxRunes, toolResultMaxLines)
+				if truncated {
+					out += "\n" + dim("…（ツール出力は先頭のみ）")
+				}
+				v.line(out)
+			}
 			return
 		}
 		if tool, ok := ev.Payload["tool"].(string); ok && tool != "" {

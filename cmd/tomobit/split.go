@@ -436,6 +436,6 @@ func splitSink(s *store.Store, sid string, out io.Writer, mu *sync.Mutex, n int,
 				mu.Unlock()
 			}
 		}
-		return s.AppendEvent(sid, ev.Type, ts, executor.StripViewOnly(ev.Payload))
+		return recordEvent(s, sid, ev, ts)
 	}
 }
