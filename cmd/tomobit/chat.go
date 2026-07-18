@@ -39,11 +39,13 @@ const chatPrompt = " ❯ "
 const gutter = "  "
 
 // inputBg is the faint background laid behind the user's typed line, so their
-// turn reads as a block distinct from Tomo's answer. A low-saturation blue in
-// truecolor (48;2;R;G;B), tuned for a dark terminal; drop B for fainter, raise
-// it for more blue. A terminal without truecolor maps it to its nearest
-// palette entry.
-const inputBg = "\x1b[48;2;30;44;74m"
+// turn reads as a block distinct from Tomo's answer. A desaturated blue in
+// truecolor (48;2;R;G;B): the hue stays blue as tomobit's own colour (not a
+// copy of any provider's), but the chroma is halved and the lightness matched
+// to Claude Code's measured transcript band (55,55,55), whose softness comes
+// from sitting near grey — a fuller blue at this size read as harsh. A
+// terminal without truecolor maps it to its nearest palette entry.
+const inputBg = "\x1b[48;2;40;49;64m"
 
 // indent prefixes every non-empty line of s with the gutter. Empty lines stay
 // empty — a gutter on a blank line is just trailing space. Multi-line safe, so
