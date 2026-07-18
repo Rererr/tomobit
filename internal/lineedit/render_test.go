@@ -156,6 +156,45 @@ func TestDrawPaintsBackgroundBehindTextOnly(t *testing.T) {
 	}
 }
 
+// The background fills the row out to the terminal's right edge, not just
+// behind the text (ADR-0030's companion): after the typed text come plain
+// background spaces up to width, then the reset. Here width 10, prompt 3, text
+// 2 => 5 columns of trailing background.
+func TestDrawFillsBackgroundToTheRightEdge(t *testing.T) {
+	const bg = "\x1b[48;5;237m"
+	s, _ := draw(paint{}, " ❯ ", []rune("hi"), 2, 10, 2, bg)
+	want := bg + "hi" + strings.Repeat(" ", 10-3-2) + "\x1b[0m"
+	if !strings.Contains(s, want) {
+		t.Errorf("background should fill to the edge before reset: got %q, want a run %q", s, want)
+	}
+}
+
+// Filling to the edge must not push the cursor: it still lands at the end of
+// the text (col 5 = prompt 3 + "hi"), reached with a carriage return and a
+// forward move, never left parked at the right edge the fill wrote to.
+func TestDrawFillLeavesTheCursorAtTheText(t *testing.T) {
+	const bg = "\x1b[48;5;237m"
+	s, _ := draw(paint{}, " ❯ ", []rune("hi"), 2, 10, 2, bg)
+	if !strings.HasSuffix(s, "\r\x1b[5C") {
+		t.Errorf("cursor should return and move to col 5, not sit at the filled edge: %q", s)
+	}
+}
+
+// The continuation row fills to the edge too, so the whole wrapped input is one
+// background block. width 6, prompt 3 => 3 text columns on row 0: "abc" fills it
+// exactly (reset at the break, no trailing spaces), and "d" on the continuation
+// gets 3 trailing background columns out to the edge.
+func TestDrawFillsEachWrappedRowToTheEdge(t *testing.T) {
+	const bg = "\x1b[48;5;237m"
+	s, _ := draw(paint{}, " ❯ ", []rune("abcd"), 4, 6, 2, bg)
+	if !strings.Contains(s, "abc\x1b[0m\r\n") {
+		t.Errorf("a row filled to the edge resets at the break, no trailing spaces: %q", s)
+	}
+	if !strings.Contains(s, bg+"d"+strings.Repeat(" ", 3)+"\x1b[0m") {
+		t.Errorf("the continuation row should fill its 3 trailing columns: %q", s)
+	}
+}
+
 // On a wrapped line the background stops at the row break and the gutter, then
 // reopens on the continuation — it never paints the newline or the indent.
 func TestDrawBackgroundStopsAtRowBreaksAndGutter(t *testing.T) {

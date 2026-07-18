@@ -74,7 +74,24 @@ func draw(prev paint, prompt string, text []rune, pos, width, contCol int, textS
 		}
 		styleOn = on
 	}
+	// fillToWidth extends the current row's background from the last painted
+	// column to the terminal's right edge, so a styled input reads as a filled
+	// block edge to edge rather than a bar ending at the text (ADR-0030's
+	// companion: the whole question area is background). A no-op when no style
+	// is asked for or the row carries no text background — the prompt and a
+	// blank continuation stay their plain selves. Idempotent: it advances col
+	// to width so a second call on the same row adds nothing.
+	fillToWidth := func() {
+		if !styleOn || col >= width {
+			return
+		}
+		for c := col; c < width; c++ {
+			sb.WriteByte(' ')
+		}
+		col = width
+	}
 	newline := func() {
+		fillToWidth()   // paint this row's background out to the edge first
 		setStyle(false) // the row break and the gutter carry no background
 		sb.WriteString("\r\n")
 		row++
@@ -130,6 +147,7 @@ func draw(prev paint, prompt string, text []rune, pos, width, contCol int, textS
 		}
 		curRow, curCol = row, col
 	}
+	fillToWidth()   // the final row's background reaches the edge too
 	setStyle(false) // no background across the cursor move or into scrollback
 
 	if row > curRow {
