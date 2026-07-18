@@ -1,0 +1,47 @@
+#!/usr/bin/expect -f
+# The input background on a real pty: the faint block behind the user's typed
+# line (Claude Code style). lineedit.exp runs under NO_COLOR to keep its cursor
+# maths clean, so this is where the colour layer is proven — the SGR opens
+# after the prompt, wraps only the text, and closes before the cursor move.
+# usage: expect tools/ttytest/input-style.exp <tomobit binary> [db]
+set bin [lindex $argv 0]
+if {$bin eq ""} { puts "usage: expect input-style.exp <tomobit binary> \[db\]"; exit 2 }
+set db [lindex $argv 1]
+if {$db eq ""} { set db "/tmp/tomobit-inputstyle.db" }
+file delete $db $db-wal $db-shm $db.history
+
+set timeout 8
+log_user 0
+set env(TOMOBIT_FACE) "0"
+
+proc check {name pattern} {
+    expect {
+        -re $pattern { puts "PASS: $name" }
+        timeout      { puts "FAIL: $name (timeout waiting for $pattern)"; exit 1 }
+        eof          { puts "FAIL: $name (eof)"; exit 1 }
+    }
+}
+
+spawn $bin chat --db $db --provider human
+check "prompt" "話しかけて"
+
+# The background opens (an SGR 48; sequence — 256-colour or truecolor) only
+# after the prompt marker and wraps the text, then resets (0m) before the
+# trailing cursor move — the marker and the cursor sit outside the block.
+send "abc"
+sleep 0.3
+check "background wraps the typed text" "❯ \x1b\\\[48;\[0-9;\]+m\[^\x1b\]*abc\x1b\\\[0m"
+send "\025"
+
+# The marker itself carries no background: an empty line is just the prompt.
+send "x"
+sleep 0.3
+check "prompt marker stays unstyled" "\x1b\\\[0J ❯ \x1b\\\[48;"
+send "\025"
+
+send "\004"
+expect {
+    eof     { puts "PASS: ctrl-d exit" }
+    timeout { puts "FAIL: ctrl-d did not exit"; exit 1 }
+}
+puts "ALL PASS"

@@ -13,8 +13,13 @@ raw modeの端末という**外部環境**を相手にする。バッファ・�
 ```sh
 go build -o /tmp/tomobit ./cmd/tomobit
 
-# ラインエディタ（外部サービス不要・数秒）
+# ラインエディタの幾何（外部サービス不要・数秒）。NO_COLORを張って
+# 桁・折り返し・ぶら下げインデントだけを見る（色層は入力背景が混ざるので外す）
 expect tools/ttytest/lineedit.exp /tmp/tomobit
+
+# 入力背景の色層（外部サービス不要・数秒）。プロンプトの後ろでだけ背景が開き、
+# テキストを包んでカーソル移動の前に閉じる — マーカーとカーソルは枠の外
+expect tools/ttytest/input-style.exp /tmp/tomobit
 
 # Ctrl-Zサスペンド（外部サービス不要・数秒）。バイナリ直spawnはセッションリーダーになり
 # orphaned process groupへの停止シグナルをカーネルが破棄するため、対話シェルを挟んで
@@ -33,5 +38,6 @@ expect tools/ttytest/cancel.exp /tmp/tomobit
 タスクの中断ではない」——子はSIGINTで最終行をflushし、チャットは生き残り、
 次のターンが同じスレッドを継ぎ、セッションは1つのまま境界に着く。
 
-`lineedit.exp` は40桁の端末を張って折り返しも通る。
+`lineedit.exp` は40桁の端末を張って折り返しも通る。幾何は NO_COLOR で見て、
+入力背景（色層）は `input-style.exp` が別に張る——幾何と色を混ぜない。
 すべてのexpectはマッチ必須（timeout = FAIL）——素通りするテストは何も守らない。

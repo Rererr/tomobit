@@ -666,7 +666,7 @@ func finishTask(s *store.Store, sid string, in *bufio.Reader, out io.Writer, jud
 		fmt.Fprintln(os.Stderr, "reflection: snapshot failed:", snapErr)
 	}
 
-	extras := perceiveBestEffort(s, extractor)
+	extras := perceiveBestEffort(s, out, extractor)
 
 	// ADR-0007 lists the question right after the adoption prompt, but it runs
 	// here — after perception — so today's work is already folded into the Gap
@@ -1040,7 +1040,7 @@ func feedbackPayload(in *bufio.Reader, out io.Writer) map[string]any {
 // Unlike cmdPerceive, the do user gets no per-experience machine log line —
 // the one spoken line (ADR-0009) replaces it, since a do session's user
 // wants to hear what Tomo learned, not read an extraction trace.
-func perceiveBestEffort(s *store.Store, extractor perceive.Extractor) []reflection.Candidate {
+func perceiveBestEffort(s *store.Store, out io.Writer, extractor perceive.Extractor) []reflection.Candidate {
 	p := &perceive.Perceiver{
 		Store:     s,
 		Extractor: extractor,
@@ -1048,12 +1048,12 @@ func perceiveBestEffort(s *store.Store, extractor perceive.Extractor) []reflecti
 	}
 	beforeCurrent, err := s.CurrentExperiences()
 	if err != nil {
-		fmt.Println("perception pending — run `tomobit perceive` later:", err)
+		fmt.Fprintln(out, "perception pending — run `tomobit perceive` later:", err)
 		return nil
 	}
 	exps, err := p.Run()
 	if err != nil {
-		fmt.Println("perception pending — run `tomobit perceive` later:", err)
+		fmt.Fprintln(out, "perception pending — run `tomobit perceive` later:", err)
 		return nil
 	}
 	if len(exps) == 0 {
@@ -1071,12 +1071,12 @@ func perceiveBestEffort(s *store.Store, extractor perceive.Extractor) []reflecti
 	now := time.Now().UnixMilli()
 	before, err := s.AllConnections()
 	if err != nil {
-		fmt.Printf("perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
+		fmt.Fprintf(out, "perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
 		return nil
 	}
 	stageBefore, err := face.StageFrom(s, now)
 	if err != nil {
-		fmt.Printf("perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
+		fmt.Fprintf(out, "perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
 		return nil
 	}
 
@@ -1084,7 +1084,7 @@ func perceiveBestEffort(s *store.Store, extractor perceive.Extractor) []reflecti
 	expIDs := make([]string, 0, len(exps))
 	for _, e := range exps {
 		if err := en.Apply(e); err != nil {
-			fmt.Printf("perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
+			fmt.Fprintf(out, "perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
 			return nil
 		}
 		expIDs = append(expIDs, e.ID)
@@ -1092,12 +1092,12 @@ func perceiveBestEffort(s *store.Store, extractor perceive.Extractor) []reflecti
 
 	after, err := s.AllConnections()
 	if err != nil {
-		fmt.Printf("perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
+		fmt.Fprintf(out, "perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
 		return nil
 	}
 	stageAfter, err := face.StageFrom(s, now)
 	if err != nil {
-		fmt.Printf("perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
+		fmt.Fprintf(out, "perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
 		return nil
 	}
 	maxExcess, err := s.MaxExcess(expIDs)
@@ -1105,7 +1105,7 @@ func perceiveBestEffort(s *store.Store, extractor perceive.Extractor) []reflecti
 		maxExcess = 0
 	}
 	if text, ok := voice.Perceive(stageBefore, stageAfter, voice.NewSplits(before, after), exps, maxExcess); ok {
-		fmt.Printf("\n「%s」\n", text) // speaker separation: a blank line before Tomo's line
+		fmt.Fprintf(out, "\n「%s」\n", text) // speaker separation: a blank line before Tomo's line
 	}
 
 	afterCurrent, err := s.CurrentExperiences()
@@ -1263,14 +1263,20 @@ func showStatus(s *store.Store) error {
 	// draws the face now, and it alone carries growth and mood — the terminal
 	// keeps only Tomo's one spoken line.
 	tty := isTTY(os.Stdout)
+	// On a TTY the companion view sits at the chat's gutter, table included; a
+	// pipe gets the untouched machine-readable table flush left.
+	out := io.Writer(os.Stdout)
 	if tty {
-		greetIfReturned(os.Stdout, s, conns, now)
+		out = newIndentWriter(os.Stdout, gutter)
+	}
+	if tty {
+		greetIfReturned(out, s, conns, now)
 	}
 	if len(conns) == 0 {
 		if tty {
-			fmt.Printf("Tomo %s\n\n", voice.FirstMeeting())
+			fmt.Fprintf(out, "Tomo %s\n\n", voice.FirstMeeting())
 		}
-		fmt.Println("no connections yet — record a session and run `tomobit perceive`")
+		fmt.Fprintln(out, "no connections yet — record a session and run `tomobit perceive`")
 		return nil
 	}
 
@@ -1290,12 +1296,12 @@ func showStatus(s *store.Store) error {
 		// remark to make (a preference-only network), Tomo still names itself —
 		// the companion's presence is the view, even in silence (ADR-0008).
 		if text, ok := voice.Suggest(cands, now); ok {
-			fmt.Printf("Tomo 「%s」\n\n", text)
+			fmt.Fprintf(out, "Tomo 「%s」\n\n", text)
 		} else {
-			fmt.Printf("Tomo\n\n")
+			fmt.Fprintf(out, "Tomo\n\n")
 		}
 	}
-	return printConnections(os.Stdout, cands, now, tty)
+	return printConnections(out, cands, now, tty)
 }
 
 // Absence knobs (ADR-0019 Decision 2: 不在と判定する空白の長さ).

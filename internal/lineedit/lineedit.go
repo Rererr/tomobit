@@ -56,6 +56,18 @@ type Editor struct {
 	// vocabulary, the same boundary ADR-0022 Decision 3 drew for lineedit.
 	Completer func(text string, pos int) (candidates []string, start int)
 
+	// WrapIndent is the column a wrapped or multi-line input's continuation
+	// rows indent to, so they align under a gutter instead of the terminal's
+	// left edge. Zero (the default) keeps the flush-left wrap; the caller owns
+	// the gutter width, the same boundary Completer draws.
+	WrapIndent int
+
+	// TextStyle, when set, is an SGR sequence (a faint background) painted
+	// behind the typed text — not the prompt, not the gutter. Empty keeps the
+	// line unstyled. The caller owns the colour and whether the terminal wants
+	// one at all (NO_COLOR), the same boundary dim already draws elsewhere.
+	TextStyle string
+
 	// kill is the one-slot kill buffer Ctrl-U/K/W fill and Ctrl-Y empties
 	// (ADR-0024 Decision 3). It survives across lines, as readline's does.
 	kill string
@@ -152,7 +164,7 @@ func (e *Editor) readRaw(prompt string, fd int, old *term.State) (string, error)
 	killAccum := false
 
 	redraw := func() {
-		s, np := draw(p, prompt, b.runes, b.pos, e.width())
+		s, np := draw(p, prompt, b.runes, b.pos, e.width(), e.WrapIndent, e.TextStyle)
 		io.WriteString(e.out, s)
 		p = np
 	}

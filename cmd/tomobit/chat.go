@@ -28,7 +28,68 @@ import (
 	"github.com/Rererr/tomobit/internal/voice"
 )
 
-const chatPrompt = "❯ "
+// chatPrompt hangs the marker one column in (gutter 1); everything else the
+// chat prints sits at the two-column gutter, so the marker stands just left of
+// the conversation instead of both touching the terminal edge.
+const chatPrompt = " ❯ "
+
+// gutter is the left margin the chat's answers, notes and wrapped input all
+// share, so nothing but the prompt marker touches the terminal edge. Two
+// columns matches the tool/footer indent this view already used.
+const gutter = "  "
+
+// inputBg is the faint background laid behind the user's typed line, so their
+// turn reads as a block distinct from Tomo's answer. A low-saturation blue in
+// truecolor (48;2;R;G;B), tuned for a dark terminal; drop B for fainter, raise
+// it for more blue. A terminal without truecolor maps it to its nearest
+// palette entry.
+const inputBg = "\x1b[48;2;30;44;74m"
+
+// indent prefixes every non-empty line of s with the gutter. Empty lines stay
+// empty — a gutter on a blank line is just trailing space. Multi-line safe, so
+// a rendered markdown answer moves as one block.
+func indent(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, ln := range lines {
+		if ln != "" {
+			lines[i] = gutter + ln
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// indentWriter prefixes every non-empty line written through it with the
+// gutter, so a whole block of output — the boundary organs, the connections
+// table — sits at the chat's margin without each print site (some in other
+// packages) knowing about it. Empty lines stay empty. It carries the
+// line-start state across Writes, so a line split over several calls is
+// prefixed once, at its start, and the organs' own speaker-separation blanks
+// re-establish that start after the terminal echoes a typed answer.
+type indentWriter struct {
+	w       io.Writer
+	prefix  string
+	pending bool // at a line start: the next non-newline byte takes the prefix
+}
+
+func newIndentWriter(w io.Writer, prefix string) *indentWriter {
+	return &indentWriter{w: w, prefix: prefix, pending: true}
+}
+
+func (iw *indentWriter) Write(p []byte) (int, error) {
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if iw.pending && c != '\n' {
+			if _, err := io.WriteString(iw.w, iw.prefix); err != nil {
+				return i, err
+			}
+		}
+		if _, err := iw.w.Write(p[i : i+1]); err != nil {
+			return i, err
+		}
+		iw.pending = c == '\n'
+	}
+	return len(p), nil
+}
 
 // chat is one process's worth of conversation: the wiring is fixed for the
 // whole run, the session fields below are reset at every task boundary.
@@ -91,6 +152,16 @@ func cmdChat(args []string) error {
 	defer releasePresence()
 	maybeLaunchFace(*db)
 	ed := lineedit.New(os.Stdin, os.Stdout)
+	// Wrapped and multi-line input indent to the same gutter as the answers, so
+	// a task typed across several lines aligns under the first instead of
+	// falling back to the terminal edge.
+	ed.WrapIndent = len(gutter)
+	// A faint background behind the typed line marks the user's turn apart from
+	// Tomo's answer (Claude Code style). Colour, so it rides the same styled()
+	// gate as dim — NO_COLOR and pipes never see it.
+	if styled() {
+		ed.TextStyle = inputBg
+	}
 	if err := ensureClaudeProfile(ed.Reader(), *providerName); err != nil {
 		return err
 	}
@@ -125,7 +196,7 @@ func cmdChat(args []string) error {
 		if err := showStatus(s); err != nil {
 			return err
 		}
-		fmt.Fprintln(c.out, dim("話しかけて。/help でコマンド、Ctrl-D で終了"))
+		c.sayln(dim("話しかけて。/help でコマンド、Ctrl-D で終了"))
 		fmt.Fprintln(c.out)
 	}
 	return c.loop(strings.TrimSpace(strings.Join(fs.Args(), " ")))
@@ -150,7 +221,7 @@ func (c *chat) loop(seed string) error {
 				if interrupts >= 2 {
 					return c.closeTask()
 				}
-				fmt.Fprintln(c.out, dim("もう一度 Ctrl-C で終了(/exit)"))
+				c.sayln(dim("もう一度 Ctrl-C で終了(/exit)"))
 				continue
 			case errors.Is(err, io.EOF):
 				return c.closeTask()
@@ -196,7 +267,7 @@ func (c *chat) command(line string) (done bool, err error) {
 			return false, err
 		}
 		if arg == "" {
-			fmt.Fprintln(c.out, dim("次のタスクへ"))
+			c.sayln(dim("次のタスクへ"))
 			return false, nil
 		}
 		return false, c.turn(arg)
@@ -221,7 +292,7 @@ func (c *chat) command(line string) (done bool, err error) {
 	case "/help":
 		chatUsage(c.out)
 	default:
-		fmt.Fprintf(c.out, "%s — 知らないコマンド。/help\n", name)
+		c.sayln(fmt.Sprintf("%s — 知らないコマンド。/help", name))
 	}
 	return false, nil
 }
@@ -302,21 +373,21 @@ func matchPrefix(vocab []string, prefix string) []string {
 // happened. The ledger's shape is what says no here, not the implementation.
 func (c *chat) setWiring(field *string, arg, label string, check func(string) error) {
 	if arg == "" {
-		fmt.Fprintln(c.out, dim(label+": "+*field))
+		c.sayln(dim(label + ": " + *field))
 		return
 	}
 	if c.sid != "" {
-		fmt.Fprintf(c.out, "タスクの途中では %s を替えられない — /new で区切ってから\n", label)
+		c.sayln(fmt.Sprintf("タスクの途中では %s を替えられない — /new で区切ってから", label))
 		return
 	}
 	if check != nil {
 		if err := check(arg); err != nil {
-			fmt.Fprintln(c.out, err)
+			c.sayln(err.Error())
 			return
 		}
 	}
 	*field = arg
-	fmt.Fprintln(c.out, dim(label+": "+arg))
+	c.sayln(dim(label + ": " + arg))
 }
 
 // turn is one exchange: the first opens the task, the rest resume its thread.
@@ -326,7 +397,7 @@ func (c *chat) setWiring(field *string, arg, label string, check func(string) er
 // no protocol.
 func (c *chat) turn(prompt string) error {
 	if c.human {
-		fmt.Fprintln(c.out, dim("いまのタスクは君の手にある — 終わったら /new か /exit で区切る"))
+		c.sayln(dim("いまのタスクは君の手にある — 終わったら /new か /exit で区切る"))
 		return nil
 	}
 	opening := c.sid == ""
@@ -366,8 +437,10 @@ func (c *chat) startTask(prompt string) error {
 			map[string]any{"provider": "human"}); err != nil {
 			return err
 		}
-		fmt.Fprintf(c.out, "\n「%s」\n", voice.RouteHuman())
-		fmt.Fprintln(c.out, dim("終わったら /new か /exit で区切る"))
+		c.gap()
+		c.sayln(fmt.Sprintf("「%s」", voice.RouteHuman()))
+		c.sayln(dim("終わったら /new か /exit で区切る"))
+		c.gap()
 		c.completed = true
 	}
 	return nil
@@ -418,6 +491,9 @@ func (c *chat) run(prompt string, opening bool) error {
 	if os.Getenv("TOMOBIT_DEBUG") != "" {
 		ex.Debug = os.Stderr
 	}
+	// A blank line before the answer sets it off from the line the user just
+	// typed; another after it (below) sets it off from the next prompt.
+	c.gap()
 	v.begin()
 	result, runErr := ex.Run(ctx, executor.Request{
 		Prompt: runPrompt, ResumeID: c.threadID,
@@ -429,7 +505,8 @@ func (c *chat) run(prompt string, opening bool) error {
 		// Ctrl-C interrupted the turn, not the task: the thread id is already
 		// captured (it comes from the init line, before any work), so the next
 		// turn picks the conversation back up where it stopped.
-		fmt.Fprintln(c.out, dim("中断 — 続けるか /new で区切る"))
+		c.sayln(dim("中断 — 続けるか /new で区切る"))
+		c.gap()
 		return nil
 	}
 	if payload, need := providerErrorPayload(runErr, result); need {
@@ -452,9 +529,12 @@ func (c *chat) run(prompt string, opening bool) error {
 		if parseErr != nil {
 			fmt.Fprintln(os.Stderr, "split: proposal ignored —", parseErr)
 		} else if groups != nil {
+			// The fold-back re-enters run and prints its own trailing gap, so the
+			// split path skips the one below to avoid a double blank.
 			return c.splitAndFold(ctx, groups, prompt)
 		}
 	}
+	c.gap()
 	return nil
 }
 
@@ -478,7 +558,8 @@ func (c *chat) splitAndFold(ctx context.Context, groups [][]string, parentIntent
 		// closeTask does at a boundary.
 		c.sid, c.threadID, c.turns = "", "", 0
 		c.adapter, c.human, c.completed = nil, false, false
-		fmt.Fprintln(c.out, dim("中断 — 分割を止めた。/new で次のタスクへ"))
+		c.sayln(dim("中断 — 分割を止めた。/new で次のタスクへ"))
+		c.gap()
 		return nil
 	}
 
@@ -589,12 +670,20 @@ func (c *chat) closeTask() error {
 	if !completed {
 		return c.s.AppendEvent(sid, "task.cancelled", time.Now().UnixMilli(), nil)
 	}
-	fmt.Fprintln(c.out)
-	return finishTask(c.s, sid, c.in, c.out, true, c.extractor)
+	// The boundary organs (Feedback → 知覚 → Tomo) sit at the same gutter as the
+	// conversation. They print through a mix of this writer and, in other
+	// packages, plain lines; an indenting writer guttes them all at once. TTY
+	// only — a pipe reads the organs raw, at column 0.
+	out := io.Writer(c.out)
+	if isTTY(os.Stdout) {
+		out = newIndentWriter(c.out, gutter)
+	}
+	c.gap()
+	return finishTask(c.s, sid, c.in, out, true, c.extractor)
 }
 
 func chatUsage(w io.Writer) {
-	fmt.Fprint(w, `/new [prompt]     ここまでを区切って次のタスクへ(Feedback → 知覚 → Tomo)
+	usage := `/new [prompt]     ここまでを区切って次のタスクへ(Feedback → 知覚 → Tomo)
 /provider <name>  次のタスクのProvider (claude-code|codex|human|auto)
 /cap <name>       次のタスクのcapability (既定 implement)
 /size <s|m|l>     次のタスクの判断の温度 (--provider auto のとき効く)
@@ -606,7 +695,11 @@ func chatUsage(w io.Writer) {
       Ctrl-W 単語削除 / Ctrl-K 行末まで削除 / Ctrl-U 全消し / Ctrl-Y 戻す
       Ctrl-Z 中断 / Shift+Enter か \ + Enter で改行(貼り付けの改行はそのまま入る)
 実行中の Ctrl-C はそのターンの中断 — タスクは続く
-`)
+`
+	if isTTY(os.Stdout) {
+		usage = indent(usage)
+	}
+	fmt.Fprint(w, usage)
 }
 
 // The provider CLIs emit these themselves, so the chat cannot assume the
@@ -688,6 +781,11 @@ func (v *turnView) line(s string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.clear()
+	// The gutter is layout, so it rides the same TTY gate as the spinner and
+	// dim: a pipe reads the answer raw, at column 0.
+	if v.tty {
+		s = indent(s)
+	}
 	fmt.Fprintln(v.out, s)
 }
 
@@ -708,7 +806,7 @@ func (v *turnView) show(ev executor.Event) {
 			return
 		}
 		if tool, ok := ev.Payload["tool"].(string); ok && tool != "" {
-			s := "  · " + tool
+			s := "· " + tool
 			if d, ok := ev.Payload[executor.PayloadDetail].(string); ok && d != "" {
 				s += " " + d
 			}
@@ -734,7 +832,7 @@ func (v *turnView) end(result executor.Result) {
 	if !v.tty || !result.Started {
 		return
 	}
-	footer := fmt.Sprintf("  %.1fs", result.Duration.Seconds())
+	footer := fmt.Sprintf("%.1fs", result.Duration.Seconds())
 	if v.cost > 0 {
 		footer += fmt.Sprintf(" · $%.4f", v.cost)
 	}
@@ -759,4 +857,24 @@ func dim(s string) string {
 func styled() bool {
 	_, noColor := os.LookupEnv("NO_COLOR")
 	return !noColor && isTTY(os.Stdout)
+}
+
+// gap prints a blank line between the parts of a turn — the user's line and
+// the answer, the answer and the next prompt — but only when a human is
+// watching. A pipe gets the turns back to back, raw, the same rule the gutter
+// follows: layout is for the terminal, not the script reading it.
+func (c *chat) gap() {
+	if isTTY(os.Stdout) {
+		fmt.Fprintln(c.out)
+	}
+}
+
+// sayln prints one of the chat's own notes at the gutter (TTY only), so its
+// asides sit at the same left margin as the conversation rather than flush
+// against the terminal edge. Off a terminal the line passes through raw.
+func (c *chat) sayln(s string) {
+	if isTTY(os.Stdout) {
+		s = indent(s)
+	}
+	fmt.Fprintln(c.out, s)
 }

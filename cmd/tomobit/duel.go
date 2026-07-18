@@ -250,7 +250,7 @@ func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, cap
 	if err := s.AppendEvent(parentSID, "task.finished", time.Now().UnixMilli(), map[string]any{}); err != nil {
 		return err
 	}
-	perceiveBestEffort(s, extractor)
+	perceiveBestEffort(s, os.Stdout, extractor)
 	return nil
 }
 

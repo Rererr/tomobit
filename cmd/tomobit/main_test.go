@@ -258,7 +258,7 @@ func TestPerceiveBestEffortAppliesExperiencesLive(t *testing.T) {
 	s := openTestStore(t)
 	appendFinishedSession(t, s, "sess")
 
-	perceiveBestEffort(s, &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}})
+	perceiveBestEffort(s, io.Discard, &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}})
 
 	cur, err := s.CurrentExperiences()
 	if err != nil {
@@ -291,7 +291,7 @@ func TestPerceiveBestEffortLeavesSessionPendingOnExtractorFailure(t *testing.T) 
 	s := openTestStore(t)
 	appendFinishedSession(t, s, "sess")
 
-	perceiveBestEffort(s, &fakePerceiveExtractor{err: fmt.Errorf("ollama: connection refused")})
+	perceiveBestEffort(s, io.Discard, &fakePerceiveExtractor{err: fmt.Errorf("ollama: connection refused")})
 
 	pending, err := s.PendingSessions(extractorVer)
 	if err != nil {

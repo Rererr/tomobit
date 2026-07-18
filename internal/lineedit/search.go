@@ -106,7 +106,10 @@ func (e *Editor) reverseSearch(b *buffer, p *paint) (submit bool, next Key, err 
 
 	redraw := func() {
 		text, pos := s.match()
-		str, np := draw(*p, s.prompt(), []rune(text), pos, e.width())
+		// No hanging indent here: the reverse-search overlay is its own prompt,
+		// and a wrapped query reads better flush under it than under the chat's
+		// gutter. No background either — the overlay is not the user's line.
+		str, np := draw(*p, s.prompt(), []rune(text), pos, e.width(), 0, "")
 		io.WriteString(e.out, str)
 		*p = np
 	}

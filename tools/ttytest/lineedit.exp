@@ -25,6 +25,11 @@ proc check {name pattern} {
 
 # A narrow terminal, so wrapping is exercised rather than assumed.
 set stty_init "columns 40 rows 20"
+# This layer is about geometry — cursor columns, wrapping, the hanging indent.
+# The input background (a colour layer, gated on styled()) would interleave its
+# SGR into every one of those assertions; NO_COLOR turns it off so the cursor
+# maths stays legible. The background itself is covered by input-style.exp.
+set env(NO_COLOR) "1"
 spawn $bin chat --db $db --provider human
 check "prompt" "話しかけて"
 
@@ -89,13 +94,13 @@ check "escape does not eat the key behind it" "❯ quokka"
 send "\025"
 
 # 8. full-width japanese: two columns per rune, arrows step over them.
-# 7 runes = 14 columns + 2 for the prompt; each arrow steps back 2 columns.
+# 7 runes = 14 columns + 3 for the " ❯ " prompt; each arrow steps back 2.
 send "日本語のタスク"
-check "japanese width" "日本語のタスク\r\x1b\\\[16C"
+check "japanese width" "日本語のタスク\r\x1b\\\[17C"
 send "\033\[D\033\[D"
-check "arrows step whole runes" "\x1b\\\[12C"
+check "arrows step whole runes" "\x1b\\\[13C"
 send "い"
-check "insert mid-string" "日本語のタいスク\r\x1b\\\[14C"
+check "insert mid-string" "日本語のタいスク\r\x1b\\\[15C"
 send "\025"
 
 # 9. bracketed paste keeps a multi-line block as one input
@@ -105,13 +110,14 @@ send "\025"
 
 # 9b. Shift+Enter as Ghostty encodes it (CSI 27;2;13~, sent with nothing
 # negotiated) inserts a newline instead of submitting: the draft keeps both
-# lines, and text typed after it lands on the continuation row.
+# lines, and text typed after it lands on the continuation row — indented to
+# the chat's gutter (WrapIndent 2), not flush against the terminal edge.
 send "上段"
 sleep 0.3
 send "\033\[27;2;13~"
 sleep 0.3
 send "下段"
-check "shift+enter inserts newline" "上段\r\n下段"
+check "shift+enter inserts an indented continuation row" "上段\r\n  下段"
 send "\025"
 
 # 10. a line longer than 40 columns wraps and still edits

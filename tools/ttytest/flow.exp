@@ -32,7 +32,7 @@ send "私の好きな数字は何でしたか。数字だけ答えて。\r"
 check "turn 2 resumed the thread" "4219"
 
 send "/exit\r"
-check "adoption question at the boundary" "採用\\?"
+check "adoption question at the boundary" "今回、どうだった"
 send "\r"
 check "perception ran" "perceived|perception pending|「"
 
