@@ -597,6 +597,185 @@ func TestEnsureClaudeProfileGatesAutoButNotOtherProviders(t *testing.T) {
 	}
 }
 
+func TestSplitArgsMatchesFieldsWhenThereIsNoQuotingOrEscaping(t *testing.T) {
+	for _, s := range []string{
+		"",
+		"   ",
+		"--foo",
+		"--foo bar",
+		"  --foo   bar  baz ",
+		"a\tb\nc\r\nd",
+	} {
+		got := splitArgs(s)
+		want := strings.Fields(s)
+		if !slicesEqual(got, want) {
+			t.Errorf("splitArgs(%q) = %v, want %v (strings.Fields)", s, got, want)
+		}
+	}
+}
+
+func TestSplitArgsPreservesWhitespaceInsideDoubleQuotes(t *testing.T) {
+	got := splitArgs(`--append-system-prompt "be terse and direct"`)
+	want := []string{"--append-system-prompt", "be terse and direct"}
+	if !slicesEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestSplitArgsPreservesWhitespaceInsideSingleQuotes(t *testing.T) {
+	got := splitArgs(`-x 'a b c'`)
+	want := []string{"-x", "a b c"}
+	if !slicesEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestSplitArgsMergesAQuoteInTheMiddleOfATokenIntoOneArg(t *testing.T) {
+	got := splitArgs(`ab"c d"e`)
+	want := []string{"abc de"}
+	if !slicesEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestSplitArgsUnquotedBackslashEscapesTheNextRune(t *testing.T) {
+	got := splitArgs(`a\ b \"x\\y`)
+	want := []string{"a b", `"x\y`}
+	if !slicesEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestSplitArgsSingleQuoteTakesBackslashLiterally(t *testing.T) {
+	got := splitArgs(`'a\b'`)
+	want := []string{`a\b`}
+	if !slicesEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestSplitArgsUnterminatedQuoteIsDeterministicNotAnError pins the contract
+// a GUI-supplied string relies on: a stray quote must never abort the
+// launch, it only pulls the remainder into one final token and warns once.
+func TestSplitArgsUnterminatedQuoteIsDeterministicNotAnError(t *testing.T) {
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	got := splitArgs(`--foo "bar baz`)
+	w.Close()
+	os.Stderr = oldStderr
+	var warned bytes.Buffer
+	if _, err := io.Copy(&warned, r); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"--foo", "bar baz"}
+	if !slicesEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if warned.Len() == 0 {
+		t.Error("an unterminated quote must warn on stderr")
+	}
+}
+
+func TestSplitArgsEmptyStringYieldsNoArgs(t *testing.T) {
+	if got := splitArgs(""); len(got) != 0 {
+		t.Errorf("splitArgs(\"\") = %v, want empty", got)
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// withClaudeArgsEnv saves and restores TOMOBIT_CLAUDE_ARGS,
+// TOMOBIT_CLAUDE_ARGS_APPEND and cfg around a wireClaude test, and rewires
+// the adapter back to the ambient machine state afterwards so a later test
+// never inherits a fixture's resolution.
+func withClaudeArgsEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"TOMOBIT_CLAUDE_ARGS", "TOMOBIT_CLAUDE_ARGS_APPEND"} {
+		if v, ok := os.LookupEnv(name); ok {
+			os.Unsetenv(name)
+			t.Cleanup(func() { os.Setenv(name, v) })
+		}
+	}
+	oldCfg := cfg
+	t.Cleanup(func() {
+		cfg = oldCfg
+		wireClaude()
+	})
+}
+
+func TestWireClaudeEnvArgsReplaceConfigArgs(t *testing.T) {
+	withClaudeArgsEnv(t)
+	cfg.ClaudeArgs = []string{"--from-config"}
+	t.Setenv("TOMOBIT_CLAUDE_ARGS", "--from-env")
+	wireClaude()
+	want := []string{"--from-env"}
+	if !slicesEqual(claudeAdapter.ExtraArgs, want) {
+		t.Errorf("env must replace config args entirely: got %v, want %v", claudeAdapter.ExtraArgs, want)
+	}
+}
+
+func TestWireClaudeAppendAddsAfterEnvResolution(t *testing.T) {
+	withClaudeArgsEnv(t)
+	t.Setenv("TOMOBIT_CLAUDE_ARGS", "--from-env")
+	t.Setenv("TOMOBIT_CLAUDE_ARGS_APPEND", `--append-system-prompt "be terse"`)
+	wireClaude()
+	want := []string{"--from-env", "--append-system-prompt", "be terse"}
+	if !slicesEqual(claudeAdapter.ExtraArgs, want) {
+		t.Errorf("got %v, want %v", claudeAdapter.ExtraArgs, want)
+	}
+}
+
+func TestWireClaudeAppendAddsAfterConfigResolution(t *testing.T) {
+	withClaudeArgsEnv(t)
+	cfg.ClaudeArgs = []string{"--exclude-dynamic-system-prompt-sections"}
+	t.Setenv("TOMOBIT_CLAUDE_ARGS_APPEND", `--append-system-prompt "be terse"`)
+	wireClaude()
+	want := []string{"--exclude-dynamic-system-prompt-sections", "--append-system-prompt", "be terse"}
+	if !slicesEqual(claudeAdapter.ExtraArgs, want) {
+		t.Errorf("got %v, want %v", claudeAdapter.ExtraArgs, want)
+	}
+}
+
+// TestWireClaudeAppendNeverMutatesConfigArgsBackingArray guards the
+// aliasing bug an in-place append onto cfg.ClaudeArgs would reintroduce: a
+// later read of cfg (e.g. `tomobit setup` re-saving it) must still see the
+// config's own args, untouched by what APPEND tacked on.
+func TestWireClaudeAppendNeverMutatesConfigArgsBackingArray(t *testing.T) {
+	withClaudeArgsEnv(t)
+	original := make([]string, 2, 5) // spare capacity: an in-place append would silently reuse it
+	original[0] = "a"
+	original[1] = "b"
+	cfg.ClaudeArgs = original
+	t.Setenv("TOMOBIT_CLAUDE_ARGS_APPEND", "c d")
+	wireClaude()
+
+	want := []string{"a", "b", "c", "d"}
+	if !slicesEqual(claudeAdapter.ExtraArgs, want) {
+		t.Errorf("got %v, want %v", claudeAdapter.ExtraArgs, want)
+	}
+	if len(original) != 2 || original[0] != "a" || original[1] != "b" {
+		t.Errorf("cfg.ClaudeArgs must be unchanged: %v", original)
+	}
+	if cap(original) >= 3 && original[:3][2] != "" {
+		t.Errorf("append must not spill into cfg.ClaudeArgs's backing array: %v", original[:3])
+	}
+}
+
 // fakeSplitAdapter is a test-only executor.Adapter: Command launches a real
 // but trivial child (`sh -c`) so the Executor's actual process lifecycle
 // runs, and Translate maps every stdout line straight to a provider.output.

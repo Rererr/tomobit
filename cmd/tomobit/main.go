@@ -17,6 +17,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/Rererr/tomobit/internal/config"
 	"github.com/Rererr/tomobit/internal/core"
@@ -86,11 +87,84 @@ func wireClaude() {
 		claudeProfileSet = false
 		claudeAdapter.ConfigDir = ""
 	}
+
+	// Copied, not aliased: cfg.ClaudeArgs must survive whatever the APPEND
+	// step below does to this slice (setup can re-save cfg from the same
+	// backing array a stale append would have clobbered).
+	var resolved []string
 	if v, ok := os.LookupEnv("TOMOBIT_CLAUDE_ARGS"); ok {
-		claudeAdapter.ExtraArgs = strings.Fields(v)
+		resolved = splitArgs(v)
 	} else {
-		claudeAdapter.ExtraArgs = cfg.ClaudeArgs
+		resolved = append([]string(nil), cfg.ClaudeArgs...)
 	}
+	if v := os.Getenv("TOMOBIT_CLAUDE_ARGS_APPEND"); v != "" {
+		resolved = append(resolved, splitArgs(v)...)
+	}
+	claudeAdapter.ExtraArgs = resolved
+}
+
+// splitArgs divides s into argv the way TOMOBIT_CLAUDE_ARGS(_APPEND) needs:
+// whitespace-separated tokens, with "..." and '...' preserving embedded
+// whitespace — even mid-token, e.g. ab"c d"e -> "abc de" — and a backslash
+// outside single quotes escaping the following rune. Backslashes inside
+// single quotes are literal. Input with no quotes or backslashes splits
+// exactly like strings.Fields, so a plain TOMOBIT_CLAUDE_ARGS keeps working
+// unchanged. An unterminated quote is not treated as an error — GUI-supplied
+// strings must never abort a launch — it just pulls the rest of s into the
+// final token and logs one warning so the truncation isn't silent.
+func splitArgs(s string) []string {
+	var args []string
+	var buf strings.Builder
+	inToken := false
+	var quote rune // 0, '\'', or '"'
+
+	flush := func() {
+		if inToken {
+			args = append(args, buf.String())
+			buf.Reset()
+			inToken = false
+		}
+	}
+
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch {
+		case quote == '\'':
+			if r == '\'' {
+				quote = 0
+			} else {
+				buf.WriteRune(r)
+			}
+		case quote == '"':
+			switch {
+			case r == '"':
+				quote = 0
+			case r == '\\' && i+1 < len(runes):
+				i++
+				buf.WriteRune(runes[i])
+			default:
+				buf.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote = r
+			inToken = true
+		case r == '\\' && i+1 < len(runes):
+			i++
+			buf.WriteRune(runes[i])
+			inToken = true
+		case unicode.IsSpace(r):
+			flush()
+		default:
+			buf.WriteRune(r)
+			inToken = true
+		}
+	}
+	if quote != 0 {
+		fmt.Fprintln(os.Stderr, "warning: unterminated quote in argument string; treating the remainder as one argument")
+	}
+	flush()
+	return args
 }
 
 func providerNames() []string {
@@ -211,6 +285,7 @@ common flags:
 
 config precedence: flag > env > ~/.tomobit/config.json
   env overrides: TOMOBIT_DB, TOMOBIT_CLAUDE_CONFIG_DIR, TOMOBIT_CLAUDE_ARGS
+                 TOMOBIT_CLAUDE_ARGS_APPEND (解決済み引数への追記・引用符可)
                  TOMOBIT_FACE=0|1 (顔窓の自動起動を止める / 強制する)`)
 }
 
