@@ -135,8 +135,12 @@ func TestProviderErrorPayloadSkipsWhenAdapterAlreadyReported(t *testing.T) {
 // fakePerceiveExtractor lets perceiveBestEffort be exercised without a real
 // Ollama server.
 type fakePerceiveExtractor struct {
-	semantic map[string]string
-	err      error
+	semantic     map[string]string
+	taskSemantic map[string]string
+	taskIntent   string
+	taskVocab    map[string][]string
+	taskCalls    int
+	err          error
 }
 
 func (f *fakePerceiveExtractor) ExtractContext([]*store.Event, map[string][]string) (map[string]string, error) {
@@ -146,12 +150,18 @@ func (f *fakePerceiveExtractor) ExtractContext([]*store.Event, map[string][]stri
 	return f.semantic, nil
 }
 
-// ExtractTaskContext mirrors ExtractContext: the fake's session-based and
-// task-based behavior are the same fixture, since no test here cares about
-// the two diverging.
-func (f *fakePerceiveExtractor) ExtractTaskContext(string, map[string][]string) (map[string]string, error) {
+// ExtractTaskContextは渡された入力を記録し、ExtractContextとは別のfixtureを返す。
+// 両入口が同じ応答を返すfakeでは、Task Perceptionに配線された呼び出しと
+// session perceptionへの退避を区別できないため、この境界を固定する。
+func (f *fakePerceiveExtractor) ExtractTaskContext(intent string, vocab map[string][]string) (map[string]string, error) {
+	f.taskIntent = intent
+	f.taskVocab = vocab
+	f.taskCalls++
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.taskSemantic != nil {
+		return f.taskSemantic, nil
 	}
 	return f.semantic, nil
 }
@@ -1663,12 +1673,22 @@ func TestFinestMatchGranularityOneTieBreaksToCapAcrossFullVocabulary(t *testing.
 	registerFakeProvider(t, "prov-a", &fakeSplitAdapter{name: "prov-a"})
 	s := openTestStore(t)
 	now := time.Now().UnixMilli()
-	// One granularity-1 Connection per token key that can reach a decision
-	// today: cap/size (ADR-0036 Decision 1) and lang/framework/topic
-	// (Decision 2). All equally specific, so only the tie-break can choose.
-	for _, scopeKey := range []string{
-		"cap=implement", "framework=stdlib", "lang=go", "size=medium", "topic=refactor",
-	} {
+	// 判定に届くgranularity-1のConnectionを、cap/size（ADR-0036 Decision 1）と
+	// Decision 2が配線するsemantic keyごとに1つずつ置く。key一覧は
+	// perceive.SemanticKeysから作る。手書きだと、"cap"より辞書順で前のkeyが
+	// 追加された日に、本番の勝者だけが静かに変わってもテストが通ってしまう。
+	semanticValue := map[string]string{
+		"lang": "go", "framework": "stdlib", "topic": "refactor", "size": "medium",
+	}
+	scopeKeys := []string{"cap=implement"}
+	for _, k := range perceive.SemanticKeys {
+		v, ok := semanticValue[k]
+		if !ok {
+			t.Fatalf("semantic key %q has no fixture value — a new key joined the vocabulary and this test must decide what it means for the tie-break", k)
+		}
+		scopeKeys = append(scopeKeys, core.CanonToken(k, v))
+	}
+	for _, scopeKey := range scopeKeys {
 		conn := &core.Connection{
 			Kind: core.ConnCapability, ScopeKey: scopeKey, Target: "prov-a",
 			Alpha: 5, Beta: 1, LastUpdate: now, BornTS: now,
@@ -1679,9 +1699,7 @@ func TestFinestMatchGranularityOneTieBreaksToCapAcrossFullVocabulary(t *testing.
 		}
 	}
 
-	fake := &countingTaskExtract{semantic: map[string]string{
-		"lang": "go", "framework": "stdlib", "topic": "refactor",
-	}}
+	fake := &countingTaskExtract{semantic: semanticValue}
 	tp := newTaskPerception("refactor the go stdlib usage", fake.fn)
 
 	dec, err := autoDecide(s, io.Discard, "s-decide", "implement", "medium", tp)
@@ -1743,7 +1761,20 @@ func TestTaskPerceptionIsShownTheSameVocabularyAsSessionPerception(t *testing.T)
 // real LLM backend.
 func TestTaskExtractFuncForCallsExtractTaskContext(t *testing.T) {
 	s := openTestStore(t)
-	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
+	exp := &core.Experience{
+		ID: "exp-v", SessionID: "sess-v", TS: 1000, Kind: core.KindExecution,
+		ExtractorVer: extractorVer, ExtractorModel: "none",
+		Context:  map[string]string{"lang": "rust"},
+		Provider: "prov-a", Source: "production",
+	}
+	if err := s.InsertExperience(exp); err != nil {
+		t.Fatal(err)
+	}
+	// lang=goを返せるのはtask入口だけ、というfixtureにする。
+	extractor := &fakePerceiveExtractor{
+		semantic:     map[string]string{"lang": "session-not-task"},
+		taskSemantic: map[string]string{"lang": "go"},
+	}
 	extract := taskExtractFuncFor(s, extractor)
 
 	got, err := extract("improve the go handler")
@@ -1751,6 +1782,12 @@ func TestTaskExtractFuncForCallsExtractTaskContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got["lang"] != "go" {
-		t.Errorf("got %v, want lang=go from the wired extractor", got)
+		t.Errorf("got %v, want lang=go — the task entry point, not ExtractContext", got)
+	}
+	if extractor.taskIntent != "improve the go handler" {
+		t.Errorf("intent handed to the extractor = %q, want the task description verbatim", extractor.taskIntent)
+	}
+	if !slicesEqual(extractor.taskVocab["lang"], []string{"rust"}) {
+		t.Errorf("vocab handed to the extractor = %v, want the ledger's known values", extractor.taskVocab)
 	}
 }

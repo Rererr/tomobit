@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Rererr/tomobit/internal/core"
 	"github.com/Rererr/tomobit/internal/executor"
 	"github.com/Rererr/tomobit/internal/store"
 )
@@ -379,5 +381,56 @@ func TestRunSplitParallelCancellationRecordsAllChildrenAndParent(t *testing.T) {
 	}
 	if n := countEventsOfTypeInSession(t, s, parentSID, "task.finished"); n != 0 {
 		t.Errorf("a cancelled split records no parent task.finished, got %d", n)
+	}
+}
+
+// 並列分岐でも親のTask Perception holderを引き回す（ADR-0036 Decision 2b）。
+// sequential側のテストは単要素groupだけなのでrunGroupParallelに入らず、
+// この経路だけtpを落とす呼び出しを検出できない。
+func TestRunGroupParallelSharesTheParentTaskPerceptionHolder(t *testing.T) {
+	s := openTestStore(t)
+	// Replace the registry rather than adding to it: registerFakeProvider only
+	// inserts, so the real claude-code/codex adapters would stay in the auto
+	// lottery and a win would launch the actual CLI from a unit test.
+	saved := providers
+	providers = map[string]executor.Adapter{
+		"fake-a": &fakeSplitAdapter{name: "fake-a", line: "did a"},
+		"fake-b": &fakeSplitAdapter{name: "fake-b", line: "did b"},
+	}
+	t.Cleanup(func() { providers = saved })
+
+	const parentSID = "parent-parallel-tp"
+	openParentTask(t, s, parentSID)
+	// Human Executorも同じ台帳で競合する（ADR-0018 Decision 2）。
+	// 勝つと実stdinを読むため、このテストでは失敗記録で候補から外す。
+	now := time.Now().UnixMilli()
+	if err := s.UpsertConnection(&core.Connection{
+		Kind: core.ConnCapability, ScopeKey: "cap=implement", Target: "human",
+		Alpha: 1, Beta: 20, LastUpdate: now, BornTS: now, PriorA: 1, PriorB: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	groups := [][]string{{"x", "y"}} // 2要素の1グループなので並列経路に入る。
+	in := bufio.NewReader(strings.NewReader("y\n"))
+	var out bytes.Buffer
+	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
+	fake := &countingTaskExtract{semantic: map[string]string{"lang": "go"}}
+	tp := newTaskPerception("big task", fake.fn)
+
+	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "auto",
+		"implement", "", "", 0, in, &out, true, extractor, tp); err != nil {
+		t.Fatalf("runSplit: %v", err)
+	}
+
+	split := payloadOf(t, s, "task.split")
+	if split["parallel_accepted"] != true {
+		t.Fatalf("this test only says something if the parallel gate was accepted, got %v", split)
+	}
+	if len(subtaskSessionIDs(t, s, parentSID)) != 2 {
+		t.Fatal("expected two subtask sessions to have run in parallel")
+	}
+	if fake.calls != 1 {
+		t.Errorf("two parallel --provider auto subtasks must share the parent's one extraction, got %d calls", fake.calls)
 	}
 }

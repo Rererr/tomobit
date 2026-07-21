@@ -1092,6 +1092,11 @@ func decisionTokens(capability, size string) []string {
 // name a scope the same decision never widened its draws for — the audit would
 // read size=large beside n=1. An attribute that only half the decision can see
 // is worse than an absent one.
+//
+// The consequence is that a run without --size never reaches a size-scoped
+// Connection, even though session perception writes size into the Context that
+// grows one. That asymmetry is the honest one: size declares the stakes being
+// taken, and on such a run nobody declared any.
 func perceptionTokens(capability, size string, semantic []string) []string {
 	tokens := decisionTokens(capability, size)
 	for _, tok := range semantic {
