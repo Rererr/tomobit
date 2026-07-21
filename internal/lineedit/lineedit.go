@@ -161,12 +161,21 @@ func (e *Editor) ReadLine(prompt string) (string, error) {
 // continuation returns what accumulated: a pipe's half is the whole a script
 // meant to send, unlike raw's abandoned draft. The prompt prints once — a
 // continuation line gets no re-print (a pipe has no reader to prompt).
+//
+// A non-EOF read error is not that same half — ADR-0032 Decision 2 only
+// covers the pipe's own end, so a real fault is returned instead of folded
+// into it (mirroring readRaw's decode-error path below); otherwise the
+// caller would run a truncated fragment as though it were the whole turn a
+// human or script meant to send.
 func (e *Editor) readCooked(prompt string) (string, error) {
 	fmt.Fprint(e.out, prompt)
 	var acc strings.Builder
 	continued := false
 	for {
 		line, err := e.r.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("lineedit: reading input: %w", err)
+		}
 		if line == "" && err != nil {
 			if continued {
 				return acc.String(), nil
