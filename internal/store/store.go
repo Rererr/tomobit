@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -98,6 +99,18 @@ CREATE TABLE IF NOT EXISTS curiosity_queue (
   resolved_ts INTEGER
 );
 `
+
+// The append-only DELETE guards held as named DDL, byte-identical to the
+// copies in schema above (a drift-guard test pins them). The forget organ
+// (ADR-0033 Decision 5) DROPs a guard, deletes, and recreates it inside one
+// transaction — SCHEMA.md D3's "意図的な保守作業ではその時だけDROP" — so a
+// mid-flight failure rolls the trigger back with the rows.
+const (
+	eventsNoDeleteTrigger = `CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
+  BEGIN SELECT RAISE(ABORT, 'events is append-only'); END;`
+	experiencesNoDeleteTrigger = `CREATE TRIGGER IF NOT EXISTS experiences_no_delete BEFORE DELETE ON experiences
+  BEGIN SELECT RAISE(ABORT, 'experiences is append-only'); END;`
+)
 
 type Store struct {
 	DB *sql.DB
@@ -409,7 +422,9 @@ func (s *Store) ChildSessions(parentSID string) ([]string, error) {
 
 // PendingSessions returns finished sessions that have no experience at
 // extractor_ver >= ver — the Deferred Perception queue, derived by query
-// (SCHEMA.md: no table needed).
+// (SCHEMA.md: no table needed). Sessions the owner has forgotten or amended
+// are excluded permanently (ADR-0033 Decision 4): 人間の知覚は最終知覚であり、
+// extractor 改版で機械が忘れた記憶を復活させ人の訂正を上書きしてはならない.
 func (s *Store) PendingSessions(ver int) ([]string, error) {
 	// ORDER BY id references a column outside the DISTINCT projection —
 	// rejected by strict SQL, accepted by SQLite (fixed backend, ADR-0004).
@@ -418,6 +433,9 @@ func (s *Store) PendingSessions(ver int) ([]string, error) {
 		WHERE type IN ('task.finished','task.cancelled')
 		  AND session_id NOT IN (
 		    SELECT session_id FROM experiences WHERE extractor_ver >= ?
+		  )
+		  AND session_id NOT IN (
+		    SELECT session_id FROM events WHERE type IN ('user.forgot','user.amended')
 		  )
 		ORDER BY id`, ver)
 	if err != nil {
@@ -494,6 +512,28 @@ func (s *Store) CurrentExperiences() ([]*core.Experience, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanExperiences(rows)
+}
+
+// CurrentExperiencesBySessionKind returns the current-generation rows of one
+// (session, kind) — the sibling set amend copies forward together, since
+// experiences_current picks the max extractor_ver per (session, kind) and
+// bumping only the target would drop the siblings from the view (ADR-0033
+// Decision 3).
+func (s *Store) CurrentExperiencesBySessionKind(sessionID, kind string) ([]*core.Experience, error) {
+	rows, err := s.DB.Query(`
+		SELECT id, session_id, ts, kind, extractor_ver, extractor_model,
+		       context, provider, outcome, source, plan
+		FROM experiences_current WHERE session_id = ? AND kind = ? ORDER BY ts, id`,
+		sessionID, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanExperiences(rows)
+}
+
+func scanExperiences(rows *sql.Rows) ([]*core.Experience, error) {
 	var out []*core.Experience
 	for rows.Next() {
 		e := &core.Experience{}
@@ -514,6 +554,22 @@ func (s *Store) CurrentExperiences() ([]*core.Experience, error) {
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// ExperienceSessionKind returns the (session, kind) of an experience id in any
+// generation. amend needs the pair to fetch the current generation it will
+// copy forward; found=false lets the caller tell "no such id" from "exists but
+// superseded" (ADR-0033 Decision 3).
+func (s *Store) ExperienceSessionKind(id string) (sessionID, kind string, found bool, err error) {
+	err = s.DB.QueryRow(`SELECT session_id, kind FROM experiences WHERE id = ?`, id).
+		Scan(&sessionID, &kind)
+	if err == sql.ErrNoRows {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return sessionID, kind, true, nil
 }
 
 // KnownValues returns the distinct values already recorded for a context
@@ -681,5 +737,232 @@ func (s *Store) ClearProjections() error {
 		return err
 	}
 	_, err := s.DB.Exec(`DELETE FROM surprise_ledger`)
+	return err
+}
+
+// ---- forgetting: the organ of forgetting (ADR-0033) ----
+
+// dedupStrings returns in's distinct elements in first-seen order.
+func dedupStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// inClause builds a "?,?,..." placeholder list and its args for an IN filter.
+func inClause(ids []string) (marks string, args []any) {
+	m := make([]string, len(ids))
+	args = make([]any, len(ids))
+	for i, id := range ids {
+		m[i] = "?"
+		args[i] = id
+	}
+	return strings.Join(m, ","), args
+}
+
+// ForgetExperiences physically deletes experiences by id and records a
+// user.forgot marker per affected session (ADR-0033 Decision 4/5). It runs in
+// one transaction: every id must exist first — a typo that silently no-ops
+// would forge a "忘れたつもり", the worst failure mode (Decision 5) — then the
+// append-only guard is dropped, the rows deleted, and the guard recreated, so a
+// crash rolls the trigger back with the rows. Returns the number deleted.
+func (s *Store) ForgetExperiences(tsMs int64, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, fmt.Errorf("forget: no experience ids given")
+	}
+	// Deduplicate up front so `--id e1 --id e1` neither double-lists e1 in the
+	// marker payload nor inflates the reported count above the rows deleted.
+	ids = dedupStrings(ids)
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	marks, args := inClause(ids)
+	rows, err := tx.Query(`SELECT id, session_id FROM experiences WHERE id IN (`+marks+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	sessionByID := map[string]string{}
+	for rows.Next() {
+		var id, sid string
+		if err := rows.Scan(&id, &sid); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		sessionByID[id] = sid
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+
+	// Input order, so both the missing-id report and each marker's id list are
+	// deterministic regardless of the SELECT's row order.
+	var missing []string
+	forgotBySession := map[string][]string{}
+	var sessions []string
+	for _, id := range ids {
+		sid, ok := sessionByID[id]
+		if !ok {
+			missing = append(missing, id)
+			continue
+		}
+		if _, seen := forgotBySession[sid]; !seen {
+			sessions = append(sessions, sid)
+		}
+		forgotBySession[sid] = append(forgotBySession[sid], id)
+	}
+	if len(missing) > 0 {
+		return 0, fmt.Errorf("forget: no such experience: %s", strings.Join(missing, ", "))
+	}
+
+	if _, err := tx.Exec(`DROP TRIGGER experiences_no_delete`); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(`DELETE FROM experiences WHERE id IN (`+marks+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(experiencesNoDeleteTrigger); err != nil {
+		return 0, err
+	}
+
+	sort.Strings(sessions)
+	for _, sid := range sessions {
+		payload, err := json.Marshal(map[string]any{"ids": forgotBySession[sid]})
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO events (session_id, seq, ts, type, payload)
+			VALUES (?, (SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE session_id = ?), ?, 'user.forgot', ?)`,
+			sid, sid, tsMs, string(payload)); err != nil {
+			return 0, err
+		}
+	}
+
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
+// ForgetSession physically deletes a whole session — events and experiences
+// both — the only way to erase raw-log content (ADR-0033 Decision 2). No marker
+// is written: the session vanishes from the events the queue derives from, so
+// there is nothing left to exclude (Decision 4). Both append-only guards drop
+// and come back inside the one transaction. Returns the counts deleted.
+func (s *Store) ForgetSession(sid string) (events, exps int, err error) {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+
+	if err = tx.QueryRow(`SELECT count(*) FROM events WHERE session_id = ?`, sid).Scan(&events); err != nil {
+		return 0, 0, err
+	}
+	if err = tx.QueryRow(`SELECT count(*) FROM experiences WHERE session_id = ?`, sid).Scan(&exps); err != nil {
+		return 0, 0, err
+	}
+	if events == 0 && exps == 0 {
+		return 0, 0, fmt.Errorf("forget: unknown session %q", sid)
+	}
+
+	if _, err = tx.Exec(`DROP TRIGGER events_no_delete`); err != nil {
+		return 0, 0, err
+	}
+	if _, err = tx.Exec(`DROP TRIGGER experiences_no_delete`); err != nil {
+		return 0, 0, err
+	}
+	if _, err = tx.Exec(`DELETE FROM events WHERE session_id = ?`, sid); err != nil {
+		return 0, 0, err
+	}
+	if _, err = tx.Exec(`DELETE FROM experiences WHERE session_id = ?`, sid); err != nil {
+		return 0, 0, err
+	}
+	if _, err = tx.Exec(eventsNoDeleteTrigger); err != nil {
+		return 0, 0, err
+	}
+	if _, err = tx.Exec(experiencesNoDeleteTrigger); err != nil {
+		return 0, 0, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return events, exps, nil
+}
+
+// AmendExperiences appends a new perception generation and records the
+// user.amended marker in one transaction (ADR-0033 Decision 3). It touches no
+// trigger: truth is only ever added to — amend is a human re-perception, and
+// the superseded rows stay as history.
+func (s *Store) AmendExperiences(exps []*core.Experience, markerSID string, tsMs int64, markerPayload map[string]any) error {
+	if len(exps) == 0 {
+		return fmt.Errorf("amend: no experiences to write")
+	}
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO experiences
+		  (id, session_id, ts, kind, extractor_ver, extractor_model,
+		   context, provider, outcome, source, plan)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for i, e := range exps {
+		provider := sql.NullString{String: e.Provider, Valid: e.Provider != ""}
+		plan := sql.NullString{String: e.Plan, Valid: e.Plan != ""}
+		if _, err := stmt.Exec(
+			e.ID, e.SessionID, e.TS, e.Kind, e.ExtractorVer, e.ExtractorModel,
+			core.MarshalContext(e.Context), provider,
+			core.MarshalOutcome(e.Outcome), e.Source, plan); err != nil {
+			return fmt.Errorf("insert amended experience %d/%d (id=%s): %w", i+1, len(exps), e.ID, err)
+		}
+	}
+
+	payload, err := json.Marshal(markerPayload)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO events (session_id, seq, ts, type, payload)
+		VALUES (?, (SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE session_id = ?), ?, 'user.amended', ?)`,
+		markerSID, markerSID, tsMs, string(payload)); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// Vacuum reclaims the space freed by forget so a "消した" is not the sovereign
+// lie of leaving the content in WAL frames or free pages (ADR-0033 Decision 5).
+// Run outside any transaction: VACUUM cannot run inside one.
+func (s *Store) Vacuum() error {
+	if _, err := s.DB.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return err
+	}
+	_, err := s.DB.Exec(`VACUUM`)
 	return err
 }

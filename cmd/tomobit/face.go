@@ -13,11 +13,17 @@ import (
 )
 
 // resolveFaceAutoLaunch is faceAutoLaunchEnabled's testable core: env
-// TOMOBIT_FACE overrides the config choice, ADR-0021's env > config order.
-// "0"/"1" decide it; an unrecognized value warns once and falls through to
-// config, so a typo never silently flips the default. A nil config choice is
-// the ADR-0025 default: on.
-func resolveFaceAutoLaunch(envVal string, envSet bool, configChoice *bool, warn io.Writer) bool {
+// TOMOBIT_FACE overrides the config choice, ADR-0021's env > config order. It
+// now folds in the TTY gate ADR-0025 kept in maybeLaunchFace, so the whole
+// decision lives in one pure place (ADR-0032 Decision 3):
+//
+//   - TOMOBIT_FACE=1 opts in explicitly and wins even off a terminal — the
+//     caller declared a person is on the other side of the pipe (the GUI does).
+//   - TOMOBIT_FACE=0 stops it, TTY or not.
+//   - Silent env (unset, or a bogus value warned about and treated as unset)
+//     keeps the machine-readable default: a non-TTY gets no window, and a TTY
+//     honors config face_auto_launch (nil = the ADR-0025 default, on).
+func resolveFaceAutoLaunch(envVal string, envSet bool, tty bool, configChoice *bool, warn io.Writer) bool {
 	if envSet {
 		switch envVal {
 		case "0":
@@ -25,8 +31,13 @@ func resolveFaceAutoLaunch(envVal string, envSet bool, configChoice *bool, warn 
 		case "1":
 			return true
 		default:
-			fmt.Fprintf(warn, "warning: TOMOBIT_FACE=%q は 0 か 1 のみ — 設定値にフォールバック\n", envVal)
+			fmt.Fprintf(warn, "warning: TOMOBIT_FACE=%q は 0 か 1 のみ — 未設定として扱う\n", envVal)
 		}
+	}
+	// A pipe or redirect takes no side effect unless opted into above (ADR-0008):
+	// config never crosses that line, so a script/CI/test never sprouts a window.
+	if !tty {
+		return false
 	}
 	if configChoice != nil {
 		return *configChoice
@@ -36,7 +47,7 @@ func resolveFaceAutoLaunch(envVal string, envSet bool, configChoice *bool, warn 
 
 func faceAutoLaunchEnabled() bool {
 	v, ok := os.LookupEnv("TOMOBIT_FACE")
-	return resolveFaceAutoLaunch(v, ok, cfg.FaceAutoLaunch, os.Stderr)
+	return resolveFaceAutoLaunch(v, ok, isTTY(os.Stdout), cfg.FaceAutoLaunch, os.Stderr)
 }
 
 // resolveFaceResident is faceResidentEnabled's testable core, a mirror of
@@ -66,18 +77,30 @@ func faceResidentEnabled() bool {
 	return resolveFaceResident(v, ok, cfg.FaceResident, os.Stderr)
 }
 
+// presenceRegistrationEligible reports whether this process should hold face
+// presence (ADR-0032 Decision 3): a TTY always, or an explicit TOMOBIT_FACE=1
+// even off a terminal. The env case is the pipe-borne window's lifeline — the
+// GUI opts in with =1, and without a presence its window would sit at 0 and
+// close on the grace timer (ADR-0027) the moment it opened, a dead window. A
+// bogus, absent, or =0 env off a TTY registers nothing: there is no window to
+// keep alive. Pure so the gate pins without a real terminal.
+func presenceRegistrationEligible(tty bool, envVal string, envSet bool) bool {
+	return tty || envSet && envVal == "1"
+}
+
 // registerPresence marks this CLI as a live conversation so the face window
 // counts it and stays open while it runs (ADR-0027 Decision 3). Best-effort: a
 // failure warns one honest line and returns a no-op release, never failing the
 // command — presence governs the window's lifetime, not the work. Call the
 // returned func (deferred) at the conversation's end.
 //
-// Gated on a TTY stdout, the same condition maybeLaunchFace uses: presence only
-// exists to govern a window's lifetime, and a pipe has no window (ADR-0025) — so
-// registering one would be a side effect on machine-readable output for nothing
-// to read it (ADR-0008).
+// Registered on a TTY or an explicit TOMOBIT_FACE=1 (ADR-0032 Decision 3), the
+// same reach the window's own gate has: presence exists to govern a window's
+// lifetime, so a pipe with no window (and no opt-in) registers nothing rather
+// than take a side effect on machine-readable output nobody watches (ADR-0008).
 func registerPresence(warn io.Writer) func() {
-	if !isTTY(os.Stdout) {
+	v, ok := os.LookupEnv("TOMOBIT_FACE")
+	if !presenceRegistrationEligible(isTTY(os.Stdout), v, ok) {
 		return func() {}
 	}
 	h, err := presence.Register()
@@ -92,10 +115,10 @@ func registerPresence(warn io.Writer) func() {
 // Decision 2), pointed at the DB the CLI resolved so both renderers read one
 // truth (ADR-0020). Best-effort: a missing binary or a launch failure warns
 // one honest line ("install it or turn it off") and never fails the command it
-// decorates. A non-TTY stdout skips it — a pipe has no desktop to show a
-// window on, and machine-readable output takes no side effects (ADR-0008).
+// decorates. The TTY gate now lives inside faceAutoLaunchEnabled (ADR-0032
+// Decision 3): a non-TTY skips launch unless TOMOBIT_FACE=1 opts in.
 func maybeLaunchFace(dbPath string) {
-	if !isTTY(os.Stdout) || !faceAutoLaunchEnabled() {
+	if !faceAutoLaunchEnabled() {
 		return
 	}
 	spawn := func() { spawnFace(dbPath, os.Stderr) }

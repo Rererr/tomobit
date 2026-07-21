@@ -212,6 +212,10 @@ func run(args []string) error {
 		return cmdPerceive(rest)
 	case "rebuild":
 		return cmdRebuild(rest)
+	case "forget":
+		return cmdForget(rest)
+	case "amend":
+		return cmdAmend(rest)
 	case "status":
 		return cmdStatus(rest)
 	case "setup":
@@ -251,11 +255,14 @@ usage:
                    姿は窓、声とテキストは端末。パイプ・リダイレクトなら見せて終わる
   tomobit chat     [--cap implement] [--provider claude-code|codex|human|auto]
                    [--permission-mode <mode>] [--timeout 0] [--size ...]
-                   [--backend ollama|mlx-lm] [--model <name>] [--url <addr>] ["<prompt>"]
+                   [--backend ollama|mlx-lm] [--model <name>] [--url <addr>]
+                   [--view ndjson] ["<prompt>"]
                    対話セッション(ADR-0022)。1つの会話 = 1つのタスク = 1つの経験。
                    ターンは同じスレッドを継ぐ。/new か /exit で区切ると
                    Feedback → 知覚 → Tomoの質問 が走る。/help でコマンド一覧
                    --backend/--model/--url は知覚(best-effort)の配線 — do と同じ解決順
+                   --view ndjson は stdout 全体を機械可読な view ストリームにする
+                   (ADR-0032、GUI向けオプトイン。TTYには出せない)
   tomobit do       [--cap implement] [--timeout 0] [--permission-mode <mode>]
                    [--provider claude-code|codex|human|auto]
                    [--plan auto|full|direct|quick|<steps>] [--size small|medium|large]
@@ -274,6 +281,15 @@ usage:
   tomobit record   --session <id> --type <event.type> [--json '{...}']
   tomobit perceive [--backend ollama|mlx-lm] [--model <name>] [--url <addr>]
   tomobit rebuild
+  tomobit forget   --id <exp-id> [--id ...] | --session <session-id> [--yes]
+                   忘却の器官(ADR-0033)。経験を物理削除(--id)、または生ログごと
+                   セッションを完全削除(--session)。削除後は同一コマンド内で
+                   自動rebuild + vacuum。不可逆なのでTTYはy/N、非対話は--yes必須。
+                   --session は子セッションを列挙するが消すのは指名分のみ
+  tomobit amend    --id <exp-id> [--context '<json>'] [--outcome '<json>'] [--provider <name>]
+                   経験の訂正(ADR-0033)。削除ではなく人間による再知覚として追記
+                   (現行世代のみ・過去世代は不可)。context/outcome/providerを
+                   全置換。key閉集合・provider登録名+humanに限定。自動rebuild
   tomobit status   same as no args
   tomobit setup    対話式でこの機械の配線を決める(claude profile / 知覚バックエンド / 顔窓)。
                    再実行すれば診断を兼ねる。書き先は ~/.tomobit/config.json
@@ -471,7 +487,7 @@ func cmdDo(args []string) error {
 		}
 	}
 
-	sid, adapter, human, err := openTask(s, *providerName, *capability, *size, prompt)
+	sid, adapter, human, err := openTask(s, os.Stdout, *providerName, *capability, *size, prompt)
 	if err != nil {
 		return err
 	}
@@ -499,7 +515,7 @@ func cmdDo(args []string) error {
 	var runErr error
 	var texts []string
 	if human {
-		result, runErr = runHuman(s, sid, stdin)
+		result, runErr = runHuman(s, os.Stdout, sid, stdin)
 		if runErr != nil {
 			return runErr
 		}
@@ -625,7 +641,7 @@ func recordEvent(s *store.Store, sid string, ev executor.Event, ts int64) error 
 // before recording anything), so it needs no second check; auto is resolved
 // after task.started/capability.started are recorded, exactly like a
 // top-level do, so its decision lands in the session it decided for.
-func openSubtask(s *store.Store, providerName, capability, size, sub, parentSID string) (subSID string, adapter executor.Adapter, human bool, err error) {
+func openSubtask(s *store.Store, out io.Writer, providerName, capability, size, sub, parentSID string) (subSID string, adapter executor.Adapter, human bool, err error) {
 	now := time.Now().UnixMilli()
 	subSID = store.NewID(now)
 	if err = s.AppendEvent(subSID, "task.started", now,
@@ -640,7 +656,7 @@ func openSubtask(s *store.Store, providerName, capability, size, sub, parentSID 
 	if providerName != "auto" {
 		return subSID, providers[providerName], false, nil
 	}
-	dec, err := autoDecide(s, subSID, capability, size)
+	dec, err := autoDecide(s, out, subSID, capability, size)
 	if err != nil {
 		return "", nil, false, err
 	}
@@ -823,12 +839,15 @@ func reflectWithIO(s *store.Store, snap *reflection.Snapshot, extras []reflectio
 // records the routing like any provider.selected, waits, and the ordinary
 // adoption/perception tail turns the work into a human experience on the
 // same ledger, same decay, same gate.
-func runHuman(s *store.Store, sid string, in *bufio.Reader) (executor.Result, error) {
+func runHuman(s *store.Store, out io.Writer, sid string, in *bufio.Reader) (executor.Result, error) {
 	if err := s.AppendEvent(sid, "provider.selected", time.Now().UnixMilli(),
 		map[string]any{"provider": "human"}); err != nil {
 		return executor.Result{}, err
 	}
-	fmt.Printf("\n「%s」\n", voice.RouteHuman())
+	// out, not os.Stdout: a chat's routing line must ride c.out so the NDJSON
+	// view stream stays intact (ADR-0032 Decision 1); do passes os.Stdout, so its
+	// output is byte-for-byte what it always was.
+	fmt.Fprintf(out, "\n「%s」\n", voice.RouteHuman())
 	// EOF (piped stdin) falls straight through: the adoption prompt then
 	// also sees EOF and records no signal, which is correct for a headless
 	// run that no human actually performed.
@@ -846,7 +865,7 @@ func runHuman(s *store.Store, sid string, in *bufio.Reader) (executor.Result, er
 // projections and is recorded into the very session it is deciding for.
 // human is a provider with no adapter (ADR-0018 Decision 2): the same ledger,
 // gate, and rehabilitation, executed by the user.
-func openTask(s *store.Store, providerName, capability, size, intent string) (sid string, adapter executor.Adapter, human bool, err error) {
+func openTask(s *store.Store, out io.Writer, providerName, capability, size, intent string) (sid string, adapter executor.Adapter, human bool, err error) {
 	human = providerName == "human"
 	if !human && providerName != "auto" {
 		if adapter, err = resolveProvider(providerName); err != nil {
@@ -866,7 +885,7 @@ func openTask(s *store.Store, providerName, capability, size, intent string) (si
 	}
 
 	if providerName == "auto" {
-		dec, err := autoDecide(s, sid, capability, size)
+		dec, err := autoDecide(s, out, sid, capability, size)
 		if err != nil {
 			return "", nil, false, err
 		}
@@ -996,7 +1015,7 @@ func stepPrompt(prompt, step string, i, total int) string {
 // choice. The seed is stored as a string: a UnixNano exceeds JSON's exact
 // float64 integer range and would silently lose the bits that make the
 // lottery replayable.
-func autoDecide(s *store.Store, sid, capability, size string) (decide.Decision, error) {
+func autoDecide(s *store.Store, out io.Writer, sid, capability, size string) (decide.Decision, error) {
 	conns, err := s.AllConnections()
 	if err != nil {
 		return decide.Decision{}, err
@@ -1023,18 +1042,21 @@ func autoDecide(s *store.Store, sid, capability, size string) (decide.Decision, 
 	if err := s.AppendEvent(sid, "tomo.decided", now.UnixMilli(), payload); err != nil {
 		return decide.Decision{}, err
 	}
-	// Operational log line (ADR-0009: machine channel, not Tomo's voice).
+	// Operational log line (ADR-0009: machine channel, not Tomo's voice). It
+	// rides out, not os.Stdout, so a chat's auto decision (openTask / a split's
+	// openSubtask) frames through c.out and never leaks a bare line into the
+	// NDJSON view stream (ADR-0032 Decision 1); do passes os.Stdout, unchanged.
 	if dec.Fallback {
-		fmt.Printf("decided %s (every provider below the gate — least pessimistic chosen)\n", dec.Provider)
+		fmt.Fprintf(out, "decided %s (every provider below the gate — least pessimistic chosen)\n", dec.Provider)
 	} else {
-		fmt.Printf("decided %s (n=%d)\n", dec.Provider, dec.N)
+		fmt.Fprintf(out, "decided %s (n=%d)\n", dec.Provider, dec.N)
 	}
 	// The calibrated voice (ADR-0019 Decision 1): confidence follows the
 	// judgment's wobble, measured with the same sampler the decision used.
 	// human speaks its own routing line in runHuman instead.
 	if dec.Provider != "human" {
 		w := decide.Wobble(conns, candidates, tokens, size, 64, 1, now.UnixMilli())
-		fmt.Printf("\n「%s」\n\n", voice.Decided(dec.Provider, w))
+		fmt.Fprintf(out, "\n「%s」\n\n", voice.Decided(dec.Provider, w))
 	}
 	return dec, nil
 }
@@ -1337,12 +1359,15 @@ func cmdStatus(args []string) error {
 		return err
 	}
 	defer s.Close()
-	return showStatus(s)
+	return showStatus(os.Stdout, s)
 }
 
 // showStatus draws the companion view on an already-open store, so a chat can
-// slip it between turns (/status) without opening the DB a second time.
-func showStatus(s *store.Store) error {
+// slip it between turns (/status) without opening the DB a second time. It
+// writes to w rather than os.Stdout directly (ADR-0032 Decision 1) so a chat's
+// /status can route through the framing writer that keeps stdout NDJSON; the
+// TTY gate still reads the real terminal, since w may be a wrapper around it.
+func showStatus(w io.Writer, s *store.Store) error {
 	conns, err := s.AllConnections()
 	if err != nil {
 		return err
@@ -1356,9 +1381,9 @@ func showStatus(s *store.Store) error {
 	tty := isTTY(os.Stdout)
 	// On a TTY the companion view sits at the chat's gutter, table included; a
 	// pipe gets the untouched machine-readable table flush left.
-	out := io.Writer(os.Stdout)
+	out := w
 	if tty {
-		out = newIndentWriter(os.Stdout, gutter)
+		out = newIndentWriter(w, gutter)
 	}
 	if tty {
 		greetIfReturned(out, s, conns, now)

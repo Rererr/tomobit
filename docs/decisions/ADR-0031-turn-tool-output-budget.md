@@ -94,3 +94,12 @@ N×40行まで積める。ADR-0030 Consequencesは「上限とdetail行が溺れ
   外す）でテストが落ちることを確認する
 - ADR-0030 Consequencesの「上限とdetailが溺れを防ぐ」は本ADRで訂正される
   （ADR-0030に追記）
+
+---
+
+## 追記（2026-07-19）: 予算の適用範囲 — NDJSON view は対象外
+
+本ADRの per-result・per-turn 上限は端末のスクリーンという物理への較正であり、
+turnView に住む。`tomobit chat --view ndjson`（[ADR-0032](ADR-0032-pipe-chat-first-class.md)
+Decision 1）の ndjsonView は tool_result を無加工・上限なしで流す — スクロールと
+折り畳みを持つ消費者（GUI）が表示予算を自分で決める。

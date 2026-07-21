@@ -59,6 +59,8 @@
 - [ADR-0029](docs/decisions/ADR-0029-perception-backend-choice.md) — 知覚バックエンドの選択（`perceive.MLXLM`をOllamaと並ぶExtractorとして追加 / mlx-lmは構造化出力が無くプロンプト＋Go側検証で「形」を保証 / configは`perceive_backend`＋バックエンド別URL・モデル / `--backend`フラグとextractor生成の1箇所集約 / setupはバックエンド選択→URL・モデル→診断）
 - [ADR-0030](docs/decisions/ADR-0030-provider-tool-output.md) — Providerのツール出力を表示専用で受け取る（tool_resultは表示専用キーで運び台帳はR3不変 / mdliteに通さずSGRのみ通す＝色は残しレイアウト破壊を防ぐ / 先頭優先で上限に切る / codexも対称。ターン総量はADR-0031が追補）
 - [ADR-0031](docs/decisions/ADR-0031-turn-tool-output-budget.md) — ターンのツール出力表示予算（per-result上限はNで積む洪水を縛れない / turnViewにターン累積予算＝先頭優先のターンスケール拡張 / 予算切れは一度だけ省略行を出し以後沈黙・detail行と本文textは予算外 / 上限値は実stream計測で較正）
+- [ADR-0032](docs/decisions/ADR-0032-pipe-chat-first-class.md) — pipe chatのGUI一級市民化（`chat --view ndjson`＝stdout全体をNDJSON viewストリームにするオプトイン・台帳はR3不変 / cookedの行継続＝末尾`\`はrawの`\`+Enterと同じ意味論 / `TOMOBIT_FACE=1`の明示はpipeでも顔窓を出す＝TTYゲートはenv沈黙時の既定へ改版・presenceも同条件）
+- [ADR-0033](docs/decisions/ADR-0033-organ-of-forgetting.md) — 忘却の器官（忘却は主権の行使＝人間の動詞・Tomoは提案も実行もしない / `forget`＝物理削除+VACUUM・`amend`＝人間による再知覚（追記） / 人の手が入ったセッションは再知覚しない / 直後に自動rebuildで射影整合）
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。
@@ -90,6 +92,11 @@ tomobit do [--provider claude-code|codex] [--cap <capability>] "<prompt>"
 tomobit record  --session <id> --type <event.type> [--json '{...}']
 tomobit perceive   # 未知覚セッションをOllamaかMLX LM Server（既定はconfig/OS解決 — ADR-0029）で経験化しConnectionへ反映
 tomobit rebuild    # 射影を破棄しexperiencesから再構築（決定的 — 姿も再現される）
+tomobit forget  --id <exp-id> [--id ...] | --session <id>  [--yes]
+                   # 経験/セッションの物理削除（自動rebuild+VACUUM。非TTYは--yes必須。
+                   # 忘却は人間の動詞 — ADR-0033）
+tomobit amend   --id <exp-id> [--context '<json>'] [--outcome '<json>'] [--provider <name>]
+                   # 経験の訂正＝人間による再知覚（追記・自動rebuild — ADR-0033）
 tomobit status     # 相棒ビュー（見て終わる）
 tomobit-face       # Tomoのマスコット窓（表示専用・DBは読み取りのみ — ADR-0020）
 ```

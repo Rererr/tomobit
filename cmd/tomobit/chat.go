@@ -9,6 +9,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -103,6 +104,12 @@ type chat struct {
 	// its own over os.Stdin could not see what this one has already pulled in.
 	in  *bufio.Reader
 	out io.Writer
+	// stream is non-nil only under --view ndjson (ADR-0032 Decision 1): the
+	// single writer of the NDJSON view stream. When set, out is a note-framing
+	// writer over it and the turn view is an ndjsonView, so every byte of stdout
+	// is one JSON view event. nil is the plain-text default — the pipe/script
+	// path, byte-for-byte unchanged.
+	stream *ndjsonStream
 
 	providerName string
 	capability   string
@@ -136,8 +143,14 @@ func cmdChat(args []string) error {
 	backend := fs.String("backend", "", "perception backend for best-effort perception: ollama|mlx-lm (default: resolved from config)")
 	model := fs.String("model", "", "perception model for best-effort perception (default depends on --backend)")
 	url := fs.String("url", "", "perception backend url for best-effort perception (default depends on --backend)")
+	view := fs.String("view", "", "stdout view stream: ndjson (default: plain text)")
 	fs.Parse(args)
 
+	// The view choice validates before anything launches, like the provider: a
+	// bad value or a TTY target is a mistake to catch at the door, not one turn in.
+	if err := validateViewFlag(*view, isTTY(os.Stdout)); err != nil {
+		return err
+	}
 	// Both fail before the store is even opened, like `do`: a chat that
 	// cannot launch anything is not a chat, and finding out one prompt later
 	// would already have cost the user their first typed task.
@@ -164,6 +177,27 @@ func cmdChat(args []string) error {
 	if styled() {
 		ed.TextStyle = inputBg
 	}
+
+	// Under --view ndjson, stdout becomes the NDJSON view stream (ADR-0032
+	// Decision 1). The framing writer wraps every plain-text write (organ speech,
+	// sayln, showStatus) into a note event, and the flush hook under the shared
+	// reader releases a partial question line as an await note the moment a read
+	// blocks (flush-on-read). The editor keeps history — the same db-adjacent
+	// file — and reads through the same hooked reader, so a prompt between turns
+	// shares it. init opens the stream.
+	var stream *ndjsonStream
+	out := io.Writer(os.Stdout)
+	if *view == "ndjson" {
+		stream = newNDJSONStream(os.Stdout)
+		ed.SetReader(flushReader{r: os.Stdin, flush: stream.flushAwait})
+		out = noteWriter{s: stream}
+		stream.emit(map[string]any{"type": "init", "v": viewVersion})
+	}
+
+	// ensureClaudeProfile still writes its prompt to os.Stdout directly, but that
+	// write cannot corrupt the view stream: it only fires in the interactive
+	// branch (ADR-0021 Decision 4), and view mode forces a non-TTY stdout →
+	// non-interactive → the hard-error branch, which writes nothing to stdout.
 	if err := ensureClaudeProfile(ed.Reader(), *providerName); err != nil {
 		return err
 	}
@@ -185,7 +219,7 @@ func cmdChat(args []string) error {
 		return err
 	}
 	c := &chat{
-		s: s, ed: ed, in: ed.Reader(), out: os.Stdout,
+		s: s, ed: ed, in: ed.Reader(), out: out, stream: stream,
 		providerName: *providerName, capability: *capability,
 		permMode: *permMode, timeout: *timeout, size: *size,
 		extractor:   extractor,
@@ -193,13 +227,19 @@ func cmdChat(args []string) error {
 	}
 	ed.Completer = c.complete
 	// The first screen is the companion view (ADR-0008), and its next line is
-	// the prompt (ADR-0022 Decision 4): you meet Tomo and you can talk.
+	// the prompt (ADR-0022 Decision 4): you meet Tomo and you can talk. A pipe —
+	// view stream or plain — skips the greeting, as it always has.
 	if isTTY(os.Stdout) {
-		if err := showStatus(s); err != nil {
+		if err := showStatus(c.out, s); err != nil {
 			return err
 		}
 		c.sayln(dim("話しかけて。/help でコマンド、Ctrl-D で終了"))
 		fmt.Fprintln(c.out)
+	}
+	// A note left half-written when the chat ends (no read followed to flush it)
+	// is emitted rather than dropped at stdout's close (ADR-0032 Decision 1).
+	if stream != nil {
+		defer stream.flushClose()
 	}
 	return c.loop(strings.TrimSpace(strings.Join(fs.Args(), " ")))
 }
@@ -212,8 +252,16 @@ func (c *chat) loop(seed string) error {
 		line := seed
 		seed = ""
 		if line == "" {
+			// The view stream marks the input wait with a ready event instead of
+			// the ` ❯ ` marker, and prints no prompt (ADR-0032 Decision 1). A seed
+			// turn skips this — it is not standing at the prompt.
+			prompt := chatPrompt
+			if c.stream != nil {
+				c.stream.emit(map[string]any{"type": "ready"})
+				prompt = ""
+			}
 			var err error
-			line, err = c.ed.ReadLine(chatPrompt)
+			line, err = c.ed.ReadLine(prompt)
 			switch {
 			case errors.Is(err, lineedit.ErrInterrupt):
 				// Ctrl-C at an empty prompt is ambiguous — leaving, or
@@ -290,7 +338,7 @@ func (c *chat) command(line string) (done bool, err error) {
 		// decision (ADR-0012's n).
 		c.setWiring(&c.size, arg, "size", nil)
 	case "/status":
-		return false, showStatus(c.s)
+		return false, showStatus(c.out, c.s)
 	case "/help":
 		chatUsage(c.out)
 	default:
@@ -423,12 +471,17 @@ func (c *chat) turn(prompt string) error {
 // startTask opens the ledger session: the first prompt is the task's intent,
 // and the provider is chosen once, for the whole conversation.
 func (c *chat) startTask(prompt string) error {
-	sid, adapter, human, err := openTask(c.s, c.providerName, c.capability, c.size, prompt)
+	sid, adapter, human, err := openTask(c.s, c.out, c.providerName, c.capability, c.size, prompt)
 	if err != nil {
 		return err
 	}
 	c.sid, c.adapter, c.human = sid, adapter, human
 	c.turns, c.completed, c.threadID = 1, false, ""
+	// The view stream names the open task by its ledger session id (ADR-0032
+	// Decision 1), so a GUI can tie later events to the same task.finished.
+	if c.stream != nil {
+		c.stream.emit(map[string]any{"type": "task.started", "sid": c.sid})
+	}
 
 	if c.human {
 		// The Human Executor (ADR-0018 Decision 2) inside a chat: the routing
@@ -469,7 +522,7 @@ func (c *chat) run(prompt string, opening bool) error {
 		runPrompt = subtask.Instruction(prompt)
 	}
 
-	v := newTurnView(c.out, c.adapter.Name())
+	v := c.newView(c.adapter.Name())
 	sink := func(ev executor.Event, ts int64) error {
 		// The thread id arrives on provider.selected (both adapters) and
 		// again on provider.finished; the newest wins, so a CLI that forks a
@@ -672,18 +725,33 @@ func (c *chat) closeTask() error {
 	c.adapter, c.human, c.completed = nil, false, false
 
 	if !completed {
-		return c.s.AppendEvent(sid, "task.cancelled", time.Now().UnixMilli(), nil)
+		if err := c.s.AppendEvent(sid, "task.cancelled", time.Now().UnixMilli(), nil); err != nil {
+			return err
+		}
+		if c.stream != nil {
+			c.stream.emit(map[string]any{"type": "task.cancelled", "sid": sid})
+		}
+		return nil
 	}
 	// The boundary organs (Feedback → 知覚 → Tomo) sit at the same gutter as the
 	// conversation. They print through a mix of this writer and, in other
 	// packages, plain lines; an indenting writer guttes them all at once. TTY
-	// only — a pipe reads the organs raw, at column 0.
+	// only — a pipe (view stream or plain) reads the organs raw, at column 0; in
+	// view mode c.out already frames each line into a note event.
 	out := io.Writer(c.out)
 	if isTTY(os.Stdout) {
 		out = newIndentWriter(c.out, gutter)
 	}
 	c.gap()
-	return finishTask(c.s, sid, c.in, out, true, c.extractor)
+	if err := finishTask(c.s, sid, c.in, out, true, c.extractor); err != nil {
+		return err
+	}
+	// task.finished closes the stream's task after the boundary organs have run
+	// (ADR-0032 Decision 1: 境界の器官が済んだ後).
+	if c.stream != nil {
+		c.stream.emit(map[string]any{"type": "task.finished", "sid": sid})
+	}
+	return nil
 }
 
 func chatUsage(w io.Writer) {
@@ -978,4 +1046,221 @@ func (c *chat) sayln(s string) {
 		s = indent(s)
 	}
 	fmt.Fprintln(c.out, s)
+}
+
+// viewVersion is the NDJSON view stream's contract version (ADR-0032 Decision
+// 1): a consumer ignores unknown types, so adding one is compatible; changing
+// or dropping a meaning bumps this.
+const viewVersion = 1
+
+// validateViewFlag checks --view and its target (ADR-0032 Decision 1). "" is
+// the plain-text default; "ndjson" the machine stream, which refuses a TTY —
+// view mode is built on all the terminal gates (gutter, gap, markdown-lite)
+// being shut, and a terminal would put every one back in question (`| jq` is
+// the debugging path). Pure, so the rejection pins without a real terminal.
+func validateViewFlag(view string, stdoutTTY bool) error {
+	switch view {
+	case "":
+		return nil
+	case "ndjson":
+		if stdoutTTY {
+			return fmt.Errorf("--view ndjson は端末には出せない — パイプして使う（例: | jq）")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown --view %q (ndjson)", view)
+	}
+}
+
+// view renders one turn for a reader. turnView draws it for a human at a
+// terminal; ndjsonView emits it as machine events for a GUI (ADR-0032 Decision
+// 1). run() drives whichever the session opened with through the same three
+// calls, so the turn loop stays unaware which reader is downstream.
+type view interface {
+	begin()
+	show(ev executor.Event)
+	end(result executor.Result)
+}
+
+// newView builds the turn's view for the session's mode: the NDJSON stream when
+// one is wired, the terminal turnView otherwise. The turn number rides along so
+// a fold-back feed turn (run with opening=false) repeats its parent's n, which
+// c.turns already holds unchanged (ADR-0032 Decision 1).
+func (c *chat) newView(name string) view {
+	if c.stream != nil {
+		return &ndjsonView{s: c.stream, name: name, n: c.turns}
+	}
+	return newTurnView(c.out, name)
+}
+
+// ndjsonStream is the single writer of the NDJSON view stream (ADR-0032
+// Decision 1). Every line of stdout — the typed view events and the plain-text
+// notes the organs still print — goes through emit, so the two never interleave
+// mid-line. It carries no lock, deliberately: view mode forces a non-TTY stdout
+// (validated at startup), which forces a non-interactive session, which keeps
+// split sequential — so turnView's spinner and split's parallel goroutines, the
+// only second writers this file has, never run here. show() runs on Run's one
+// synchronous stdout goroutine; the note writer and flush hook run on the main
+// goroutine between turns, and Run never reads our stdin, so the two never
+// overlap. The reasoning turnView records for its unlocked toolBudget, again.
+type ndjsonStream struct {
+	enc     *json.Encoder
+	pending []byte // a note line written without its terminating newline yet
+}
+
+func newNDJSONStream(w io.Writer) *ndjsonStream {
+	enc := json.NewEncoder(w)
+	// The view carries raw markdown and code, not HTML — keep <, > and & literal
+	// so a consumer's string match sees the text the provider actually wrote.
+	enc.SetEscapeHTML(false)
+	return &ndjsonStream{enc: enc}
+}
+
+// emit writes one view event as a line of JSON. A write error (a closed pipe —
+// the GUI went away) is dropped, as turnView drops its own writes: the stream
+// is a view, and there is nothing left to tell once its reader is gone.
+func (n *ndjsonStream) emit(ev map[string]any) { _ = n.enc.Encode(ev) }
+
+// flushAwait releases a buffered partial note when a read reaches stdin's
+// bottom (ADR-0032 Decision 1: flush-on-read), tagging it await so an
+// interactive consumer knows this line — the Feedback question — is the one
+// blocking for input. await is a best-effort signal, not a guarantee: when
+// stdin is written in one batch (a script that flushes the whole conversation
+// up front), the shared bufio's read-ahead already holds the answer, so the
+// read never reaches bottom here — the note then arrives unmarked, carried out
+// later by the next full line or flushClose. That is the contract's shape, not
+// a breach: whoever batch-wrote the input is not waiting on the signal. A GUI
+// that feeds one line at a time always reaches bottom and always gets await.
+func (n *ndjsonStream) flushAwait() {
+	if len(n.pending) == 0 {
+		return
+	}
+	n.emit(map[string]any{"type": "note", "text": string(n.pending), "await": true})
+	n.pending = n.pending[:0]
+}
+
+// flushClose emits any leftover partial note as the chat ends, so a note
+// written without a trailing newline is not lost when stdout closes.
+func (n *ndjsonStream) flushClose() {
+	if len(n.pending) == 0 {
+		return
+	}
+	n.emit(map[string]any{"type": "note", "text": string(n.pending)})
+	n.pending = n.pending[:0]
+}
+
+// noteWriter frames the chat's plain-text stdout writes — organ speech, sayln,
+// showStatus, chatUsage — into note events on the shared stream, so stdout stays
+// entirely NDJSON in view mode (ADR-0032 Decision 1). Writes split on '\n': each
+// complete line becomes a note; a trailing partial line waits in the stream's
+// pending buffer until a newline completes it, the chat ends (flushClose), or a
+// read blocks (flushAwait) — the flush-on-read the Feedback question rides.
+//
+// An empty line emits no note: speaker-separation blanks are the terminal's
+// typography, the same gutter/gap discipline that never crosses the pipe
+// (ADR-0032 Decision 1: layout is for the terminal), so the view is spared a
+// stream of contentless notes.
+type noteWriter struct{ s *ndjsonStream }
+
+func (w noteWriter) Write(p []byte) (int, error) {
+	for _, b := range p {
+		if b == '\n' {
+			if len(w.s.pending) > 0 {
+				w.s.emit(map[string]any{"type": "note", "text": string(w.s.pending)})
+				w.s.pending = w.s.pending[:0]
+			}
+		} else {
+			w.s.pending = append(w.s.pending, b)
+		}
+	}
+	return len(p), nil
+}
+
+// flushReader calls flush just before each read that reaches the underlying
+// reader — os.Stdin, beneath the shared bufio (ADR-0032 Decision 1). bufio pulls
+// from here only when its buffer is drained, so this is the one place the "a
+// read reached bottom" moment is observable: above the bufio a buffered read
+// returns without ever touching this. It is the block-detection point, not a
+// guarantee a block happened — a batch-written stdin can satisfy the read from
+// read-ahead and never reach here (see flushAwait).
+type flushReader struct {
+	r     io.Reader
+	flush func()
+}
+
+func (f flushReader) Read(p []byte) (int, error) {
+	f.flush()
+	return f.r.Read(p)
+}
+
+// ndjsonView renders one turn as NDJSON view events (ADR-0032 Decision 1), the
+// machine counterpart to turnView. It shares the stream with the note writer so
+// its typed events never interleave mid-line with the organs' notes. It has no
+// spinner, gutter, mdlite or tool budget — those are terminal physics
+// (ADR-0030/0031); the NDJSON consumer owns its own presentation, so tool_result
+// flows through raw and uncapped, the budget staying on turnView's side.
+type ndjsonView struct {
+	s       *ndjsonStream
+	name    string
+	n       int
+	started time.Time
+	cost    float64
+}
+
+func (v *ndjsonView) begin() {
+	v.started = time.Now()
+	v.s.emit(map[string]any{"type": "turn.started", "n": v.n, "provider": v.name})
+}
+
+func (v *ndjsonView) show(ev executor.Event) {
+	switch ev.Type {
+	case executor.EventProviderSelected:
+		// The auto answer-check: which provider — and model, when reported — the
+		// turn actually ran on.
+		out := map[string]any{"type": "provider", "name": v.name}
+		if p, ok := ev.Payload["provider"].(string); ok && p != "" {
+			out["name"] = p
+		}
+		if m, ok := ev.Payload["model"].(string); ok && m != "" {
+			out["model"] = m
+		}
+		v.s.emit(out)
+	case executor.EventProviderOutput:
+		if t, ok := ev.Payload["text"].(string); ok && t != "" {
+			v.s.emit(map[string]any{"type": "text", "text": t})
+			return
+		}
+		if r, ok := ev.Payload[executor.PayloadToolResult].(string); ok && r != "" {
+			v.s.emit(map[string]any{"type": "tool_result", "text": r})
+			return
+		}
+		if tool, ok := ev.Payload["tool"].(string); ok && tool != "" {
+			out := map[string]any{"type": "tool", "name": tool}
+			if d, ok := ev.Payload[executor.PayloadDetail].(string); ok && d != "" {
+				out["detail"] = d
+			}
+			v.s.emit(out)
+		}
+	case executor.EventProviderFinished:
+		if c, ok := ev.Payload["cost_usd"].(float64); ok {
+			v.cost = c
+		}
+	case executor.EventProviderError:
+		if msg, ok := ev.Payload["message"].(string); ok && msg != "" {
+			v.s.emit(map[string]any{"type": "error", "message": msg})
+		}
+	}
+}
+
+func (v *ndjsonView) end(result executor.Result) {
+	out := map[string]any{
+		"type":        "turn.finished",
+		"n":           v.n,
+		"started":     result.Started,
+		"duration_ms": result.Duration.Milliseconds(),
+	}
+	if v.cost > 0 {
+		out["cost_usd"] = v.cost
+	}
+	v.s.emit(out)
 }

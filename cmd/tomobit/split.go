@@ -289,7 +289,7 @@ func runSubtasksSequential(ctx context.Context, s *store.Store, parentSID string
 func runSubtaskSequential(ctx context.Context, s *store.Store, parentSID, sub string, gi, total int,
 	providerName, capability, size, parentIntent, permMode string, timeout time.Duration,
 	in *bufio.Reader, out io.Writer) (failed, cancelled bool, err error) {
-	sid, adapter, human, err := openSubtask(s, providerName, capability, size, sub, parentSID)
+	sid, adapter, human, err := openSubtask(s, out, providerName, capability, size, sub, parentSID)
 	if err != nil {
 		return false, false, err
 	}
@@ -299,7 +299,7 @@ func runSubtaskSequential(ctx context.Context, s *store.Store, parentSID, sub st
 	var runErr error
 	if human {
 		fmt.Fprintln(out, prompt)
-		result, runErr = runHuman(s, sid, in)
+		result, runErr = runHuman(s, out, sid, in)
 		if runErr != nil {
 			return false, false, runErr
 		}
@@ -350,7 +350,7 @@ func runGroupParallel(ctx context.Context, s *store.Store, parentSID string, gro
 	members := make([]member, len(group))
 	sids := make([]string, len(group))
 	for k, sub := range group {
-		sid, adapter, human, err := openSubtask(s, providerName, capability, size, sub, parentSID)
+		sid, adapter, human, err := openSubtask(s, out, providerName, capability, size, sub, parentSID)
 		if err != nil {
 			return false, false, err
 		}
@@ -396,7 +396,7 @@ func runGroupParallel(ctx context.Context, s *store.Store, parentSID string, gro
 			continue
 		}
 		fmt.Fprintln(out, subtask.Prompt(parentIntent, members[k].sub, members[k].gi, total))
-		results[k], runErrs[k] = runHuman(s, members[k].sid, in)
+		results[k], runErrs[k] = runHuman(s, out, members[k].sid, in)
 		if runErrs[k] != nil {
 			return false, false, runErrs[k]
 		}

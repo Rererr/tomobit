@@ -49,6 +49,11 @@ func TestWireClaudePrecedence(t *testing.T) {
 	dir := "/cfg/profile"
 	cfg, cfgErr = config.Config{ClaudeConfigDir: &dir, ClaudeArgs: []string{"--from-config"}}, nil
 
+	// The GUI exports TOMOBIT_CLAUDE_ARGS_APPEND (speaking style), so a shell
+	// that ran it would leak an append into every resolution below.
+	t.Setenv("TOMOBIT_CLAUDE_ARGS_APPEND", "x")
+	os.Unsetenv("TOMOBIT_CLAUDE_ARGS_APPEND")
+
 	t.Run("config alone wires the adapter", func(t *testing.T) {
 		// Ensure the env var is absent even if the developer's shell has it.
 		t.Setenv("TOMOBIT_CLAUDE_CONFIG_DIR", "x")

@@ -177,7 +177,7 @@ func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, cap
 	childSID := [2]string{}
 	adapter := [2]executor.Adapter{}
 	for i, p := range pair {
-		sid, a, _, err := openSubtask(s, p, capability, size, prompt, parentSID)
+		sid, a, _, err := openSubtask(s, out, p, capability, size, prompt, parentSID)
 		if err != nil {
 			return err
 		}

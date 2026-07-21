@@ -537,6 +537,282 @@ func currentByID(t *testing.T, s *Store, id string) *core.Experience {
 	return nil
 }
 
+// ---- the organ of forgetting (ADR-0033) ----
+
+// TestForgetTriggerDDLMatchesSchema proves the recreated append-only guards are
+// byte-identical to the ones Open installs (ADR-0033 Decision 5: schema定数と
+// 同一DDL) — the drift guard the forget transaction's correctness rests on.
+func TestForgetTriggerDDLMatchesSchema(t *testing.T) {
+	if !strings.Contains(schema, eventsNoDeleteTrigger) {
+		t.Error("eventsNoDeleteTrigger must match the schema's events_no_delete DDL verbatim")
+	}
+	if !strings.Contains(schema, experiencesNoDeleteTrigger) {
+		t.Error("experiencesNoDeleteTrigger must match the schema's experiences_no_delete DDL verbatim")
+	}
+}
+
+// TestForgetExperiences (ADR-0033 Decision 4/5): named experiences vanish, each
+// affected session gets a user.forgot marker carrying only its own deleted ids
+// at the next seq, and the append-only guard is back — a raw DELETE is rejected
+// again, proving the trigger was recreated inside the transaction.
+func TestForgetExperiences(t *testing.T) {
+	s := openTest(t)
+	mustAppend(t, s, "s1", "task.started", 100)
+	mustAppend(t, s, "s1", "task.finished", 200)
+	insertExp(t, s, "e1", "s1", core.KindExecution, 1)
+	insertExp(t, s, "e2", "s1", core.KindPreference, 1)
+	insertExp(t, s, "e3", "s2", core.KindExecution, 1)
+
+	n, err := s.ForgetExperiences(500, []string{"e1", "e3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("forgot count: got %d, want 2", n)
+	}
+
+	remaining := map[string]bool{}
+	cur, err := s.CurrentExperiences()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range cur {
+		remaining[e.ID] = true
+	}
+	if remaining["e1"] || remaining["e3"] {
+		t.Errorf("forgotten experiences must be gone, got %v", remaining)
+	}
+	if !remaining["e2"] {
+		t.Error("an untouched experience must survive")
+	}
+
+	// s1's marker carries only e1, at the seq after its two events.
+	s1ev := lastEventOfType(t, s, "s1", "user.forgot")
+	if s1ev.Seq != 3 {
+		t.Errorf("s1 user.forgot seq: got %d, want 3 (after task.started/finished)", s1ev.Seq)
+	}
+	if got := forgotIDs(t, s1ev.Payload); strings.Join(got, ",") != "e1" {
+		t.Errorf("s1 marker ids: got %v, want [e1] (only that session's deletion)", got)
+	}
+	// s2 had no prior events, so its marker starts the sequence.
+	s2ev := lastEventOfType(t, s, "s2", "user.forgot")
+	if s2ev.Seq != 1 {
+		t.Errorf("s2 user.forgot seq: got %d, want 1", s2ev.Seq)
+	}
+	if got := forgotIDs(t, s2ev.Payload); strings.Join(got, ",") != "e3" {
+		t.Errorf("s2 marker ids: got %v, want [e3]", got)
+	}
+
+	if _, err := s.DB.Exec(`DELETE FROM experiences WHERE id = 'e2'`); err == nil ||
+		!strings.Contains(err.Error(), "append-only") {
+		t.Errorf("the append-only guard must be recreated after forget, got %v", err)
+	}
+}
+
+// TestForgetExperiencesUnknownIDRollsBackEverything (ADR-0033 Decision 5): one
+// missing id aborts the whole batch — no row deleted, no marker written — so a
+// typo can never forge a partial "忘れたつもり".
+func TestForgetExperiencesUnknownIDRollsBackEverything(t *testing.T) {
+	s := openTest(t)
+	insertExp(t, s, "e1", "s1", core.KindExecution, 1)
+
+	_, err := s.ForgetExperiences(500, []string{"e1", "ghost"})
+	if err == nil || !strings.Contains(err.Error(), "ghost") {
+		t.Fatalf("a missing id must error naming it, got %v", err)
+	}
+
+	var exps int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM experiences`).Scan(&exps); err != nil {
+		t.Fatal(err)
+	}
+	if exps != 1 {
+		t.Errorf("no experience may be deleted on rollback, got %d", exps)
+	}
+	if n := countType(t, s, "user.forgot"); n != 0 {
+		t.Errorf("no marker may be written on rollback, got %d", n)
+	}
+}
+
+// TestForgetExperiencesDeduplicatesIDs (ADR-0033): a repeated --id counts once
+// and the marker lists it once — no double-delete illusion, no duplicated ids.
+func TestForgetExperiencesDeduplicatesIDs(t *testing.T) {
+	s := openTest(t)
+	insertExp(t, s, "e1", "s1", core.KindExecution, 1)
+
+	n, err := s.ForgetExperiences(500, []string{"e1", "e1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("a duplicate id must count once, got %d", n)
+	}
+	ev := lastEventOfType(t, s, "s1", "user.forgot")
+	if got := forgotIDs(t, ev.Payload); strings.Join(got, ",") != "e1" {
+		t.Errorf("marker ids must be deduplicated, got %v", got)
+	}
+}
+
+// TestForgetSession (ADR-0033 Decision 2/4): a whole session's events and
+// experiences are erased, no marker is written (the session leaves the events
+// the queue derives from), an unknown session errors, and both guards return.
+func TestForgetSession(t *testing.T) {
+	s := openTest(t)
+	mustAppend(t, s, "s", "task.started", 100)
+	mustAppend(t, s, "s", "task.finished", 200)
+	insertExp(t, s, "e1", "s", core.KindExecution, 1)
+	insertExp(t, s, "e2", "s", core.KindPreference, 1)
+	// A second session keeps a row in each table so the recreated guards have
+	// something to fire on afterwards.
+	mustAppend(t, s, "keep", "task.started", 300)
+	insertExp(t, s, "k1", "keep", core.KindExecution, 1)
+
+	events, exps, err := s.ForgetSession("s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events != 2 || exps != 2 {
+		t.Errorf("deleted counts: got (%d events, %d experiences), want (2, 2)", events, exps)
+	}
+	if got, _ := s.EventsBySession("s"); len(got) != 0 {
+		t.Errorf("session events must be gone, got %v", got)
+	}
+	if n := countType(t, s, "user.forgot"); n != 0 {
+		t.Errorf("forget --session writes no marker (events vanish), got %d", n)
+	}
+
+	if _, _, err := s.ForgetSession("nope"); err == nil ||
+		!strings.Contains(err.Error(), "unknown session") {
+		t.Errorf("an unknown session must error, got %v", err)
+	}
+
+	if _, err := s.DB.Exec(`DELETE FROM events WHERE session_id = 'keep'`); err == nil ||
+		!strings.Contains(err.Error(), "append-only") {
+		t.Errorf("events guard must be recreated, got %v", err)
+	}
+	if _, err := s.DB.Exec(`DELETE FROM experiences WHERE id = 'k1'`); err == nil ||
+		!strings.Contains(err.Error(), "append-only") {
+		t.Errorf("experiences guard must be recreated, got %v", err)
+	}
+}
+
+// TestPendingSessionsExcludesForgottenAndAmended (ADR-0033 Decision 4): a
+// session the owner forgot or amended is dropped from the Deferred Perception
+// queue permanently — even a higher extractor_ver query, which would otherwise
+// re-pend it, must not resurrect the machine's re-perception of it.
+func TestPendingSessionsExcludesForgottenAndAmended(t *testing.T) {
+	s := openTest(t)
+	for _, sess := range []string{"forgot", "amended", "normal"} {
+		mustAppend(t, s, sess, "task.finished", 100)
+		insertExp(t, s, "x-"+sess, sess, core.KindExecution, 1)
+	}
+	mustAppend(t, s, "forgot", "user.forgot", 200)
+	mustAppend(t, s, "amended", "user.amended", 200)
+
+	got, err := s.PendingSessions(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "normal" {
+		t.Errorf("only the unmarked session stays pending at a higher ver, got %v", got)
+	}
+}
+
+// TestAmendExperiencesAppendsNewGeneration (ADR-0033 Decision 3): the amended
+// generation is added, the current view returns it (siblings included) while
+// the superseded rows remain in the truth table, and the user.amended marker
+// lands in the session.
+func TestAmendExperiencesAppendsNewGeneration(t *testing.T) {
+	s := openTest(t)
+	insertExp(t, s, "e1", "s", core.KindExecution, 1)
+	insertExp(t, s, "e2", "s", core.KindExecution, 1)
+
+	next := []*core.Experience{
+		{ID: "n1", SessionID: "s", TS: 1, Kind: core.KindExecution, ExtractorVer: 2,
+			ExtractorModel: "human", Context: map[string]string{"lang": "go"},
+			Outcome: core.Outcome{Adopted: "as-is"}, Source: "production"},
+		{ID: "n2", SessionID: "s", TS: 1, Kind: core.KindExecution, ExtractorVer: 2,
+			ExtractorModel: "none", Context: map[string]string{}, Outcome: core.Outcome{}, Source: "production"},
+	}
+	if err := s.AmendExperiences(next, "s", 300, map[string]any{"id": "e1", "ver": 2}); err != nil {
+		t.Fatal(err)
+	}
+
+	cur, err := s.CurrentExperiences()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, e := range cur {
+		ids[e.ID] = true
+	}
+	if !ids["n1"] || !ids["n2"] {
+		t.Errorf("current view must return the whole new generation, got %v", ids)
+	}
+	if ids["e1"] || ids["e2"] {
+		t.Errorf("superseded rows must leave the current view, got %v", ids)
+	}
+
+	var total int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM experiences`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if total != 4 {
+		t.Errorf("the superseded rows must remain as history, got %d rows", total)
+	}
+	if n := countTypeInSession(t, s, "s", "user.amended"); n != 1 {
+		t.Errorf("amend must record one user.amended, got %d", n)
+	}
+}
+
+// ---- forgetting test helpers ----
+
+func lastEventOfType(t *testing.T, s *Store, session, typ string) *Event {
+	t.Helper()
+	evs, err := s.EventsBySession(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].Type == typ {
+			return evs[i]
+		}
+	}
+	t.Fatalf("session %q has no %s event", session, typ)
+	return nil
+}
+
+func forgotIDs(t *testing.T, payload map[string]any) []string {
+	t.Helper()
+	raw, ok := payload["ids"].([]any)
+	if !ok {
+		t.Fatalf("user.forgot payload has no ids array: %v", payload)
+	}
+	out := make([]string, len(raw))
+	for i, v := range raw {
+		out[i], _ = v.(string)
+	}
+	return out
+}
+
+func countType(t *testing.T, s *Store, typ string) int {
+	t.Helper()
+	var n int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM events WHERE type = ?`, typ).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func countTypeInSession(t *testing.T, s *Store, session, typ string) int {
+	t.Helper()
+	var n int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM events WHERE session_id = ? AND type = ?`,
+		session, typ).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 // TestMigrationRebuildsPreReflectionExperiences (ADR-0015): an old database
 // whose CHECK predates kind='reflection' is rebuilt in place — truth rows
 // survive verbatim, the append-only triggers come back, and reflection

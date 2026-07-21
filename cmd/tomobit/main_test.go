@@ -397,7 +397,7 @@ func TestAutoDecideRecordsReplayableSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dec, err := autoDecide(s, "sess", "implement", "large")
+	dec, err := autoDecide(s, io.Discard, "sess", "implement", "large")
 	if err != nil {
 		t.Fatal(err)
 	}

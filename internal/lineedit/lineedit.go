@@ -105,6 +105,17 @@ func (e *Editor) Interactive() bool {
 // the stdlib hands the same reader back rather than stacking a second one.)
 func (e *Editor) Reader() *bufio.Reader { return e.r }
 
+// SetReader replaces the buffered input the cooked path reads from, so a
+// caller can interpose on the bytes beneath the buffer. The NDJSON view's
+// flush-on-read hook (ADR-0032 Decision 1) lives there — under os.Stdin, where
+// bufio only pulls when a read blocks — because above the buffer the moment a
+// read reaches the bottom is invisible. The *os.File given to New still backs
+// raw-mode detection and width; the only caller (the view) runs with a non-TTY
+// stdout, so Interactive() is false and ReadLine stays on the cooked path this
+// reader feeds — raw mode never engages. Reader() returns this one afterwards,
+// so a prompt asked between lines shares it.
+func (e *Editor) SetReader(r io.Reader) { e.r = bufio.NewReader(r) }
+
 // AddHistory records a submitted line. Blank lines and an immediate repeat
 // are dropped — pressing Up should reach the last thing worth retyping. The
 // same line is appended to the history file if one is set, so the next process
@@ -141,13 +152,40 @@ func (e *Editor) ReadLine(prompt string) (string, error) {
 	return e.readRaw(prompt, fd, old)
 }
 
+// readCooked reads one turn off a pipe (ADR-0022 Decision 3), joining a line
+// continuation the same way raw mode does (ADR-0032 Decision 2): a line whose
+// last character is `\` (after \r\n is stripped) drops that one `\`, gets a
+// `\n`, and continues into the next line — the exact transform readRaw applies
+// on Enter, so `\` means "not done yet" identically at both entrances. A `\\`
+// tail leaves a literal `\` and still continues (one `\` is peeled). EOF mid
+// continuation returns what accumulated: a pipe's half is the whole a script
+// meant to send, unlike raw's abandoned draft. The prompt prints once — a
+// continuation line gets no re-print (a pipe has no reader to prompt).
 func (e *Editor) readCooked(prompt string) (string, error) {
 	fmt.Fprint(e.out, prompt)
-	line, err := e.r.ReadString('\n')
-	if err != nil && line == "" {
-		return "", io.EOF
+	var acc strings.Builder
+	continued := false
+	for {
+		line, err := e.r.ReadString('\n')
+		if line == "" && err != nil {
+			if continued {
+				return acc.String(), nil
+			}
+			return "", io.EOF
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if strings.HasSuffix(line, "\\") {
+			acc.WriteString(line[:len(line)-1])
+			acc.WriteByte('\n')
+			continued = true
+			if err != nil {
+				return acc.String(), nil
+			}
+			continue
+		}
+		acc.WriteString(line)
+		return acc.String(), nil
 	}
-	return strings.TrimRight(line, "\r\n"), nil
 }
 
 func (e *Editor) readRaw(prompt string, fd int, old *term.State) (string, error) {

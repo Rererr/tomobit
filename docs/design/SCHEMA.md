@@ -291,6 +291,15 @@ R4. eventsのtype初期カタログ（14種で確定）
       parent: <親session_id> を持つ（source は production のまま）。
       知覚は task.split を読まず、抽出プロンプト/schemaも不変なので
       payload 拡張でも extractor_ver のバンプ不要（ADR-0006と同じ理屈）
+    - user.forgot / user.amended（ADR-0033）: 忘却の器官の記帳。
+      user.forgot payload = {ids: [...]}（経験単位forgetで消したid — 内容は
+      載せない）、user.amended payload = {id, ver}（訂正元idと新世代）。
+      このマーカーを持つセッションは PendingSessions（Deferred Perceptionの
+      導出クエリ）から恒久的に除外される — 人間の知覚は最終知覚。
+      experiences の削除は append-onlyトリガーの一時DROP（D3が予定した
+      「意図的な保守」）を単一トランザクションで行い、COMMIT後に
+      wal_checkpoint(TRUNCATE)+VACUUM で物理消去する。訂正は D4 の版数共存
+      への追記（extractor_model='human'）で、トリガーには触れない
     （plan.generated は初期カタログ14種に含まれる。ADR-0014の提案記帳:
       payload = {cap, plan, parent, op} — メニューの生存はこのイベントから
       導出されるため rebuild で消えない）

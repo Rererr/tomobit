@@ -41,6 +41,9 @@ func (a *threadAdapter) Translate(line []byte) ([]executor.Event, error) {
 	case "TOOLDETAIL":
 		return []executor.Event{{Type: executor.EventProviderOutput,
 			Payload: map[string]any{"tool": "Edit", executor.PayloadDetail: "cmd/x.go"}}}, nil
+	case "TOOLRESULT":
+		return []executor.Event{{Type: executor.EventProviderOutput,
+			Payload: map[string]any{executor.PayloadToolResult: "line1\nline2"}}}, nil
 	default:
 		return []executor.Event{{Type: executor.EventProviderOutput,
 			Payload: map[string]any{"text": s}}}, nil

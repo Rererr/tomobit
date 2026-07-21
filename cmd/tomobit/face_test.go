@@ -15,22 +15,59 @@ func TestResolveFaceAutoLaunchEnvOverConfig(t *testing.T) {
 		name   string
 		envVal string
 		envSet bool
+		tty    bool
 		config *bool
 		want   bool
 	}{
-		{"unset+nil config is the default on", "", false, nil, true},
-		{"unset honors config false", "", false, &no, false},
-		{"unset honors config true", "", false, &yes, true},
-		{"env 0 overrides config true", "0", true, &yes, false},
-		{"env 1 overrides config false", "1", true, &no, true},
-		{"bogus env falls through to config false", "yes", true, &no, false},
-		{"bogus env falls through to default on", "yes", true, nil, true},
+		// TTY: env silent honors config, the ADR-0025 default on nil.
+		{"tty unset+nil config is the default on", "", false, true, nil, true},
+		{"tty unset honors config false", "", false, true, &no, false},
+		{"tty unset honors config true", "", false, true, &yes, true},
+		{"tty env 0 overrides config true", "0", true, true, &yes, false},
+		{"tty env 1 overrides config false", "1", true, true, &no, true},
+		{"tty bogus env falls through to config false", "yes", true, true, &no, false},
+		{"tty bogus env falls through to default on", "yes", true, true, nil, true},
+		// Pipe (ADR-0032 Decision 3): config never crosses; only an explicit
+		// =1 opts a window in, everything else silent stays dark.
+		{"pipe env 1 opts a window in even off a terminal", "1", true, false, nil, true},
+		{"pipe env 0 stays dark", "0", true, false, &yes, false},
+		{"pipe unset+config true stays dark — config never crosses", "", false, false, &yes, false},
+		{"pipe unset+nil config stays dark", "", false, false, nil, false},
+		{"pipe bogus env warns and stays dark", "yes", true, false, &yes, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := resolveFaceAutoLaunch(tc.envVal, tc.envSet, tc.config, io.Discard)
+			got := resolveFaceAutoLaunch(tc.envVal, tc.envSet, tc.tty, tc.config, io.Discard)
 			if got != tc.want {
 				t.Errorf("resolveFaceAutoLaunch = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Presence follows the window's reach (ADR-0032 Decision 3): a TTY always, or
+// an explicit TOMOBIT_FACE=1 off a terminal — so the GUI's pipe-borne window
+// is never the dead window presence at 0 would close.
+func TestPresenceRegistrationEligible(t *testing.T) {
+	cases := []struct {
+		name   string
+		tty    bool
+		envVal string
+		envSet bool
+		want   bool
+	}{
+		{"tty always registers", true, "", false, true},
+		{"tty registers even with env 0", true, "0", true, true},
+		{"pipe env 1 registers — the GUI's window lifeline", false, "1", true, true},
+		{"pipe env 0 registers nothing", false, "0", true, false},
+		{"pipe unset registers nothing", false, "", false, false},
+		{"pipe bogus env registers nothing", false, "yes", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := presenceRegistrationEligible(tc.tty, tc.envVal, tc.envSet)
+			if got != tc.want {
+				t.Errorf("presenceRegistrationEligible = %v, want %v", got, tc.want)
 			}
 		})
 	}

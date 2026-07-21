@@ -96,3 +96,13 @@
   （止めたければ `face_auto_launch: false`）
 - ADR-0008 Decision 4 は歴史的記録になる（本ADRが廃止を記録）。
   ADR-0020 Decision 1 の「端末レンダラは廃止しない」も本ADRで改版
+
+---
+
+## 追記（2026-07-19）: ADR-0032 による Decision 2 の改版 — TTY ゲートは「env 沈黙時の既定」
+
+Decision 2 の「パイプ・リダイレクト時は起動しない」は、`TOMOBIT_FACE` が沈黙して
+いるときの既定へ改まった（[ADR-0032](ADR-0032-pipe-chat-first-class.md) Decision 3）:
+`TOMOBIT_FACE=1` の明示は **TTY を問わず**窓を出す（pipe の先の GUI が「ここに人が
+居る」と宣言する口）。`=0`・未設定の挙動、および config `face_auto_launch` が
+pipe を跨がないことは従来どおり。presence（ADR-0027）の登録も同じ条件に揃う。

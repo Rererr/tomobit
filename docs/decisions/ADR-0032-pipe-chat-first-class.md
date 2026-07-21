@@ -1,0 +1,217 @@
+# ADR-0032: pipe chat の GUI 一級市民化 — view ストリーム・行継続・顔窓オプトイン
+
+- Status: **Accepted**（2026-07-19、tomobit-gui BACKLOG「本体側の設計待ち」3件の解決。
+  制約: VISION 内・既存 pipe 利用（テスト・スクリプト）の後方互換維持・台帳とSCHEMAは不変）
+- Date: 2026-07-19
+- 関連: [ADR-0022](ADR-0022-chat-session.md)（Decision 3「非TTYは1行=1ターン」を本ADR Decision 2 が拡張）,
+  [ADR-0024](ADR-0024-chat-ux.md)（Decision 5/6 表示専用チャネル — 本ADRはその機械可読の口を足す）,
+  [ADR-0025](ADR-0025-face-autolaunch.md)（Decision 2 の TTY ゲートを本ADR Decision 3 が「env 沈黙時の既定」へ改版）,
+  [ADR-0027](ADR-0027-face-lifetime.md)（presence — pipe 起点の窓も同じ寿命規律に乗る）,
+  [ADR-0030](ADR-0030-provider-tool-output.md) / [ADR-0031](ADR-0031-turn-tool-output-budget.md)
+  （tool_result の表示上限は端末の物理 — view ストリームは対象外）
+
+---
+
+## Context
+
+tomobit-gui は `tomobit chat` を pipe 接続の子プロセスとして飼う（GUI側 ADR-0001）。
+pipe は「テストとスクリプトの経路」（ADR-0022 Decision 3/4）として生まれたが、
+GUI という**対話的なフロントエンド**が同じ経路に乗った。現行の pipe から見える摩擦:
+
+- **ターン終端が機械可読でない**。pipe 出力は端末表示から装飾を剥いだ素テキストで、
+  Tomo の吹き出し・ツール行・境界の器官の発話・プロンプトマーカー `❯` が
+  区別なく混ざる。GUI 側はパース職人芸を積まない方針（GUI ADR-0001）
+- **1行=1ターン**に行継続が無く、GUI は改行をスペースへ潰して送っている
+  （flattenTurnLine — 言葉を曲げる回避策）
+- **`TOMOBIT_FACE=1` が死に配線**。ADR-0025 の TTY ゲートが env の評価より前に
+  顔窓の起動を打ち切るため、pipe 起動では相棒の姿が出せない
+
+3件は独立の不具合ではなく同じ一つの事実の3つの面である:
+**pipe の向こうに人が居る場合がある**。素テキスト pipe の互換は守ったまま、
+オプトインで機械可読な口径を開ける。
+
+---
+
+## Decision 1: `--view ndjson` — stdout を NDJSON の view ストリームにする（オプトイン）
+
+`tomobit chat --view ndjson` で、stdout の**全出力**が 1行=1 JSON の view イベントになる。
+既定（フラグ無し）は従来の素テキストのまま — 既存のテスト・スクリプトは何も変わらない。
+
+### イベント語彙（v1）
+
+```text
+{"type":"init","v":1}                                  ストリーム冒頭。契約バージョン
+{"type":"ready"}                                       入力待ち（プロンプトマーカーの代替）
+{"type":"task.started","sid":"..."}                    タスク開始（ledger session と同じ id）
+{"type":"turn.started","n":1,"provider":"claude-code"} ターン実行開始
+{"type":"provider","name":"claude-code","model":"..."} provider.selected 到着時（auto の答え合わせ）
+{"type":"text","text":"..."}                           本文 — 吹き出しの中身。生 markdown
+{"type":"tool","name":"Edit","detail":"cmd/x.go"}      ツール行（detail 無しなら省略）
+{"type":"tool_result","text":"..."}                    ツール出力 — 無加工・上限なし（下記）
+{"type":"turn.finished","n":1,"started":true,"duration_ms":1234,"cost_usd":0.0123}
+{"type":"error","message":"..."}                       provider.error
+{"type":"note","text":"..."}                           その他の stdout 行（器官の発話・chat の注記）
+{"type":"note","text":"今回、どうだった? ...","await":true}   入力を待って書かれた部分行（下記）
+{"type":"task.finished","sid":"..."}                   境界の器官が済んだ後
+{"type":"task.cancelled","sid":"..."}
+```
+
+- **消費者は未知の type を無視せよ**、が契約に含まれる。語彙を増やすのは互換、
+  既存の意味を変える・消すのは `v` バンプ
+- **キーの順序は保証しない**（JSON オブジェクトとして読むこと。上の例示の並びは
+  見やすさのためで、実出力はエンコーダのソート順）
+- **レイアウトの空行は note にしない**。話者分離の空行は端末の組版であり、
+  gutter・gap と同じ規律（layout is for the terminal）で view には流さない
+- `n` はユーザー発話の通し番号。split の fold-back（ADR-0028）のフィードターンは
+  親ターンと同じ `n` を繰り返す — GUI は入れ子のターン枠として読める
+- `cost_usd` は取れたときだけ載る（turnView のフッタと同じ）
+- **stderr は契約外**。従来どおり人間向け診断が素テキストで流れる（GUI は別チャンネルで
+  既に読んでいる）。契約は stdout だけ
+- **stdout が TTY のときは `--view ndjson` を拒否する**。view モードは gap・gutter・
+  markdown-lite 等の TTY ゲートがすべて閉じていることを前提に置く設計で、
+  TTY と組ませると全ゲートの再点検を常設化する。デバッグは `| jq` で足りる
+
+### 台帳は不変
+
+view ストリームは turnView と同格の「読む人のための View」であり、記帳経路
+（recordEvent の StripViewOnly）には一切触れない。`tool_result` が NDJSON に載っても
+台帳は今日と同じツール名のみ（SCHEMA.md R3 不変）。**表示の都合で台帳を変えない**
+（ADR-0024 Decision 6 と同じ規律）が、逆向きにもう一度立つ。
+
+### tool_result は無加工で流す — 表示予算は消費者の責務
+
+ADR-0030/0031 の per-result・per-turn 上限は**端末のスクリーンという物理**への較正で
+あって、view の本質ではない。NDJSON の消費者はスクロールも折り畳みも自前で持てるので、
+本体側で切ると情報を戻す手が無くなる。ndjsonView は tool_result を無加工で流し、
+何をどこまで見せるかは GUI が決める（低負荷・「判断できるデータを渡す」側の設計）。
+
+### note の await と flush-on-read
+
+境界の器官（Feedback の質問）は**改行なしの部分行**を書いてから stdin を待つ。
+view モードは書き込みを行単位で NDJSON に包むため、素朴な実装では質問が
+バッファに残ったままブロックし、GUI に届かない。
+
+stdin の底（bufio の下）に flush フックを仕込み、**読みが底に達する瞬間**に
+書きかけの部分行を `{"type":"note","await":true}` として流す。器官側の実装を
+知らないフックなので、将来の器官が増えても配線は要らない。
+
+**await は「ブロックを検知できたときの合図」であって保証ではない**: stdin が
+一括で書かれている場合（スクリプトが会話全体を先に流し込む形）、bufio の先読みが
+答えまで抱えてしまい、読みは底に達しない。このとき部分行の note は次の完全行の
+出力か stream 終端まで遅れ、await が付かないことがある — 一括で書いた者は
+会話全体を既に知っており、合図を待つ読者がそこに居ないので、これは契約違反では
+なく契約の形。対話的に1行ずつ届く消費者（GUI がそれ）は常に await を得る。
+bufio の最小バッファ（16 bytes）でも短い応答行は先読みに乗るため、
+先読みを殺して「常時 await」を作る道は構造的に無い — 検知できる側に契約を張る。
+
+### 却下した対案
+
+- **env / config でのオプトイン** → ワイヤ形式は呼び出しごとの選択で、呼び出し側の
+  argv が持つのが正しい。config は常設の既定であり、CLI を手で叩くユーザーの
+  端末を NDJSON にしてしまう事故の口になる。ADR-0025 が env を選んだのは
+  「3入口すべてにフラグを生やすコスト」が理由で、ここは入口が chat 1つ
+- **ledger イベント型の再利用**（provider.output をそのまま流す）→ view の語彙を
+  R3 に凍結してしまう。台帳の型は知覚の契約、view の型は表示の契約 — 寿命も
+  変更理由も違うものを一つの名前空間に載せない
+- **stdin 側も JSON にする** → 行継続（Decision 2）で足りる。素テキスト stdin は
+  「スクリプトとテストと GUI が同じ経路を通る」（ADR-0022 Decision 3）を保つ。
+  入力の構造化が本当に要る日が来たら v2 の論点
+- **`do` にも同時に載せる** → do の出力は turnView を通らない別系で、要求も実例も
+  まだ無い。語彙が固まってから伸ばす（YAGNI。契約だけ先に広げない）
+
+---
+
+## Decision 2: cooked mode の行継続 — 末尾 `\` は「まだ終わりではない」
+
+raw mode の `\`+Enter（lineedit: 末尾の `\` を1つ剥いで改行を挿む）と**同じ意味論**を
+cooked（pipe）へ写す: 末尾が `\` の行は、その `\` を1つ剥いで `\n` を挿み、
+次の行へ続く。ターンとして走るのは継続が閉じた全体。
+
+```text
+stdin:  実装して。仕様は\
+        - Aであること\
+        - Bであること
+turn:   実装して。仕様は
+        - Aであること
+        - Bであること
+```
+
+- 実装は lineedit の readCooked — 「1行=1ターン」のフレーミングが住んでいる場所。
+  raw が落ちた端末の cooked フォールバックにも同じ構文が効く（意味論が入口で揺れない）
+- エスケープは持たない — raw mode と同じ。文字通りの末尾 `\` を送りたければ
+  `\\` で閉じて（1つ剥がれて `\` が残り継続に入る）空行で終える。raw mode で
+  同じ操作をしたときと同じ結果になる
+- 継続の途中で EOF が来たら、そこまでの蓄積を1ターンとして返す。cooked は今日も
+  「改行なしの最終行」を1行として返しており、その流儀に合わせる（raw の
+  「閉じた stdin はドラフトを捨てる」と非対称だが、raw の半端は人の書きかけ、
+  cooked の半端はスクリプトが意図して流し終えた全部 — 持ち主が違う）
+- 継続行にプロンプトの再印字はしない（pipe に読み手はいない。TTY cooked
+  フォールバックでも足さない — 素の器に徹する）
+
+### 互換
+
+末尾 `\` の行はこれまで「`\` ごとそのまま1ターン」だった。挙動が変わるのはこの形の
+行だけで、リポジトリ内の実利用（テスト・Feedback 応答・GUI の送信）に該当例は無い。
+tomobit-gui は本構文の導入後に flattenTurnLine を外せる（BACKLOG 記載どおり。
+GUI 側の変更は本ADRの範囲外）。
+
+### 却下した対案
+
+- **heredoc 型（`<<EOF ... EOF`）** → 任意本文に頑健だが、raw mode と別の語彙が
+  もう一つ増える。`\` 継続は raw で既に配線済みの言葉（/help にも載っている）で、
+  両モードの対称は学習コストゼロの側
+- **空行区切り（1ターン=段落）** → 既存の「空行は読み飛ばす」と衝突し、
+  1行タスクを送る全スクリプトの互換を壊す
+
+---
+
+## Decision 3: 顔窓の TTY ゲートは「env 沈黙時の既定」へ — `TOMOBIT_FACE=1` の明示が pipe でも窓を開く
+
+ADR-0025 Decision 2 の「パイプ・リダイレクト時は起動しない」を、**env が沈黙している
+ときの既定**に改める:
+
+| 条件 | 挙動 |
+|---|---|
+| `TOMOBIT_FACE=1`（明示） | **TTY を問わず起動する** — 新設の唯一の変更点 |
+| `TOMOBIT_FACE=0` | 従来どおり止める |
+| 未設定（不正値は警告して未設定扱い） | 従来どおり: 非TTYなら起動しない。TTY なら config `face_auto_launch`（省略=ON） |
+
+- **理屈**: 「機械可読文脈に副作用を持ち込まない」（ADR-0025/ADR-0008）は、文脈を
+  知らないときの既定の規律であって、呼び出し側が「この pipe の先に人が居る」と
+  宣言したら譲る。GUI がまさにその宣言者
+- **config は pipe を跨がない**: `face_auto_launch: true`（既定）で pipe に窓が
+  出ることはない。config は常設の既定であり、スクリプト・CI・テストを巻き込む —
+  後方互換の線はここ
+- **presence（ADR-0027）も同じ条件で登録する**: TTY か、env の明示オプトイン。
+  これが無いと pipe 起点の窓は在席0のまま猶予（3s）で閉じる死に窓になる。
+  GUI の chat プロセスが在席1を持つので、GUI が閉じて stdin が EOF →
+  chat が終了 → 在席0 → 猶予後に窓が消える — 寿命の規律が pipe でもそのまま接地する
+- **適用は maybeLaunchFace / registerPresence を共有する全入口**（chat / do / status）。
+  入口ごとに規則を分けない — env の意味が入口で揺れる方が説明コストが高い
+
+### 却下した対案
+
+- **フラグ `--face`** → ADR-0025 と同じ判断（入口の数だけ生やすことになり、env で足りる）。
+  GUI は子プロセスの env に `TOMOBIT_FACE=1` を立てるだけ
+- **pipe でも config を尊重**（`face_auto_launch: true` なら pipe でも起動）→
+  既存の pipe 利用すべてに窓が出る後方互換破壊。オプトインの意味が消える
+- **chat だけに適用** → 同じ env が chat では効き do では死ぬ、という新しい死に配線を
+  作るだけ。ゲートは1関数に共有されており、規則も1つにする
+
+---
+
+## Consequences
+
+- GUI はパース職人芸なしにターン終端・吹き出し・器官の発話を判別できる。
+  BACKLOG「本体側の設計待ち」のうち3件（フレーミング・複数行・顔窓）が解ける
+- view の語彙が `v:1` の契約になる。**契約は stdout の NDJSON だけ** — stderr と
+  素テキスト pipe は今後も無契約（変えても互換事故にならない領域を明示的に残す）
+- chat の view 層が interface になり、turnView（端末）と ndjsonView（機械）が並ぶ。
+  ADR-0030/0031 の表示上限は turnView 側に残る — ndjsonView は対象外
+- 末尾 `\` の行の意味が cooked で変わる（従来: `\` ごと送信）。既存実利用に該当例なし
+- `TOMOBIT_FACE=1` を常時 export している環境では、pipe の tomobit にも窓が出るように
+  なる — env の明示は「出せ」の宣言になった（既定 ON の下で `=1` の常時 export は
+  冗長なので実害は限定的。ADR-0025 に改版を追記）
+- 台帳・SCHEMA・知覚は不変。R3 不変のピン留めテストは view モードでも同じく効く
+- ADR-0022 / ADR-0025 / ADR-0031 に本ADRへの改版参照を追記し、README 索引に
+  ADR-0032 を追加する
