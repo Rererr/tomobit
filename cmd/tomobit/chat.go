@@ -596,10 +596,7 @@ func (c *chat) run(prompt string, opening bool) error {
 	// 5). A broken run (already returned above on ctx.Err(), or non-zero exit /
 	// runErr here) is never trusted as one — its output is not a decision.
 	if split && runErr == nil && result.ExitCode == 0 {
-		groups, parseErr := subtask.Parse(strings.Join(texts, "\n"))
-		if parseErr != nil {
-			fmt.Fprintln(os.Stderr, "split: proposal ignored —", parseErr)
-		} else if groups != nil {
+		if groups := readSplitProposal(texts); groups != nil {
 			// The fold-back re-enters run and prints its own trailing gap, so the
 			// split path skips the one below to avoid a double blank.
 			return c.splitAndFold(ctx, groups, prompt)
@@ -618,7 +615,8 @@ func (c *chat) run(prompt string, opening bool) error {
 // split JSON it stalled on.
 func (c *chat) splitAndFold(ctx context.Context, groups [][]string, parentIntent string) error {
 	subs, cancelled, err := executeSplit(ctx, c.s, c.sid, groups, parentIntent,
-		c.providerName, c.capability, c.size, c.permMode, c.timeout, c.in, c.out, c.interactive)
+		c.providerName, c.capability, c.size, c.permMode, c.timeout, c.in, c.out, c.interactive,
+		c.newSubtaskView())
 	if err != nil {
 		return err
 	}
@@ -1105,6 +1103,25 @@ func (c *chat) newView(name string) view {
 		return &ndjsonView{s: c.stream, name: name, n: c.turns}
 	}
 	return newTurnView(c.out, name)
+}
+
+// newSubtaskView is the per-subtask view factory executeSplit takes (ADR-0032
+// Decision 1 × ADR-0028): under the NDJSON stream, a split's subtasks must
+// reach the GUI in the same typed vocabulary an ordinary turn does, not
+// providerSink's raw echo — a subtask nests under the opening turn no less
+// than the fold-back feed turn does, so it repeats the same n (c.turns, which
+// splitAndFold only ever reaches from the opening turn). Off the stream (do
+// has no view at all; a plain/TTY chat keeps its existing raw echo for split,
+// unchanged by this ADR) it returns nil, and executeSplit falls back to
+// providerSink exactly as it always has.
+func (c *chat) newSubtaskView() func(string) view {
+	if c.stream == nil {
+		return nil
+	}
+	n := c.turns
+	return func(name string) view {
+		return &ndjsonView{s: c.stream, name: name, n: n}
+	}
 }
 
 // ndjsonStream is the single writer of the NDJSON view stream (ADR-0032

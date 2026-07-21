@@ -144,6 +144,25 @@ func cancelChildrenAndParent(s *store.Store, parentSID string, childSIDs []strin
 	return s.AppendEvent(parentSID, "task.cancelled", time.Now().UnixMilli(), nil)
 }
 
+// readSplitProposal is the one place `do` (cmdDo) and chat (chat.run) turn a
+// clean opening run's collected provider text into subtask groups — the
+// single responsibility of "how tomobit reads a Provider's split proposal"
+// (ADR-0023 Decision 1: a malformed marker warns and falls through, it never
+// silently drops or silently rescues). The two callers keep their own gating
+// (splitProtocolEligible / splitProtocolEnabled, runErr/ExitCode) and their
+// own divergent reaction to an accepted proposal — do finishes the task
+// differently from chat's fold-back (ADR-0028 Decision 5) — because reading
+// the proposal and acting on it are different responsibilities; only the
+// reading was duplicated.
+func readSplitProposal(texts []string) [][]string {
+	groups, parseErr := subtask.Parse(strings.Join(texts, "\n"))
+	if parseErr != nil {
+		fmt.Fprintln(os.Stderr, "split: proposal ignored —", parseErr)
+		return nil
+	}
+	return groups
+}
+
 // executeSplit records the accepted proposal and runs its subtasks — the shared
 // core of the do path (runSplit) and the chat path (chat.splitAndFold). It runs the
 // gate once (only a wide group fires it — Decision 3), records task.split with
@@ -155,9 +174,17 @@ func cancelChildrenAndParent(s *store.Store, parentSID string, childSIDs []strin
 // folds the subtask results back into the thread (Decision 5). Splitting the tail
 // out of runSplit is what keeps the do path's behavior byte-for-byte while chat
 // reuses the same execution — no do-only regression.
+//
+// newView, when non-nil, is a chat's NDJSON view stream reaching down into the
+// sequential path only (ADR-0032 Decision 1): a subtask's Provider output must
+// land in the same typed text/tool/tool_result vocabulary the parent turn uses,
+// not providerSink's raw echo. do and a plain/TTY chat pass nil and see the
+// unchanged echo. It never reaches runGroups/runGroupParallel — the gate that
+// leads there requires interactive, which a view session structurally never is
+// (validateViewFlag forces stdout non-TTY), so there is nothing to wire there.
 func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]string,
 	parentIntent, providerName, capability, size, permMode string, timeout time.Duration,
-	in *bufio.Reader, out io.Writer, interactive bool) (subs []string, cancelled bool, err error) {
+	in *bufio.Reader, out io.Writer, interactive bool, newView func(string) view) (subs []string, cancelled bool, err error) {
 	subs, idxGroups := flattenGroups(groups)
 	now := time.Now().UnixMilli()
 
@@ -200,7 +227,7 @@ func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups 
 			providerName, capability, size, permMode, timeout, in, out)
 	} else {
 		cancelled, err = runSubtasksSequential(ctx, s, parentSID, subs, parentIntent,
-			providerName, capability, size, permMode, timeout, in, out)
+			providerName, capability, size, permMode, timeout, in, out, newView)
 	}
 	return subs, cancelled, err
 }
@@ -235,8 +262,13 @@ func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][
 			}
 		} else {
 			fmt.Fprintf(out, "-- subtask %d/%d: %s --\n", base+1, len(subs), truncate(g[0], 60))
+			// runGroups only runs once the parallel gate accepted (Decision 3),
+			// which requires interactive — and a chat's NDJSON view stream forces
+			// non-interactive (ADR-0032 Decision 1: view mode assumes every TTY
+			// gate shut). A view is therefore never available on this path; nil
+			// is that structural fact, not a placeholder for future wiring.
 			failed, canc, err := runSubtaskSequential(ctx, s, parentSID, g[0], base, len(subs),
-				providerName, capability, size, parentIntent, permMode, timeout, in, out)
+				providerName, capability, size, parentIntent, permMode, timeout, in, out, nil)
 			base++
 			if err != nil {
 				return false, err
@@ -260,11 +292,11 @@ func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][
 // leaves no half-run in the ledger.
 func runSubtasksSequential(ctx context.Context, s *store.Store, parentSID string, subs []string,
 	parentIntent, providerName, capability, size, permMode string, timeout time.Duration,
-	in *bufio.Reader, out io.Writer) (cancelled bool, err error) {
+	in *bufio.Reader, out io.Writer, newView func(string) view) (cancelled bool, err error) {
 	for i, sub := range subs {
 		fmt.Fprintf(out, "-- subtask %d/%d: %s --\n", i+1, len(subs), truncate(sub, 60))
 		failed, canc, err := runSubtaskSequential(ctx, s, parentSID, sub, i, len(subs),
-			providerName, capability, size, parentIntent, permMode, timeout, in, out)
+			providerName, capability, size, parentIntent, permMode, timeout, in, out, newView)
 		if err != nil {
 			return false, err
 		}
@@ -286,9 +318,14 @@ func runSubtasksSequential(ctx context.Context, s *store.Store, parentSID string
 // zero-based position in the flat order (for its 1/total prompt framing).
 // Reports failed (for the caller's fail-stop) and cancelled (SIGINT — child and
 // parent cancellation already recorded).
+//
+// newView follows executeSplit's own doc: nil (do, plain/TTY chat) keeps
+// providerSink's raw echo; a chat's NDJSON view stream builds one fresh view
+// per subtask (its provider can differ from the parent's own, under auto) and
+// drives begin/show/end around the run exactly as an ordinary turn does.
 func runSubtaskSequential(ctx context.Context, s *store.Store, parentSID, sub string, gi, total int,
 	providerName, capability, size, parentIntent, permMode string, timeout time.Duration,
-	in *bufio.Reader, out io.Writer) (failed, cancelled bool, err error) {
+	in *bufio.Reader, out io.Writer, newView func(string) view) (failed, cancelled bool, err error) {
 	sid, adapter, human, err := openSubtask(s, out, providerName, capability, size, sub, parentSID)
 	if err != nil {
 		return false, false, err
@@ -304,7 +341,12 @@ func runSubtaskSequential(ctx context.Context, s *store.Store, parentSID, sub st
 			return false, false, runErr
 		}
 	} else {
-		sink := providerSink(s, sid, out, nil)
+		var v view
+		if newView != nil {
+			v = newView(adapter.Name())
+			v.begin()
+		}
+		sink := subtaskSink(s, sid, out, v)
 		ex := &executor.Executor{Adapter: adapter, Stderr: os.Stderr, Warn: os.Stderr}
 		if os.Getenv("TOMOBIT_DEBUG") != "" {
 			ex.Debug = os.Stderr
@@ -312,6 +354,9 @@ func runSubtaskSequential(ctx context.Context, s *store.Store, parentSID, sub st
 		result, runErr = ex.Run(ctx, executor.Request{
 			Prompt: prompt, PermissionMode: permMode, Timeout: timeout,
 		}, sink)
+		if v != nil {
+			v.end(result)
+		}
 	}
 
 	if ctx.Err() != nil {
@@ -323,6 +368,24 @@ func runSubtaskSequential(ctx context.Context, s *store.Store, parentSID, sub st
 
 	failed, err = recordSubtaskOutcome(s, sid, runErr, result, time.Now().UnixMilli())
 	return failed, false, err
+}
+
+// subtaskSink builds the Sink one sequential subtask run writes through. v nil
+// (do, plain/TTY chat) is providerSink's raw text echo, unchanged. A non-nil v
+// is a chat's NDJSON view stream (ADR-0032 Decision 1): echoing the subtask's
+// raw text through the note framer there would collapse a structured Provider
+// turn into an opaque "note", asking the GUI to parse it back out — v.show(ev)
+// instead classifies the event into the same text/tool/tool_result vocabulary
+// the parent turn already emits, so a subtask reads as a nested turn frame
+// rather than a wall of chat annotation.
+func subtaskSink(s *store.Store, sid string, out io.Writer, v view) executor.Sink {
+	if v == nil {
+		return providerSink(s, sid, out, nil)
+	}
+	return func(ev executor.Event, ts int64) error {
+		v.show(ev)
+		return recordEvent(s, sid, ev, ts)
+	}
 }
 
 // runGroupParallel runs one independent group (ADR-0028 Decision 4). Its

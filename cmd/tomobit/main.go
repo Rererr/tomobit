@@ -580,10 +580,7 @@ func cmdDo(args []string) error {
 	// do): a token-delta adapter could split the marker key across events,
 	// and the joined text would no longer contain it.
 	if splitProtocol && runErr == nil && result.ExitCode == 0 {
-		groups, parseErr := subtask.Parse(strings.Join(texts, "\n"))
-		if parseErr != nil {
-			fmt.Fprintln(os.Stderr, "split: proposal ignored —", parseErr)
-		} else if groups != nil {
+		if groups := readSplitProposal(texts); groups != nil {
 			return runSplit(ctx, s, sid, groups, prompt, *providerName, *capability, *size,
 				*permMode, *timeout, stdin, os.Stdout, isTTY(os.Stdin) && isTTY(os.Stdout), extractor)
 		}
@@ -689,7 +686,7 @@ func runSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]
 	parentIntent, providerName, capability, size, permMode string, timeout time.Duration,
 	in *bufio.Reader, out io.Writer, interactive bool, extractor perceive.Extractor) error {
 	_, cancelled, err := executeSplit(ctx, s, parentSID, groups, parentIntent,
-		providerName, capability, size, permMode, timeout, in, out, interactive)
+		providerName, capability, size, permMode, timeout, in, out, interactive, nil)
 	if err != nil {
 		return err
 	}

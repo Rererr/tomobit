@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/Rererr/tomobit/internal/config"
 	"github.com/Rererr/tomobit/internal/executor"
+	"github.com/Rererr/tomobit/internal/lineedit"
 	"github.com/Rererr/tomobit/internal/store"
 )
 
@@ -46,7 +48,15 @@ func (a *splitChatAdapter) Command(req executor.Request) (string, []string, []st
 		if a.failSub != "" && strings.Contains(req.Prompt, a.failSub) {
 			exit = 1
 		}
-		return "sh", []string{"-c", fmt.Sprintf("echo subtask ran; exit %d", exit)}, nil
+		script := "echo subtask ran"
+		// A subtask instruction may itself carry the threadAdapter-style
+		// TOOLDETAIL marker (chat_test.go) — a test's way of asking this
+		// subtask to also emit a tool call, so the view contract's "tool line"
+		// half (ADR-0032) can be pinned on a subtask, not just an ordinary turn.
+		if strings.Contains(req.Prompt, "TOOLDETAIL") {
+			script += "; echo TOOLDETAIL"
+		}
+		return "sh", []string{"-c", fmt.Sprintf("%s; exit %d", script, exit)}, nil
 	case strings.Contains(req.Prompt, "tomobit_split"): // the opening turn (protocol attached)
 		return "printf", []string{"SEL\n" + a.proposal + "\n"}, nil
 	default: // an ordinary continuation turn
@@ -62,6 +72,9 @@ func (a *splitChatAdapter) Translate(line []byte) ([]executor.Event, error) {
 		return []executor.Event{{Type: executor.EventProviderSelected, Payload: map[string]any{
 			"provider": "fake", "provider_session_id": "th-parent",
 		}}}, nil
+	case "TOOLDETAIL": // mirrors threadAdapter's own token (chat_test.go)
+		return []executor.Event{{Type: executor.EventProviderOutput,
+			Payload: map[string]any{"tool": "Edit", executor.PayloadDetail: "cmd/x.go"}}}, nil
 	default:
 		return []executor.Event{{Type: executor.EventProviderOutput,
 			Payload: map[string]any{"text": s}}}, nil
@@ -78,6 +91,35 @@ func newSplitChat(t *testing.T, s *store.Store, a *splitChatAdapter, in string) 
 		extractor: &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}},
 		in:        bufio.NewReader(strings.NewReader(in)),
 	}, out
+}
+
+// newSplitViewChat is newViewChat's (chat_view_test.go) own plumbing wired
+// onto splitChatAdapter instead: a --view ndjson chat that can also drive a
+// split, so the NDJSON contract (ADR-0032) and the split machinery (ADR-0028)
+// can be pinned together.
+func newSplitViewChat(t *testing.T, s *store.Store, a *splitChatAdapter, stdin string) (*chat, *bytes.Buffer) {
+	t.Helper()
+	providers["fake"] = a
+	t.Cleanup(func() { delete(providers, "fake") })
+
+	buf := &bytes.Buffer{}
+	stream := newNDJSONStream(buf)
+
+	dev, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dev.Close() })
+	ed := lineedit.New(dev, dev)
+	ed.SetReader(flushReader{r: strings.NewReader(stdin), flush: stream.flushAwait})
+
+	c := &chat{
+		s: s, ed: ed, in: ed.Reader(), out: noteWriter{s: stream}, stream: stream,
+		providerName: "fake", capability: "implement",
+		extractor: &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}},
+	}
+	stream.emit(map[string]any{"type": "init", "v": viewVersion})
+	return c, buf
 }
 
 // feedLaunch returns the single fold-back launch (its prompt carries the harness
@@ -377,5 +419,100 @@ func TestChatSplitProtocolKillSwitchOff(t *testing.T) {
 	}
 	if n := countEventsOfType(t, s, "task.split"); n != 0 {
 		t.Errorf("no protocol, no split, got %d", n)
+	}
+}
+
+// (h) ADR-0032 Decision 1 × ADR-0028: under --view ndjson, a subtask's own
+// body and tool line reach the stream as the same typed vocabulary the parent
+// turn uses — never collapsed into an opaque note the GUI would have to parse
+// back apart. Each subtask nests as its own turn.started/turn.finished pair
+// repeating the opening turn's n, the same discipline the fold-back feed turn
+// already follows.
+func TestChatSplitViewEmitsTypedSubtaskEvents(t *testing.T) {
+	s := openTestStore(t)
+	a := &splitChatAdapter{
+		proposal: `{"tomobit_split": ["alpha TOOLDETAIL task", "beta task"]}`,
+		feedOut:  "統合レポート",
+	}
+	c, buf := newSplitViewChat(t, s, a, "")
+
+	if err := c.turn("big build"); err != nil {
+		t.Fatal(err)
+	}
+
+	evs := viewEvents(t, buf) // fails on any non-JSON line — a raw echo would break this
+	texts := 0
+	for _, e := range evs {
+		if e["type"] == "text" && e["text"] == "subtask ran" {
+			texts++
+		}
+	}
+	if texts != 2 {
+		t.Errorf("both subtasks' bodies must arrive as typed text events, got %d: %v", texts, viewTypes(evs))
+	}
+	if tool := firstOfType(evs, "tool"); tool == nil || tool["name"] != "Edit" || tool["detail"] != "cmd/x.go" {
+		t.Errorf("a subtask's tool call must arrive as a typed tool event, not a note: %v", tool)
+	}
+	if anyNoteContains(evs, "subtask ran") {
+		t.Errorf("subtask output must not leak into an untyped note: %v", viewTypes(evs))
+	}
+
+	// opening turn + 2 subtasks + the fold-back feed turn = 4 brackets, every
+	// one repeating n=1 (ADR-0032 Decision 1: the GUI reads the repeat as
+	// nesting, not four unrelated turns).
+	for _, ty := range []string{"turn.started", "turn.finished"} {
+		count := 0
+		for _, e := range evs {
+			if e["type"] != ty {
+				continue
+			}
+			count++
+			if e["n"] != float64(1) {
+				t.Errorf("%s must repeat the opening turn's n=1, got %v", ty, e["n"])
+			}
+		}
+		if count != 4 {
+			t.Errorf("%s count = %d, want 4 (opening + 2 subtasks + feed)", ty, count)
+		}
+	}
+}
+
+// (i) A Provider that declares an independent group under --view ndjson still
+// produces the same typed shape as a flat proposal: the parallel gate never
+// fires off a terminal (ADR-0028 Decision 3), so the declaration collapses to
+// the same sequential path, and the terminal's [n:provider] labeling
+// (ADR-0028 Decision 4, splitSink) — layout, not the view's vocabulary — must
+// never reach the stream.
+func TestChatSplitViewWideGroupStaysSequentialAndTyped(t *testing.T) {
+	s := openTestStore(t)
+	a := &splitChatAdapter{
+		proposal: `{"tomobit_split": [["alpha task", "beta task"]]}`,
+		feedOut:  "統合レポート",
+	}
+	c, buf := newSplitViewChat(t, s, a, "")
+
+	if err := c.turn("big parallel build"); err != nil {
+		t.Fatal(err)
+	}
+
+	evs := viewEvents(t, buf) // fails on any non-JSON line
+	texts := 0
+	for _, e := range evs {
+		if e["type"] == "text" && e["text"] == "subtask ran" {
+			texts++
+		}
+		if txt, ok := e["text"].(string); ok && strings.Contains(txt, "[1:fake]") {
+			t.Errorf("the terminal's [n:provider] label must never reach the view: %v", e)
+		}
+	}
+	if texts != 2 {
+		t.Errorf("both members of the declared group must run sequentially with typed text, got %d", texts)
+	}
+	if anyNoteContains(evs, "subtask ran") {
+		t.Errorf("a wide group must not degrade subtask output to a note: %v", viewTypes(evs))
+	}
+	split := payloadOf(t, s, "task.split")
+	if split["parallel_offered"] != false {
+		t.Errorf("a non-interactive view session never offers the gate, got %v", split)
 	}
 }
