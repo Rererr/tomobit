@@ -140,6 +140,10 @@ type chat struct {
 	threadID  string
 	turns     int
 	completed bool // a turn ran to completion — there is something to judge
+	// perception is this task's Task Perception holder (ADR-0036 Decision
+	// 2b), built fresh in startTask and cleared in closeTask along with the
+	// rest of the task's fields — its lifetime is one task, same as sid.
+	perception *taskPerception
 }
 
 func cmdChat(args []string) error {
@@ -485,7 +489,11 @@ func (c *chat) turn(prompt string) error {
 // startTask opens the ledger session: the first prompt is the task's intent,
 // and the provider is chosen once, for the whole conversation.
 func (c *chat) startTask(prompt string) error {
-	sid, adapter, human, err := openTask(c.s, c.out, c.providerName, c.capability, c.size, prompt)
+	// One holder per task (ADR-0036 Decision 2b): openTask below may be its
+	// first asker (--provider auto), or nothing may ever ask (a pinned
+	// provider) — either way it lives until closeTask.
+	c.perception = newTaskPerception(prompt, taskExtractFuncFor(c.s, c.extractor))
+	sid, adapter, human, err := openTask(c.s, c.out, c.providerName, c.capability, c.size, prompt, c.perception)
 	if err != nil {
 		return err
 	}
@@ -616,7 +624,7 @@ func (c *chat) run(prompt string, opening bool) error {
 func (c *chat) splitAndFold(ctx context.Context, groups [][]string, parentIntent string) error {
 	subs, cancelled, err := executeSplit(ctx, c.s, c.sid, groups, parentIntent,
 		c.providerName, c.capability, c.size, c.permMode, c.timeout, c.in, c.out, c.interactive,
-		c.newSubtaskView())
+		c.newSubtaskView(), c.perception)
 	if err != nil {
 		return err
 	}
@@ -735,6 +743,10 @@ func (c *chat) closeTask() error {
 	sid, completed := c.sid, c.completed
 	c.sid, c.threadID, c.turns = "", "", 0
 	c.adapter, c.human, c.completed = nil, false, false
+	// ADR-0036 Decision 2b: the holder's lifetime is one task — /new (this
+	// function) discards it, so the next task gets a fresh one in startTask
+	// rather than reading a stale extraction against a new intent.
+	c.perception = nil
 
 	if !completed {
 		if err := c.s.AppendEvent(sid, "task.cancelled", time.Now().UnixMilli(), nil); err != nil {

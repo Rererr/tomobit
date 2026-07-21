@@ -76,7 +76,7 @@ func TestRunSplitAcceptedRunsWholeGroupThenStopsAtGroupBoundary(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "marker",
-		"implement", "", "", 0, in, &out, true, extractor); err != nil {
+		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -115,7 +115,7 @@ func TestRunSplitDeclinedRunsSequentialFailStop(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "marker",
-		"implement", "", "", 0, in, &out, true, extractor); err != nil {
+		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -147,7 +147,7 @@ func TestRunSplitNonInteractiveNeverParallels(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "marker",
-		"implement", "", "", 0, in, &out, false, extractor); err != nil {
+		"implement", "", "", 0, in, &out, false, extractor, nil); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -178,7 +178,7 @@ func TestRunSplitFlatProposalSkipsGate(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
-		"implement", "", "", 0, in, &out, true, extractor); err != nil {
+		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -234,7 +234,7 @@ func TestRunSplitRecordsGatePayload(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
-		"implement", "", "", 0, in, &out, true, extractor); err != nil {
+		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -263,7 +263,7 @@ func TestRunSplitParallelGroupWiderThanCapCompletesEveryMember(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
-		"implement", "", "", 0, in, &out, true, extractor); err != nil {
+		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -303,7 +303,7 @@ func TestRunGroupParallelRunsAutoRoutedHumanMembers(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "auto",
-		"implement", "", "", 0, in, &out, true, extractor); err != nil {
+		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -358,7 +358,7 @@ func TestRunSplitParallelCancellationRecordsAllChildrenAndParent(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(ctx, s, parentSID, groups, "big task", "pc",
-		"implement", "", "", 0, in, &out, true, extractor); err != nil {
+		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 

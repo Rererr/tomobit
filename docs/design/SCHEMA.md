@@ -287,11 +287,23 @@ R4. eventsのtype初期カタログ（14種で確定）
     質問予算の管理と「聞きすぎていないか」の検証に使う。
     封筒方式のため、type追加はいつでも可能（このカタログは初版）
 
+    **抽出プロンプトが見るのは「起きたこと」だけ**（ADR-0036 Decision 2d）:
+    tomo.decided / plan.selected はハーネス自身の判断の記録であり、
+    Reality ではない（PERCEPTION_ENGINE: Reality → Observation）。
+    知覚の抽出プロンプトからは除外する — 載せると、事後の知覚が自分の
+    事前推測（タスク知覚が置いた tokens）を読んで追認する経路になる。
+    台帳からは消さない。監査は残り、見せる相手が変わるだけである
+
     追加済みtype（初版以後）:
-    - tomo.decided（ADR-0012）: 決定エンジンの監査記録。
+    - tomo.decided（ADR-0012、ADR-0036で拡張）: 決定エンジンの監査記録。
       payload = {provider, seed(文字列 — UnixNanoはJSON float64の整数精度を
-      超えるため), n, q, fallback, cap, size, candidates[{provider, quantile,
-      passed, scope}]}。同じ台帳＋同じseed → 同じ判断のリプレイ用
+      超えるため), n, q, fallback, cap, size, tokens[...], candidates[{provider,
+      quantile, passed, scope}]} と、劣化時のみ perception_degraded(文字列)。
+      同じ台帳＋同じseed → 同じ判断のリプレイ用。tokens は**実際に判断が読んだ
+      scopeトークン列**で、ADR-0036 でタスク知覚（LLM）が判断の入力に入ったため、
+      「同じ台帳＋同じseed」だけでは判断を再現できなくなった — 再現の単位は
+      台帳＋seed＋tokens になる。perception_degraded は知覚が失敗/未配線で
+      決定的トークンだけで判断した理由（黙って劣化しない）
     - tomo.reflected（ADR-0015）: 語った事実の記帳。予算管理と重複抑止用。
       payload = {type, scope, provider, other, text, seed, after}
     - tomo.greeted（ADR-0019 D2）: おかえりを言った事実。同じ帰還への
@@ -301,9 +313,11 @@ R4. eventsのtype初期カタログ（14種で確定）
       （task.startedのintentはタスクの最初の依頼＝そのタスクの意図）。
       決定的属性を持たないためparseDeterministicは読まない。抽出プロンプト/
       schemaは不変なのでextractor_verのバンプは不要（ADR-0006と同じ理屈）
-    - plan.selected（ADR-0014）: 採用したPlanの記帳（知覚の決定的抽出元 —
-      experiences.plan列へ）。payload = {plan, cap, size, seed, n, q,
-      fallback} または手動指定時 {plan, cap, manual: true}
+    - plan.selected（ADR-0014、ADR-0036で拡張）: 採用したPlanの記帳（知覚の
+      決定的抽出元 — experiences.plan列へ）。payload = {plan, cap, size, seed,
+      n, q, fallback, tokens[...]} と劣化時のみ perception_degraded、
+      または手動指定時 {plan, cap, manual: true}。tokens / perception_degraded
+      の意味は tomo.decided と同じ
     - task.split（ADR-0023、ADR-0028で拡張）: 受理した分割提案の記帳。
       payload = {subtasks: [...], groups: [[...]], parallel_offered,
       parallel_accepted, est_cost_usd}。subtasks はフラットな実行順、

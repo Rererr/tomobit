@@ -54,6 +54,24 @@ const vocabLimit = 20
 // Context verbatim (perceiveSession below), so counting rows would let one
 // session with several preferences outrank several sessions that each used
 // a value once — the opposite of "recurred across real occurrences".
+// Vocab is the vocabulary both perceptions hand their extractor: the same
+// ranking, the same cap, read from the same current experiences. Task
+// Perception (ADR-0036) has to see this exact set, not its own slice of
+// Store.KnownValues — otherwise a saturated key would show the two callers
+// different spellings, and ADR-0036 Decision 2e's premise ("both go through
+// the same extractor, the same vocabulary, the same schema, so they converge
+// systematically") would be false in exactly the case where it matters. A
+// divergence between T_pre and T_post is supposed to be readable as the
+// extractor's calibration; it must not also be able to mean "they were shown
+// different words".
+func Vocab(s *store.Store) (map[string][]string, error) {
+	known, err := s.CurrentExperiences()
+	if err != nil {
+		return nil, err
+	}
+	return capVocab(known, vocabLimit), nil
+}
+
 func capVocab(exps []*core.Experience, limit int) map[string][]string {
 	type stat struct {
 		sessions map[string]bool
@@ -114,11 +132,21 @@ func capVocab(exps []*core.Experience, limit int) map[string][]string {
 	return out
 }
 
-// Extractor extracts semantic context attributes from a session's events.
-// vocab maps each semantic key to values already known to Tomobit,
-// handed to the prompt to prevent vocabulary drift (SCHEMA.md D5).
+// Extractor extracts semantic context attributes either from a session's
+// events (after execution) or from a task description (before execution —
+// PERCEPTION_ENGINE.md Task Perception, ADR-0011 Decision 3). Both read the
+// same SemanticKeys and the same known-vocabulary discipline (SCHEMA.md D5);
+// vocab maps each semantic key to values already known to Tomobit, handed to
+// the prompt to prevent vocabulary drift.
 type Extractor interface {
 	ExtractContext(events []*store.Event, vocab map[string][]string) (map[string]string, error)
+	// ExtractTaskContext reads intent — a task description, not yet an
+	// event — through the same schema/prompt/validation guarantee
+	// ExtractContext gives session-based extraction (ADR-0036 Decision
+	// 2c). It never synthesizes a pseudo-event to reuse ExtractContext's
+	// signature: a task description is not an occurrence, and shaping it
+	// into one would blur the ledger's meaning (ADR-0036 Consequences).
+	ExtractTaskContext(intent string, vocab map[string][]string) (map[string]string, error)
 	Name() string // extractor_model, e.g. "qwen3:8b"
 }
 
@@ -172,19 +200,7 @@ func (p *Perceiver) perceiveSession(sessionID string) ([]*core.Experience, error
 		}
 	}
 
-	ctx := map[string]string{}
-	for _, k := range SemanticKeys {
-		if v := strings.TrimSpace(strings.ToLower(semantic[k])); v != "" {
-			ctx[k] = v
-		}
-	}
-	// qwen3:8b echoes the language into framework despite the prompt rule
-	// (measured: "go worker pool" → framework=go survived two prompt
-	// iterations). A language is never a framework, and the equality is
-	// decidable — so decide it here, not in the prompt (ADR-0004).
-	if ctx["framework"] == ctx["lang"] {
-		delete(ctx, "framework")
-	}
+	ctx := normalizeSemantic(semantic)
 	if det.capability != "" {
 		ctx["cap"] = det.capability
 	}
@@ -223,6 +239,57 @@ func (p *Perceiver) perceiveSession(sessionID string) ([]*core.Experience, error
 		return nil, err
 	}
 	return out, nil
+}
+
+// normalizeSemantic applies the one normalization guarantee every reader of
+// an Extractor's raw output shares, regardless of source: TrimSpace+ToLower
+// per key, empty values dropped, and framework cleared when it echoes lang
+// (qwen3:8b measured doing this: "go worker pool" → framework=go survived
+// two prompt iterations — a language is never a framework, and the equality
+// is decidable, so it is decided here rather than trusted to the prompt,
+// ADR-0004). perceiveSession and PerceiveTaskContext both call this instead
+// of each carrying its own copy, so the "same 「形」" PERCEPTION_ENGINE.md
+// requires from both Task Perception sources is one code path, not two.
+func normalizeSemantic(raw map[string]string) map[string]string {
+	ctx := map[string]string{}
+	for _, k := range SemanticKeys {
+		if v := strings.TrimSpace(strings.ToLower(raw[k])); v != "" {
+			ctx[k] = v
+		}
+	}
+	if ctx["framework"] == ctx["lang"] {
+		delete(ctx, "framework")
+	}
+	return ctx
+}
+
+// PerceiveTaskContext extracts Context attribute tokens from a task
+// description before anything has happened — the pre-execution counterpart
+// to perceiveSession (PERCEPTION_ENGINE.md: Task Perception). It shares the
+// extractor, SemanticKeys, and normalizeSemantic guarantee session-based
+// perception uses; only the source text handed to the model differs (a task
+// description instead of a session's events). A nil extractor mirrors
+// perceiveSession's own nil-Extractor path: no semantic context, no error.
+//
+// The result stops at normalizeSemantic's form (TrimSpace+ToLower) and does
+// not additionally apply core.CanonValue. perceiveSession stores Context the
+// same way — CanonValue is first applied later, uniformly, at Scope
+// generation (core.Experience.Tokens → core.CanonToken; SCHEMA.md D5's
+// "known drift", still open). Doing it here would make this the one
+// SemanticKeys reader that disagrees with capVocab, Store.KnownValues, and
+// stored Context about what "normalized" means, while the caller already
+// owns a CanonToken call for the deterministic cap/size tokens (ADR-0036
+// Decision 1, decisionTokens) — folding lang/framework/topic/size into that
+// same call keeps one normalization boundary instead of two.
+func PerceiveTaskContext(extractor Extractor, intent string, vocab map[string][]string) (map[string]string, error) {
+	if extractor == nil {
+		return map[string]string{}, nil
+	}
+	raw, err := extractor.ExtractTaskContext(intent, vocab)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeSemantic(raw), nil
 }
 
 func (p *Perceiver) extractorName() string {

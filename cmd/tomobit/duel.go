@@ -89,7 +89,12 @@ func duelBudgetOK(s *store.Store, now int64) (bool, error) {
 // pre-run gap exists. Whatever the answer, the offer is recorded (a declined
 // offer still spends the budget — ADR-0007 Decision 3): the record both rate-
 // limits future offers and lets the face know Tomo asked.
-func duelOffer(s *store.Store, capability, size string, in *bufio.Reader, out io.Writer, interactive bool, now int64) (curiosity.Gap, bool) {
+//
+// tp is the task's Task Perception holder (ADR-0036 Decision 2b) — duelOffer
+// runs before task.started is even recorded, so it is often the first of the
+// three decision paths to ask, which is exactly why the holder exists rather
+// than being owned by autoDecide alone.
+func duelOffer(s *store.Store, capability, size string, in *bufio.Reader, out io.Writer, interactive bool, now int64, tp *taskPerception) (curiosity.Gap, bool) {
 	if !interactive {
 		return curiosity.Gap{}, false
 	}
@@ -106,7 +111,11 @@ func duelOffer(s *store.Store, capability, size string, in *bufio.Reader, out io
 		fmt.Fprintln(os.Stderr, "duel: gap derivation failed:", err)
 		return curiosity.Gap{}, false
 	}
-	gap, found := pickDuelGap(gaps, decisionTokens(capability, size))
+	var semantic []string
+	if tp != nil {
+		semantic = tp.semanticTokens(out)
+	}
+	gap, found := pickDuelGap(gaps, perceptionTokens(capability, size, semantic))
 	if !found {
 		return curiosity.Gap{}, false
 	}
@@ -177,7 +186,10 @@ func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, cap
 	childSID := [2]string{}
 	adapter := [2]executor.Adapter{}
 	for i, p := range pair {
-		sid, a, _, err := openSubtask(s, out, p, capability, size, prompt, parentSID)
+		// tp: nil — a duel's providerName is always one concrete side of the
+		// gap (never "auto"), so openSubtask's autoDecide branch is
+		// structurally unreachable here; there is nothing to hand it.
+		sid, a, _, err := openSubtask(s, out, p, capability, size, prompt, parentSID, nil)
 		if err != nil {
 			return err
 		}

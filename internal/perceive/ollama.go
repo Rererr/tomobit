@@ -39,6 +39,12 @@ const (
 	// lines, not the full transcript, so bounding the prompt trades away
 	// transcript detail the extractor was not using anyway.
 	maxSessionChars = 12000
+	// maxTaskChars caps the task description Task Perception reads (ADR-0036).
+	// It sits well under maxSessionChars because a task description is one
+	// person's request, not a transcript: the dogfood ledger's intents top out
+	// at 1138 characters (measured 2026-07-21), so 4000 leaves room for a
+	// pasted spec while still bounding a paste of a whole file.
+	maxTaskChars = 4000
 )
 
 // format: shape only (ADR-0005 Decision 2).
@@ -68,15 +74,23 @@ Rules:
 - Do not guess: when unsure, return "".`
 
 func (o *Ollama) ExtractContext(events []*store.Event, vocab map[string][]string) (map[string]string, error) {
+	return o.extract(eventsSection(events), vocab)
+}
+
+// ExtractTaskContext is ExtractContext's pre-execution counterpart
+// (ADR-0036 Decision 2c): same schema, prompt, and vocabulary — only
+// taskSection's text differs from eventsSection's.
+func (o *Ollama) ExtractTaskContext(intent string, vocab map[string][]string) (map[string]string, error) {
+	return o.extract(taskSection(intent), vocab)
+}
+
+// extract runs the request/response cycle shared by ExtractContext and
+// ExtractTaskContext; userContent is the only thing that differs between a
+// session's events and a task description.
+func (o *Ollama) extract(userContent string, vocab map[string][]string) (map[string]string, error) {
 	url := o.URL
 	if url == "" {
 		url = "http://localhost:11434"
-	}
-
-	var vb strings.Builder
-	vb.WriteString("Known vocabulary:\n")
-	for _, k := range SemanticKeys {
-		vb.WriteString(fmt.Sprintf("- %s: %s\n", k, strings.Join(vocab[k], ", ")))
 	}
 
 	body, err := json.Marshal(map[string]any{
@@ -88,8 +102,8 @@ func (o *Ollama) ExtractContext(events []*store.Event, vocab map[string][]string
 			"temperature": 0,
 		},
 		"messages": []map[string]string{
-			{"role": "system", "content": extractSystem + "\n\n" + vb.String()},
-			{"role": "user", "content": eventsSection(events)},
+			{"role": "system", "content": extractSystem + "\n\n" + vocabSection(vocab)},
+			{"role": "user", "content": userContent},
 		},
 	})
 	if err != nil {
@@ -121,16 +135,36 @@ func (o *Ollama) ExtractContext(events []*store.Event, vocab map[string][]string
 	return out, nil
 }
 
+// decisionRecordTypes are the harness's own internal record of what it
+// decided (tomo.decided) or selected (plan.selected) — not Reality
+// (PERCEPTION_ENGINE.md: Reality → Observation). eventsSection excludes
+// them so a re-perceived session cannot read back its own prior guess and
+// call that agreement (ADR-0036 Decision 2d). The ledger keeps them
+// (parseDeterministic still reads plan.selected directly, unaffected by
+// this map — it consumes the events slice, not eventsSection's rendering)
+// so the audit trail is intact; only what the extraction prompt sees
+// changes.
+var decisionRecordTypes = map[string]bool{
+	"tomo.decided":  true,
+	"plan.selected": true,
+}
+
 // eventsSection renders a session's events for the prompt, within
 // maxEventChars/maxSessionChars. Truncation is noted inline so the model
 // (and anyone reading the prompt while debugging) can tell the digest is
-// partial rather than assume the transcript ended there.
+// partial rather than assume the transcript ended there. decisionRecordTypes
+// events are dropped before that accounting — their absence is a category
+// exclusion, not a budget one, so it does not count toward the "omitted"
+// note (which would otherwise wrongly suggest they were cut for space).
 func eventsSection(events []*store.Event) string {
 	var sb strings.Builder
 	sb.WriteString("Session events:\n")
 	total := 0
 	omitted := 0
 	for _, e := range events {
+		if decisionRecordTypes[e.Type] {
+			continue
+		}
 		p, _ := json.Marshal(e.Payload)
 		line := fmt.Sprintf("%s %s\n", e.Type, p)
 		if len(line) > maxEventChars {
@@ -147,4 +181,35 @@ func eventsSection(events []*store.Event) string {
 		fmt.Fprintf(&sb, "...[%d further event(s) omitted: session digest limit reached]\n", omitted)
 	}
 	return sb.String()
+}
+
+// taskSection renders a task description for the prompt — the pre-execution
+// counterpart to eventsSection (ADR-0036 Decision 2c).
+//
+// It carries its own budget for the same reason eventsSection does. The
+// dogfood ledger's task.started intents average 226 characters and top out at
+// 1138 (measured 2026-07-21), so this cap never fires on a typed one-liner —
+// but a chat turn can be a pasted block (ADR-0024: 複数行貼り付けはそのまま
+// 1つの依頼になる), and the attributes being extracted (lang / framework /
+// topic) are announced in the opening sentences, not the appendix. Cutting
+// head-first keeps the part that decides the answer and drops the part that
+// only costs tokens.
+func taskSection(intent string) string {
+	if len(intent) > maxTaskChars {
+		intent = intent[:maxTaskChars] + "…"
+	}
+	return "Task description:\n" + intent
+}
+
+// vocabSection renders the known-vocabulary block both eventsSection and
+// taskSection prompts embed (SCHEMA.md D5), so a value already in the ledger
+// converges onto its existing spelling instead of drifting into a
+// near-duplicate.
+func vocabSection(vocab map[string][]string) string {
+	var vb strings.Builder
+	vb.WriteString("Known vocabulary:\n")
+	for _, k := range SemanticKeys {
+		vb.WriteString(fmt.Sprintf("- %s: %s\n", k, strings.Join(vocab[k], ", ")))
+	}
+	return vb.String()
 }

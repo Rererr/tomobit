@@ -182,9 +182,13 @@ func readSplitProposal(texts []string) [][]string {
 // unchanged echo. It never reaches runGroups/runGroupParallel — the gate that
 // leads there requires interactive, which a view session structurally never is
 // (validateViewFlag forces stdout non-TTY), so there is nothing to wire there.
+//
+// tp is the parent task's Task Perception holder, handed straight through to
+// every subtask opened below (ADR-0036 Decision 2b: a split child reads the
+// parent's tokens, never re-perceives).
 func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]string,
 	parentIntent, providerName, capability, size, permMode string, timeout time.Duration,
-	in *bufio.Reader, out io.Writer, interactive bool, newView func(string) view) (subs []string, cancelled bool, err error) {
+	in *bufio.Reader, out io.Writer, interactive bool, newView func(string) view, tp *taskPerception) (subs []string, cancelled bool, err error) {
 	subs, idxGroups := flattenGroups(groups)
 	now := time.Now().UnixMilli()
 
@@ -224,10 +228,10 @@ func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups 
 
 	if accepted {
 		cancelled, err = runGroups(ctx, s, parentSID, groups, subs, parentIntent,
-			providerName, capability, size, permMode, timeout, in, out)
+			providerName, capability, size, permMode, timeout, in, out, tp)
 	} else {
 		cancelled, err = runSubtasksSequential(ctx, s, parentSID, subs, parentIntent,
-			providerName, capability, size, permMode, timeout, in, out, newView)
+			providerName, capability, size, permMode, timeout, in, out, newView, tp)
 	}
 	return subs, cancelled, err
 }
@@ -241,14 +245,14 @@ func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups 
 // caller skips finishTask.
 func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][]string, subs []string,
 	parentIntent, providerName, capability, size, permMode string, timeout time.Duration,
-	in *bufio.Reader, out io.Writer) (cancelled bool, err error) {
+	in *bufio.Reader, out io.Writer, tp *taskPerception) (cancelled bool, err error) {
 	var mu sync.Mutex // guards the shared terminal, not the store (its single connection serializes writes)
 	base := 0
 	for gi, g := range groups {
 		if len(g) > 1 {
 			fmt.Fprintf(out, "-- group %d/%d: %d本を並走 --\n", gi+1, len(groups), len(g))
 			failed, canc, err := runGroupParallel(ctx, s, parentSID, g, base, len(subs),
-				providerName, capability, size, parentIntent, permMode, timeout, in, out, &mu)
+				providerName, capability, size, parentIntent, permMode, timeout, in, out, &mu, tp)
 			base += len(g)
 			if err != nil {
 				return false, err
@@ -268,7 +272,7 @@ func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][
 			// gate shut). A view is therefore never available on this path; nil
 			// is that structural fact, not a placeholder for future wiring.
 			failed, canc, err := runSubtaskSequential(ctx, s, parentSID, g[0], base, len(subs),
-				providerName, capability, size, parentIntent, permMode, timeout, in, out, nil)
+				providerName, capability, size, parentIntent, permMode, timeout, in, out, nil, tp)
 			base++
 			if err != nil {
 				return false, err
@@ -292,11 +296,11 @@ func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][
 // leaves no half-run in the ledger.
 func runSubtasksSequential(ctx context.Context, s *store.Store, parentSID string, subs []string,
 	parentIntent, providerName, capability, size, permMode string, timeout time.Duration,
-	in *bufio.Reader, out io.Writer, newView func(string) view) (cancelled bool, err error) {
+	in *bufio.Reader, out io.Writer, newView func(string) view, tp *taskPerception) (cancelled bool, err error) {
 	for i, sub := range subs {
 		fmt.Fprintf(out, "-- subtask %d/%d: %s --\n", i+1, len(subs), truncate(sub, 60))
 		failed, canc, err := runSubtaskSequential(ctx, s, parentSID, sub, i, len(subs),
-			providerName, capability, size, parentIntent, permMode, timeout, in, out, newView)
+			providerName, capability, size, parentIntent, permMode, timeout, in, out, newView, tp)
 		if err != nil {
 			return false, err
 		}
@@ -325,8 +329,8 @@ func runSubtasksSequential(ctx context.Context, s *store.Store, parentSID string
 // drives begin/show/end around the run exactly as an ordinary turn does.
 func runSubtaskSequential(ctx context.Context, s *store.Store, parentSID, sub string, gi, total int,
 	providerName, capability, size, parentIntent, permMode string, timeout time.Duration,
-	in *bufio.Reader, out io.Writer, newView func(string) view) (failed, cancelled bool, err error) {
-	sid, adapter, human, err := openSubtask(s, out, providerName, capability, size, sub, parentSID)
+	in *bufio.Reader, out io.Writer, newView func(string) view, tp *taskPerception) (failed, cancelled bool, err error) {
+	sid, adapter, human, err := openSubtask(s, out, providerName, capability, size, sub, parentSID, tp)
 	if err != nil {
 		return false, false, err
 	}
@@ -402,7 +406,7 @@ func subtaskSink(s *store.Store, sid string, out io.Writer, v view) executor.Sin
 // group) and cancelled (SIGINT — children and parent already hold task.cancelled).
 func runGroupParallel(ctx context.Context, s *store.Store, parentSID string, group []string, base, total int,
 	providerName, capability, size, parentIntent, permMode string, timeout time.Duration,
-	in *bufio.Reader, out io.Writer, mu *sync.Mutex) (failed, cancelled bool, err error) {
+	in *bufio.Reader, out io.Writer, mu *sync.Mutex, tp *taskPerception) (failed, cancelled bool, err error) {
 	type member struct {
 		sid     string
 		adapter executor.Adapter
@@ -412,8 +416,11 @@ func runGroupParallel(ctx context.Context, s *store.Store, parentSID string, gro
 	}
 	members := make([]member, len(group))
 	sids := make([]string, len(group))
+	// This loop is sequential — every openSubtask call (and so every possible
+	// tp.semanticTokens ask) happens before the goroutines below ever start —
+	// so tp needs no locking of its own beyond sync.Once's.
 	for k, sub := range group {
-		sid, adapter, human, err := openSubtask(s, out, providerName, capability, size, sub, parentSID)
+		sid, adapter, human, err := openSubtask(s, out, providerName, capability, size, sub, parentSID, tp)
 		if err != nil {
 			return false, false, err
 		}

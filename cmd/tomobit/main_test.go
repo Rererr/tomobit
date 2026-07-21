@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -139,6 +140,16 @@ type fakePerceiveExtractor struct {
 }
 
 func (f *fakePerceiveExtractor) ExtractContext([]*store.Event, map[string][]string) (map[string]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.semantic, nil
+}
+
+// ExtractTaskContext mirrors ExtractContext: the fake's session-based and
+// task-based behavior are the same fixture, since no test here cares about
+// the two diverging.
+func (f *fakePerceiveExtractor) ExtractTaskContext(string, map[string][]string) (map[string]string, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -399,7 +410,7 @@ func TestAutoDecideRecordsReplayableSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dec, err := autoDecide(s, io.Discard, "sess", "implement", "large")
+	dec, err := autoDecide(s, io.Discard, "sess", "implement", "large", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -932,7 +943,7 @@ func TestRunSplitNormalFlowRecordsParentAndPerSubtaskLedger(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
-		"implement", "", "", 0, in, &out, false, extractor)
+		"implement", "", "", 0, in, &out, false, extractor, nil)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -1004,7 +1015,7 @@ func TestRunSplitFlattensGroupsAndRecordsIndexGroups(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
-		"implement", "", "", 0, bufio.NewReader(strings.NewReader("")), &out, false, extractor)
+		"implement", "", "", 0, bufio.NewReader(strings.NewReader("")), &out, false, extractor, nil)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -1050,7 +1061,7 @@ func TestRunSplitFlatProposalOmitsGroups(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
-		"implement", "", "", 0, bufio.NewReader(strings.NewReader("")), &out, false, extractor); err != nil {
+		"implement", "", "", 0, bufio.NewReader(strings.NewReader("")), &out, false, extractor, nil); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -1219,7 +1230,7 @@ func TestRunSplitStopsAfterAFailedSubtask(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	err := runSplit(context.Background(), s, parentSID, groups, "big task", "fail-split",
-		"implement", "", "", 0, in, &out, false, extractor)
+		"implement", "", "", 0, in, &out, false, extractor, nil)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -1264,7 +1275,7 @@ func TestRunSplitAutoInheritsDecisionEnginePerSubtask(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	err := runSplit(context.Background(), s, parentSID, groups, "big task", "auto",
-		"implement", "", "", 0, in, &out, false, extractor)
+		"implement", "", "", 0, in, &out, false, extractor, nil)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -1277,6 +1288,49 @@ func TestRunSplitAutoInheritsDecisionEnginePerSubtask(t *testing.T) {
 		if n := countEventsOfTypeInSession(t, s, sid, "tomo.decided"); n != 1 {
 			t.Errorf("subtask %d should record tomo.decided under --provider auto, got %d", i, n)
 		}
+	}
+}
+
+// TestRunSplitSharesOneTaskPerceptionHolderAcrossChildren exercises the full
+// runSplit → executeSplit → runSubtasksSequential/runGroupParallel →
+// openSubtask threading (ADR-0036 Decision 2b), not just openSubtask in
+// isolation: both --provider auto subtasks must share the parent's holder,
+// so a regression that drops tp anywhere along that chain (e.g. a call site
+// silently passing nil instead of threading it through) shows up here as a
+// second extraction.
+func TestRunSplitSharesOneTaskPerceptionHolderAcrossChildren(t *testing.T) {
+	s := openTestStore(t)
+
+	saved := providers
+	providers = map[string]executor.Adapter{
+		"fake-a": &fakeSplitAdapter{name: "fake-a", line: "did a"},
+		"fake-b": &fakeSplitAdapter{name: "fake-b", line: "did b"},
+	}
+	t.Cleanup(func() { providers = saved })
+
+	const parentSID = "parent-auto-tp"
+	if err := s.AppendEvent(parentSID, "task.started", 1000,
+		map[string]any{"intent": "big task", "source": "production"}); err != nil {
+		t.Fatal(err)
+	}
+
+	groups := [][]string{{"subtask A"}, {"subtask B"}}
+	in := bufio.NewReader(strings.NewReader(strings.Repeat("\n", 8)))
+	var out bytes.Buffer
+	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
+	fake := &countingTaskExtract{semantic: map[string]string{"lang": "go"}}
+	tp := newTaskPerception("big task", fake.fn)
+
+	err := runSplit(context.Background(), s, parentSID, groups, "big task", "auto",
+		"implement", "", "", 0, in, &out, false, extractor, tp)
+	if err != nil {
+		t.Fatalf("runSplit: %v", err)
+	}
+	if len(subtaskSessionIDs(t, s, parentSID)) != 2 {
+		t.Fatalf("expected 2 subtask sessions")
+	}
+	if fake.calls != 1 {
+		t.Errorf("two --provider auto subtasks under one split should share one extraction, got %d calls", fake.calls)
 	}
 }
 
@@ -1301,7 +1355,7 @@ func TestDecisionReadsTheSizeScopedConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dec, err := autoDecide(s, io.Discard, "s-decide", "implement", "large")
+	dec, err := autoDecide(s, io.Discard, "s-decide", "implement", "large", nil)
 	if err != nil {
 		t.Fatalf("autoDecide: %v", err)
 	}
@@ -1324,5 +1378,379 @@ func TestDecisionTokensDropTheUndeclaredSize(t *testing.T) {
 	}
 	if got, want := decisionTokens("implement", "Large"), []string{"cap=implement", "size=large"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("decisionTokens(implement, Large) = %v, want %v", got, want)
+	}
+}
+
+// ADR-0036 Decision 2c: an extractor's own guess at cap or size must lose to
+// what the harness already knows for certain — deciding on a model's guess
+// when the machine already has the answer would be strictly worse, never
+// better, than the deterministic value.
+func TestPerceptionTokensDeterministicTokensWinOverSemanticGuesses(t *testing.T) {
+	got := perceptionTokens("implement", "large", []string{"cap=refactor", "size=small", "lang=go"})
+	want := []string{"cap=implement", "size=large", "lang=go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// No semantic tokens (a nil holder, or one that never extracted anything)
+// must fold to exactly decisionTokens' own output — Task Perception adds,
+// it never changes, the deterministic baseline.
+func TestPerceptionTokensWithNoSemanticMatchesDecisionTokens(t *testing.T) {
+	got := perceptionTokens("implement", "", nil)
+	want := decisionTokens("implement", "")
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// countingTaskExtract is a taskExtractFunc source that counts its own calls
+// and answers with a fixed semantic map or a fixed error — the seam every
+// Task Perception test below uses instead of ever reaching a real LLM
+// backend.
+type countingTaskExtract struct {
+	calls    int
+	semantic map[string]string
+	err      error
+}
+
+func (c *countingTaskExtract) fn(string) (map[string]string, error) {
+	c.calls++
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.semantic, nil
+}
+
+// TestTaskPerceptionExtractsOnceAndCachesAcrossCalls pins ADR-0036 Decision
+// 2b's core guarantee: whichever of the three decision paths asks first
+// perceives, and every asker after that — standing in for autoDecide /
+// ChoosePlan / pickDuelGap here — reads the identical cached result.
+func TestTaskPerceptionExtractsOnceAndCachesAcrossCalls(t *testing.T) {
+	fake := &countingTaskExtract{semantic: map[string]string{"lang": "go"}}
+	tp := newTaskPerception("fix the go handler", fake.fn)
+
+	want := []string{"lang=go"}
+	for i := 0; i < 3; i++ {
+		if got := tp.semanticTokens(io.Discard); !reflect.DeepEqual(got, want) {
+			t.Errorf("call %d: got %v, want %v", i+1, got, want)
+		}
+	}
+	if fake.calls != 1 {
+		t.Errorf("extraction should run once across 3 askers, got %d calls", fake.calls)
+	}
+}
+
+// A holder nobody asks must never extract (ADR-0036 Decision 2b: the
+// cost Decision 2 measured is spent only when a caller actually wants the
+// tokens).
+func TestTaskPerceptionNeverExtractsIfNeverAsked(t *testing.T) {
+	fake := &countingTaskExtract{semantic: map[string]string{"lang": "go"}}
+	newTaskPerception("fix the go handler", fake.fn)
+	if fake.calls != 0 {
+		t.Errorf("a holder nobody asked must never extract, got %d calls", fake.calls)
+	}
+}
+
+// A failing extractor still lets the decision proceed on Decision 1's
+// deterministic tokens, and the failure is confessed exactly once — not
+// retried on every later asker, not swallowed into silence (ADR-0009: the
+// machine's own channel).
+func TestTaskPerceptionDegradesOnceAndLogsOnceOnExtractionFailure(t *testing.T) {
+	fake := &countingTaskExtract{err: fmt.Errorf("mlx-lm: connection refused")}
+	tp := newTaskPerception("fix it", fake.fn)
+
+	var out bytes.Buffer
+	for i := 0; i < 3; i++ {
+		if got := tp.semanticTokens(&out); got != nil {
+			t.Errorf("call %d: a failed extraction should yield no semantic tokens, got %v", i+1, got)
+		}
+	}
+	if fake.calls != 1 {
+		t.Errorf("a failing extractor must still only be tried once per task, got %d calls", fake.calls)
+	}
+	if n := strings.Count(out.String(), "\n"); n != 1 {
+		t.Errorf("degradation must log exactly one operational line across 3 askers, got %d: %q", n, out.String())
+	}
+	if !strings.Contains(out.String(), "connection refused") {
+		t.Errorf("the log line should name the failure reason: %q", out.String())
+	}
+	if tp.degradedReason() == "" {
+		t.Error("degradedReason should carry the failure for the decision audit")
+	}
+}
+
+// A nil extract func (a taskPerception built with no backend at all — the
+// state a holder is in if a future caller ever legitimately omits one) is
+// the same "黙って劣化するな" contract as a failing one: a reason is logged
+// and recorded, not silently absorbed.
+func TestTaskPerceptionDegradesWhenNoExtractorWired(t *testing.T) {
+	tp := newTaskPerception("fix it", nil)
+	var out bytes.Buffer
+	if got := tp.semanticTokens(&out); got != nil {
+		t.Errorf("no extractor wired should yield no semantic tokens, got %v", got)
+	}
+	if out.Len() == 0 {
+		t.Error("an unwired extractor must still log once, not silently degrade")
+	}
+	if tp.degradedReason() == "" {
+		t.Error("degradedReason should be non-empty when nothing was wired")
+	}
+}
+
+// openTask's non-auto path never reaches autoDecide, so a task pinned to a
+// concrete provider must never trigger Task Perception at all (ADR-0036
+// Decision 2b: "誰も要求しなければ知覚は走らない").
+func TestOpenTaskSkipsTaskPerceptionForAnExplicitProvider(t *testing.T) {
+	s := openTestStore(t)
+	fake := &countingTaskExtract{semantic: map[string]string{"lang": "go"}}
+	tp := newTaskPerception("fix the go handler", fake.fn)
+
+	if _, _, _, err := openTask(s, io.Discard, "claude-code", "implement", "", "fix the go handler", tp); err != nil {
+		t.Fatal(err)
+	}
+	if fake.calls != 0 {
+		t.Errorf("an explicit provider never reaches autoDecide, so extraction must not run: got %d calls", fake.calls)
+	}
+}
+
+// duelOffer returns before ever reading a gap when non-interactive — another
+// "nobody asked" path (ADR-0036 Decision 2b), since a headless run has no
+// terminal to offer the experiment on in the first place.
+func TestDuelOfferNonInteractiveNeverAsksTaskPerception(t *testing.T) {
+	s := openTestStore(t)
+	fake := &countingTaskExtract{semantic: map[string]string{"lang": "go"}}
+	tp := newTaskPerception("fix the go handler", fake.fn)
+
+	duelOffer(s, "implement", "", bufio.NewReader(strings.NewReader("")), io.Discard, false, 1000, tp)
+	if fake.calls != 0 {
+		t.Errorf("a non-interactive run must never ask Task Perception, got %d calls", fake.calls)
+	}
+}
+
+// A split child is the parent task's own decomposition, not a second task
+// (ADR-0036 Decision 2b): both subtasks below share one holder, and only the
+// first to open reaches into it.
+func TestOpenSubtaskReusesParentHolderWithoutReperceiving(t *testing.T) {
+	s := openTestStore(t)
+	registerFakeProvider(t, "fake-a", &fakeSplitAdapter{name: "fake-a"})
+	registerFakeProvider(t, "fake-b", &fakeSplitAdapter{name: "fake-b"})
+
+	fake := &countingTaskExtract{semantic: map[string]string{"lang": "go"}}
+	tp := newTaskPerception("split this up", fake.fn)
+
+	if _, _, _, err := openSubtask(s, io.Discard, "auto", "implement", "", "sub one", "parent", tp); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := openSubtask(s, io.Discard, "auto", "implement", "", "sub two", "parent", tp); err != nil {
+		t.Fatal(err)
+	}
+	if fake.calls != 1 {
+		t.Errorf("both children share the parent's holder — extraction should run once, got %d calls", fake.calls)
+	}
+}
+
+// End to end: a real Connection scoped on a Task Perception token (lang) is
+// only reachable once the semantic tokens actually reach decide.Choose, and
+// the extractor's own cap/size guesses must be dropped in favor of the
+// deterministic ones already known before the run (ADR-0036 Decision 2c).
+func TestAutoDecideMergesSemanticTokensWithDeterministicPrecedence(t *testing.T) {
+	registerFakeProvider(t, "prov-a", &fakeSplitAdapter{name: "prov-a"})
+	s := openTestStore(t)
+	en := &core.Engine{Repo: s}
+	now := time.Now().UnixMilli()
+	growCapability(t, s, en, "cap=implement", "prov-a", now, 4, 1)
+	child := &core.Connection{
+		Kind: core.ConnCapability, ScopeKey: "cap=implement|lang=go", Target: "prov-a",
+		Alpha: 9, Beta: 1, LastUpdate: now, BornTS: now,
+		ParentKey: "cap=implement", PriorA: 1, PriorB: 1,
+	}
+	if err := s.UpsertConnection(child); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &countingTaskExtract{semantic: map[string]string{"lang": "go", "cap": "refactor", "size": "small"}}
+	tp := newTaskPerception("improve the go handler", fake.fn)
+
+	dec, err := autoDecide(s, io.Discard, "s-decide", "implement", "large", tp)
+	if err != nil {
+		t.Fatalf("autoDecide: %v", err)
+	}
+	var got string
+	for _, c := range dec.Candidates {
+		if c.Provider == "prov-a" {
+			got = c.ScopeKey
+		}
+	}
+	if want := "cap=implement|lang=go"; got != want {
+		t.Errorf("connection read for prov-a = %q, want %q — Task Perception's lang token should reach the decision", got, want)
+	}
+
+	rawTokens, ok := payloadOf(t, s, "tomo.decided")["tokens"].([]any)
+	if !ok {
+		t.Fatal("tomo.decided should record the tokens actually used for the decision (ADR-0036 Decision 2d)")
+	}
+	gotTokens := make([]string, len(rawTokens))
+	for i, tok := range rawTokens {
+		gotTokens[i] = tok.(string)
+	}
+	sort.Strings(gotTokens)
+	wantTokens := []string{"cap=implement", "lang=go", "size=large"}
+	if !reflect.DeepEqual(gotTokens, wantTokens) {
+		t.Errorf("recorded tokens = %v, want %v (the extractor's own cap/size must be dropped)", gotTokens, wantTokens)
+	}
+}
+
+// A failed extraction must not fail the decision — it proceeds on Decision
+// 1's deterministic tokens alone — and the reason is audited on tomo.decided
+// so it is measurable, not merely logged and forgotten (ADR-0036 Decision
+// 2b/2d).
+func TestAutoDecideRecordsPerceptionDegradedReasonWhenExtractionFails(t *testing.T) {
+	s := openTestStore(t)
+	fake := &countingTaskExtract{err: fmt.Errorf("mlx-lm: connection refused")}
+	tp := newTaskPerception("fix it", fake.fn)
+
+	dec, err := autoDecide(s, io.Discard, "s-decide", "implement", "", tp)
+	if err != nil {
+		t.Fatalf("a failed extraction must not fail the decision: %v", err)
+	}
+	if _, ok := providers[dec.Provider]; !ok && dec.Provider != "human" {
+		t.Fatalf("decided unregistered provider %q", dec.Provider)
+	}
+
+	payload := payloadOf(t, s, "tomo.decided")
+	reason, ok := payload["perception_degraded"].(string)
+	if !ok || reason == "" {
+		t.Errorf("a degraded extraction must be audited on tomo.decided, got %v", payload)
+	}
+	if !strings.Contains(reason, "connection refused") {
+		t.Errorf("the recorded reason should name the failure, got %q", reason)
+	}
+	tokens, _ := payload["tokens"].([]any)
+	if len(tokens) != 1 || tokens[0] != "cap=implement" {
+		t.Errorf("a degraded extraction should leave only the deterministic cap token, got %v", tokens)
+	}
+}
+
+// resolvePlan's auto branch is the same wiring as autoDecide's — this pins
+// that ChoosePlan's plan.selected carries the same audit contract (ADR-0036
+// Decision 2d), not just the provider-decision path.
+func TestResolvePlanRecordsTokensAndDegradedReason(t *testing.T) {
+	s := openTestStore(t)
+	fake := &countingTaskExtract{err: fmt.Errorf("ollama: connection refused")}
+	tp := newTaskPerception("fix it", fake.fn)
+
+	if _, err := resolvePlan(s, "sid", "auto", "implement", "medium", tp); err != nil {
+		t.Fatalf("resolvePlan: %v", err)
+	}
+	payload := payloadOf(t, s, "plan.selected")
+	if reason, ok := payload["perception_degraded"].(string); !ok || reason == "" {
+		t.Errorf("plan.selected should audit the degraded reason, got %v", payload)
+	}
+	tokens, ok := payload["tokens"].([]any)
+	if !ok || len(tokens) != 2 {
+		t.Errorf("plan.selected should record the tokens used (cap+size), got %v", payload["tokens"])
+	}
+}
+
+// finestMatch's tie-break among equally-specific Connections is lexical on
+// scope_key (internal/decide), which today means "cap" always wins — not by
+// design, but because it alphabetically precedes every other token key Task
+// Perception can now add (ADR-0036 Consequences: c<f<l<s<t). This pins that
+// accident so a future vocabulary addition that sorts earlier is caught
+// here, not discovered silently in production.
+func TestFinestMatchGranularityOneTieBreaksToCapAcrossFullVocabulary(t *testing.T) {
+	registerFakeProvider(t, "prov-a", &fakeSplitAdapter{name: "prov-a"})
+	s := openTestStore(t)
+	now := time.Now().UnixMilli()
+	// One granularity-1 Connection per token key that can reach a decision
+	// today: cap/size (ADR-0036 Decision 1) and lang/framework/topic
+	// (Decision 2). All equally specific, so only the tie-break can choose.
+	for _, scopeKey := range []string{
+		"cap=implement", "framework=stdlib", "lang=go", "size=medium", "topic=refactor",
+	} {
+		conn := &core.Connection{
+			Kind: core.ConnCapability, ScopeKey: scopeKey, Target: "prov-a",
+			Alpha: 5, Beta: 1, LastUpdate: now, BornTS: now,
+			PriorA: 1, PriorB: 1,
+		}
+		if err := s.UpsertConnection(conn); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fake := &countingTaskExtract{semantic: map[string]string{
+		"lang": "go", "framework": "stdlib", "topic": "refactor",
+	}}
+	tp := newTaskPerception("refactor the go stdlib usage", fake.fn)
+
+	dec, err := autoDecide(s, io.Discard, "s-decide", "implement", "medium", tp)
+	if err != nil {
+		t.Fatalf("autoDecide: %v", err)
+	}
+	var got string
+	for _, c := range dec.Candidates {
+		if c.Provider == "prov-a" {
+			got = c.ScopeKey
+		}
+	}
+	if want := "cap=implement"; got != want {
+		t.Errorf("granularity-1 tie-break = %q, want %q (alphabetically first token key among cap/framework/lang/size/topic)", got, want)
+	}
+}
+
+// Task Perception must be shown the same vocabulary session perception is
+// (ADR-0036 Decision 2c/2e): one ranking, one cap, one set of spellings. A
+// caller that built its own slice of the known values would make a T_pre /
+// T_post divergence unreadable — it could mean the extractor drifted, or just
+// that the two calls saw different words.
+func TestTaskPerceptionIsShownTheSameVocabularyAsSessionPerception(t *testing.T) {
+	s := openTestStore(t)
+	empty, err := perceive.Vocab(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != len(perceive.SemanticKeys) {
+		t.Errorf("an empty ledger should still cover every semantic key, got %v", empty)
+	}
+
+	exp := &core.Experience{
+		ID: "exp-1", SessionID: "sess-1", TS: 1000, Kind: core.KindExecution,
+		ExtractorVer: extractorVer, ExtractorModel: "none",
+		Context:  map[string]string{"lang": "rust", "framework": "axum"},
+		Provider: "prov-a", Source: "production",
+	}
+	if err := s.InsertExperience(exp); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := perceive.Vocab(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slicesEqual(got["lang"], []string{"rust"}) {
+		t.Errorf("lang vocab = %v, want [rust]", got["lang"])
+	}
+	if !slicesEqual(got["framework"], []string{"axum"}) {
+		t.Errorf("framework vocab = %v, want [axum]", got["framework"])
+	}
+}
+
+// taskExtractFuncFor is the seam between a taskPerception holder and the real
+// perceive.Extractor (ADR-0036 Decision 2c) — this pins that it actually
+// calls through to ExtractTaskContext rather than, say, ExtractContext (the
+// session-based sibling), using a fake Extractor so no test here reaches a
+// real LLM backend.
+func TestTaskExtractFuncForCallsExtractTaskContext(t *testing.T) {
+	s := openTestStore(t)
+	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
+	extract := taskExtractFuncFor(s, extractor)
+
+	got, err := extract("improve the go handler")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["lang"] != "go" {
+		t.Errorf("got %v, want lang=go from the wired extractor", got)
 	}
 }

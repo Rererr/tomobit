@@ -35,15 +35,23 @@ const mlxShapeBlock = `
 Output format: respond with a single JSON object and nothing else — no code fence, no preamble, no explanation. The object has exactly these 4 keys, all strings: "lang", "framework", "topic", "size". "size" must be one of "", "small", "medium", or "large".`
 
 func (m *MLXLM) ExtractContext(events []*store.Event, vocab map[string][]string) (map[string]string, error) {
+	return m.extract(eventsSection(events), vocab)
+}
+
+// ExtractTaskContext is ExtractContext's pre-execution counterpart
+// (ADR-0036 Decision 2c): same schema, prompt, and vocabulary — only
+// taskSection's text differs from eventsSection's.
+func (m *MLXLM) ExtractTaskContext(intent string, vocab map[string][]string) (map[string]string, error) {
+	return m.extract(taskSection(intent), vocab)
+}
+
+// extract runs the request/response cycle shared by ExtractContext and
+// ExtractTaskContext; userContent is the only thing that differs between a
+// session's events and a task description.
+func (m *MLXLM) extract(userContent string, vocab map[string][]string) (map[string]string, error) {
 	url := m.URL
 	if url == "" {
 		url = "http://localhost:8080"
-	}
-
-	var vb strings.Builder
-	vb.WriteString("Known vocabulary:\n")
-	for _, k := range SemanticKeys {
-		vb.WriteString(fmt.Sprintf("- %s: %s\n", k, strings.Join(vocab[k], ", ")))
 	}
 
 	body, err := json.Marshal(map[string]any{
@@ -53,8 +61,8 @@ func (m *MLXLM) ExtractContext(events []*store.Event, vocab map[string][]string)
 		"max_tokens":           512,
 		"chat_template_kwargs": map[string]any{"enable_thinking": false},
 		"messages": []map[string]string{
-			{"role": "system", "content": extractSystem + mlxShapeBlock + "\n\n" + vb.String()},
-			{"role": "user", "content": eventsSection(events)},
+			{"role": "system", "content": extractSystem + mlxShapeBlock + "\n\n" + vocabSection(vocab)},
+			{"role": "user", "content": userContent},
 		},
 	})
 	if err != nil {

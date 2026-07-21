@@ -141,15 +141,26 @@ func TestSuccessfulSubtaskShapeStaysNeutral(t *testing.T) {
 	}
 }
 
-// fakeExtractor returns a fixed semantic map and records the vocabulary it
-// was handed, so tests can assert the prompt input.
+// fakeExtractor returns a fixed semantic map and records the vocabulary (and,
+// for the task-perception path, the intent) it was handed, so tests can
+// assert the prompt input.
 type fakeExtractor struct {
-	semantic  map[string]string
-	lastVocab map[string][]string
+	semantic   map[string]string
+	lastVocab  map[string][]string
+	lastIntent string
+	taskErr    error
 }
 
 func (f *fakeExtractor) ExtractContext(events []*store.Event, vocab map[string][]string) (map[string]string, error) {
 	f.lastVocab = vocab
+	return f.semantic, nil
+}
+func (f *fakeExtractor) ExtractTaskContext(intent string, vocab map[string][]string) (map[string]string, error) {
+	f.lastIntent = intent
+	f.lastVocab = vocab
+	if f.taskErr != nil {
+		return nil, f.taskErr
+	}
 	return f.semantic, nil
 }
 func (f *fakeExtractor) Name() string { return "fake-extractor" }
@@ -462,5 +473,141 @@ func TestRunClearsPerceivedSessionsFromPending(t *testing.T) {
 	}
 	if len(again) != 0 {
 		t.Errorf("second run should produce nothing, got %d", len(again))
+	}
+}
+
+// TestPerceiveTaskContextAppliesTheSameNormalizationAsSessionPerception pins
+// ADR-0036 Decision 2c: a task description and a session's events must
+// converge on the identical Context shape, so the same lang value reaches
+// the same trimmed/lowercased token whichever side extracted it.
+func TestPerceiveTaskContextAppliesTheSameNormalizationAsSessionPerception(t *testing.T) {
+	ext := &fakeExtractor{semantic: map[string]string{"lang": " Rust ", "topic": "", "framework": "axum"}}
+
+	got, err := PerceiveTaskContext(ext, "add rate limiting in rust", map[string][]string{"lang": {"rust"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["lang"] != "rust" {
+		t.Errorf("lang should be trimmed/lowercased like session perception, got %v", got)
+	}
+	if _, ok := got["topic"]; ok {
+		t.Errorf("empty semantic value should be dropped: %v", got)
+	}
+	if got["framework"] != "axum" {
+		t.Errorf("framework: %v", got)
+	}
+}
+
+// TestPerceiveTaskContextDropsFrameworkWhenItEqualsLang pins the same
+// language-is-never-a-framework guard perceiveSession applies
+// (TestRunDropsFrameworkWhenItEqualsLang), reusing normalizeSemantic rather
+// than a second copy of the rule.
+func TestPerceiveTaskContextDropsFrameworkWhenItEqualsLang(t *testing.T) {
+	ext := &fakeExtractor{semantic: map[string]string{"lang": "go", "framework": "Go"}}
+
+	got, err := PerceiveTaskContext(ext, "improve the go worker pool", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["framework"]; ok {
+		t.Errorf("a language is never a framework — framework should be dropped: %v", got)
+	}
+	if got["lang"] != "go" {
+		t.Errorf("lang should survive the guard: %v", got)
+	}
+}
+
+// TestPerceiveTaskContextOnlyReturnsSemanticKeys guards the "素直な形"
+// contract (ADR-0036 Decision 2c): even if an Extractor implementation
+// returned extra map entries, only SemanticKeys should ever surface — cap
+// and size deciding is the caller's job (deterministic values win), not
+// something the extraction door does on its own.
+func TestPerceiveTaskContextOnlyReturnsSemanticKeys(t *testing.T) {
+	ext := &fakeExtractor{semantic: map[string]string{"lang": "go", "cap": "implement", "model": "opus"}}
+
+	got, err := PerceiveTaskContext(ext, "fix the go handler", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["cap"]; ok {
+		t.Errorf("cap must not leak through task perception: %v", got)
+	}
+	if _, ok := got["model"]; ok {
+		t.Errorf("model must not leak through task perception: %v", got)
+	}
+	if got["lang"] != "go" {
+		t.Errorf("lang: %v", got)
+	}
+}
+
+// TestPerceiveTaskContextPassesIntentAndVocabToTheExtractor pins the wiring
+// contract: the intent string and vocabulary reach the extractor unchanged,
+// the same discipline TestRunHandsKnownVocabularyToExtractor pins for the
+// session-based path.
+func TestPerceiveTaskContextPassesIntentAndVocabToTheExtractor(t *testing.T) {
+	ext := &fakeExtractor{semantic: map[string]string{}}
+	vocab := map[string][]string{"lang": {"rust", "go"}}
+
+	if _, err := PerceiveTaskContext(ext, "add rate limiting in rust", vocab); err != nil {
+		t.Fatal(err)
+	}
+	if ext.lastIntent != "add rate limiting in rust" {
+		t.Errorf("intent: got %q", ext.lastIntent)
+	}
+	if len(ext.lastVocab["lang"]) != 2 {
+		t.Errorf("vocab should reach the extractor unchanged: %v", ext.lastVocab)
+	}
+}
+
+// TestPerceiveTaskContextWithoutExtractorSkipsSemanticContext mirrors
+// TestRunWithoutExtractorSkipsSemanticContext: a nil Extractor is a
+// supported "no perception backend configured" state, not an error.
+func TestPerceiveTaskContextWithoutExtractorSkipsSemanticContext(t *testing.T) {
+	got, err := PerceiveTaskContext(nil, "add rate limiting", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("no extractor should mean no semantic context, got %v", got)
+	}
+}
+
+// TestPerceiveTaskContextPropagatesExtractorError pins that a failing
+// extraction is surfaced, not swallowed into an empty context — a wrong
+// Context silently recorded is worse than a task perception left undone.
+func TestPerceiveTaskContextPropagatesExtractorError(t *testing.T) {
+	ext := &fakeExtractor{taskErr: fmt.Errorf("boom")}
+
+	if _, err := PerceiveTaskContext(ext, "add rate limiting", nil); err == nil {
+		t.Error("expected the extractor's error to propagate")
+	}
+}
+
+// TestExtractionPromptHidesDecisionRecordsButPlanStillParsesDeterministically
+// pins ADR-0036 Decision 2d end to end: tomo.decided/plan.selected must
+// disappear from the extraction prompt (so a re-perceived session cannot
+// read back the harness's own prior guess and call that agreement) while the
+// same events slice must still yield the deterministic plan through
+// parseDeterministic — the prompt and the Go-side parse are two different
+// consumers of the same ledger.
+func TestExtractionPromptHidesDecisionRecordsButPlanStillParsesDeterministically(t *testing.T) {
+	events := []*store.Event{
+		ev("task.started", map[string]any{"source": "production"}),
+		ev("plan.selected", map[string]any{"plan": "direct", "seed": "123"}),
+		ev("tomo.decided", map[string]any{"provider": "claude", "seed": "123"}),
+		ev("task.finished", map[string]any{"adopted": "as-is"}),
+	}
+
+	prompt := eventsSection(events)
+	if strings.Contains(prompt, "plan.selected") || strings.Contains(prompt, "tomo.decided") {
+		t.Errorf("decision records must not reach the extraction prompt: %q", prompt)
+	}
+	if strings.Contains(prompt, "direct") || strings.Contains(prompt, "claude") {
+		t.Errorf("decision record payloads must not leak into the prompt: %q", prompt)
+	}
+
+	d := parseDeterministic(events)
+	if d.plan != "direct" {
+		t.Errorf("plan.selected must still parse deterministically: got %q", d.plan)
 	}
 }

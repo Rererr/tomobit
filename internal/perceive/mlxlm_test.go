@@ -74,6 +74,55 @@ func TestMLXExtractContextBuildsRequestAndParsesResponse(t *testing.T) {
 	}
 }
 
+func TestMLXExtractTaskContextSendsTheTaskDescriptionInsteadOfEvents(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("path: got %q, want /v1/chat/completions", r.URL.Path)
+		}
+		b, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(b, &gotBody); err != nil {
+			t.Fatalf("request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"content":"{\"lang\":\"rust\",\"framework\":\"\",\"topic\":\"rate-limiting\",\"size\":\"medium\"}"}}]}`)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "mlx-community/Qwen3-8B-4bit"}
+	vocab := map[string][]string{"lang": {"rust", "go"}, "framework": {}, "topic": {}, "size": {}}
+
+	out, err := m.ExtractTaskContext("add rate limiting to the payment API in rust", vocab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["lang"] != "rust" || out["topic"] != "rate-limiting" || out["size"] != "medium" {
+		t.Errorf("parsed content mismatch: %v", out)
+	}
+
+	messages, _ := gotBody["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("expected a system and a user message, got %d", len(messages))
+	}
+	user, _ := messages[1].(map[string]any)
+	content, _ := user["content"].(string)
+	if !strings.Contains(content, "Task description:") {
+		t.Errorf("user message should carry a task description, got %q", content)
+	}
+	if !strings.Contains(content, "add rate limiting to the payment API in rust") {
+		t.Errorf("user message should carry the intent verbatim, got %q", content)
+	}
+	if strings.Contains(content, "Session events:") {
+		t.Errorf("task perception must not use the session-events framing, got %q", content)
+	}
+
+	sys, _ := messages[0].(map[string]any)
+	sysContent, _ := sys["content"].(string)
+	if !strings.Contains(sysContent, "JSON object") {
+		t.Errorf("system prompt should still carry the MLX shape block, got %q", sysContent)
+	}
+}
+
 func TestMLXExtractContextStripsCodeFenceAroundTheObject(t *testing.T) {
 	content := "```json\n{\"lang\":\"go\",\"framework\":\"\",\"topic\":\"worker-pool\",\"size\":\"medium\"}\n```"
 	body, err := json.Marshal(map[string]any{

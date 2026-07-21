@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -212,6 +213,59 @@ func TestChatCloseAsksAdoptionAndRecordsIt(t *testing.T) {
 	}
 	if c.sid != "" || c.threadID != "" {
 		t.Errorf("the session must be closed: sid=%q thread=%q", c.sid, c.threadID)
+	}
+}
+
+// countingExtractor counts ExtractTaskContext calls, so a chat test can pin
+// how many times Task Perception actually ran without reaching a real LLM
+// backend.
+type countingExtractor struct{ calls int }
+
+func (c *countingExtractor) ExtractContext([]*store.Event, map[string][]string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+func (c *countingExtractor) ExtractTaskContext(string, map[string][]string) (map[string]string, error) {
+	c.calls++
+	return map[string]string{"lang": "go"}, nil
+}
+func (c *countingExtractor) Name() string { return "counting" }
+
+// TestChatPerceptionHolderIsFreshPerTask pins ADR-0036 Decision 2b's holder
+// lifetime: /new (closeTask) discards it, so a later task's own extraction
+// runs again from its own intent rather than silently reusing a stale
+// holder — the human provider keeps this test from launching anything real.
+func TestChatPerceptionHolderIsFreshPerTask(t *testing.T) {
+	s := openTestStore(t)
+	ext := &countingExtractor{}
+	c := &chat{
+		s: s, out: io.Discard, providerName: "human", capability: "implement",
+		extractor: ext, in: bufio.NewReader(strings.NewReader("\n\n\n\n")),
+	}
+
+	if err := c.startTask("first task"); err != nil {
+		t.Fatal(err)
+	}
+	if c.perception == nil {
+		t.Fatal("startTask must build a holder")
+	}
+	c.perception.semanticTokens(io.Discard) // stands in for whichever path asks first
+	if err := c.closeTask(); err != nil {
+		t.Fatal(err)
+	}
+	if c.perception != nil {
+		t.Error("closeTask (/new) must discard the task's holder")
+	}
+
+	if err := c.startTask("second task"); err != nil {
+		t.Fatal(err)
+	}
+	c.perception.semanticTokens(io.Discard)
+	if err := c.closeTask(); err != nil {
+		t.Fatal(err)
+	}
+
+	if ext.calls != 2 {
+		t.Errorf("each task must extract fresh from its own intent, got %d calls across two tasks", ext.calls)
 	}
 }
 

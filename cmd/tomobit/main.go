@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 	"unicode"
@@ -468,6 +469,21 @@ func cmdDo(args []string) error {
 	}
 	defer s.Close()
 
+	// Built once and reused for the rest of the run — the pre-run Task
+	// Perception holder below and the post-run perceiveBestEffort/runSplit
+	// both need an Extractor, and there is no reason for the backend/model/
+	// url resolution to happen twice in one invocation.
+	extractor, err := newExtractor(*backend, *url, *model)
+	if err != nil {
+		return err
+	}
+	// One lazy Task Perception holder for the whole task (ADR-0036 Decision
+	// 2b): whichever of duelOffer / autoDecide / ChoosePlan asks first
+	// perceives; every split child below is handed this same holder rather
+	// than building its own. A run nobody asks (--provider claude-code
+	// --plan direct, duel unfired) never perceives at all.
+	tp := newTaskPerception(prompt, taskExtractFuncFor(s, extractor))
+
 	// Before committing to one provider, Tomo may offer an A/B experiment
 	// (ADR-0026): if an open Preference Gap covers this capability, it asks to
 	// run both providers and settle the preference by real work. Y takes the
@@ -475,19 +491,15 @@ func cmdDo(args []string) error {
 	if duelEligible(providerExplicit, *providerName) {
 		now := time.Now().UnixMilli()
 		if gap, accepted := duelOffer(s, *capability, *size, stdin, os.Stdout,
-			isTTY(os.Stdin) && isTTY(os.Stdout), now); accepted {
+			isTTY(os.Stdin) && isTTY(os.Stdout), now, tp); accepted {
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 			defer stop()
-			extractor, err := newExtractor(*backend, *url, *model)
-			if err != nil {
-				return err
-			}
 			return runDuel(ctx, s, gap, prompt, *capability, *size, *permMode, *timeout,
 				stdin, os.Stdout, extractor)
 		}
 	}
 
-	sid, adapter, human, err := openTask(s, os.Stdout, *providerName, *capability, *size, prompt)
+	sid, adapter, human, err := openTask(s, os.Stdout, *providerName, *capability, *size, prompt, tp)
 	if err != nil {
 		return err
 	}
@@ -496,7 +508,7 @@ func cmdDo(args []string) error {
 	// step boundary the harness could drive.
 	planName := ""
 	if !human {
-		if planName, err = resolvePlan(s, sid, *planArg, *capability, *size); err != nil {
+		if planName, err = resolvePlan(s, sid, *planArg, *capability, *size, tp); err != nil {
 			return err
 		}
 	}
@@ -568,11 +580,6 @@ func cmdDo(args []string) error {
 		}
 	}
 
-	extractor, err := newExtractor(*backend, *url, *model)
-	if err != nil {
-		return err
-	}
-
 	// A clean run's output is read for a split proposal (ADR-0023 Decision
 	// 1): a broken run (runErr, non-zero exit, already excluded by ctx.Err()
 	// above) never reaches here, so its output is never trusted as one. The
@@ -582,7 +589,7 @@ func cmdDo(args []string) error {
 	if splitProtocol && runErr == nil && result.ExitCode == 0 {
 		if groups := readSplitProposal(texts); groups != nil {
 			return runSplit(ctx, s, sid, groups, prompt, *providerName, *capability, *size,
-				*permMode, *timeout, stdin, os.Stdout, isTTY(os.Stdin) && isTTY(os.Stdout), extractor)
+				*permMode, *timeout, stdin, os.Stdout, isTTY(os.Stdin) && isTTY(os.Stdout), extractor, tp)
 		}
 	}
 
@@ -642,7 +649,11 @@ func recordEvent(s *store.Store, sid string, ev executor.Event, ts int64) error 
 // before recording anything), so it needs no second check; auto is resolved
 // after task.started/capability.started are recorded, exactly like a
 // top-level do, so its decision lands in the session it decided for.
-func openSubtask(s *store.Store, out io.Writer, providerName, capability, size, sub, parentSID string) (subSID string, adapter executor.Adapter, human bool, err error) {
+//
+// tp is the parent task's own Task Perception holder, handed down unchanged
+// (ADR-0036 Decision 2b: a split child is the parent's own decomposition, not
+// a second task — it reads the same tokens, never re-perceives).
+func openSubtask(s *store.Store, out io.Writer, providerName, capability, size, sub, parentSID string, tp *taskPerception) (subSID string, adapter executor.Adapter, human bool, err error) {
 	now := time.Now().UnixMilli()
 	subSID = store.NewID(now)
 	if err = s.AppendEvent(subSID, "task.started", now,
@@ -657,7 +668,7 @@ func openSubtask(s *store.Store, out io.Writer, providerName, capability, size, 
 	if providerName != "auto" {
 		return subSID, providers[providerName], false, nil
 	}
-	dec, err := autoDecide(s, out, subSID, capability, size)
+	dec, err := autoDecide(s, out, subSID, capability, size, tp)
 	if err != nil {
 		return "", nil, false, err
 	}
@@ -684,9 +695,9 @@ func openSubtask(s *store.Store, out io.Writer, providerName, capability, size, 
 // something to grade.
 func runSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]string,
 	parentIntent, providerName, capability, size, permMode string, timeout time.Duration,
-	in *bufio.Reader, out io.Writer, interactive bool, extractor perceive.Extractor) error {
+	in *bufio.Reader, out io.Writer, interactive bool, extractor perceive.Extractor, tp *taskPerception) error {
 	_, cancelled, err := executeSplit(ctx, s, parentSID, groups, parentIntent,
-		providerName, capability, size, permMode, timeout, in, out, interactive, nil)
+		providerName, capability, size, permMode, timeout, in, out, interactive, nil, tp)
 	if err != nil {
 		return err
 	}
@@ -878,7 +889,11 @@ func runHuman(s *store.Store, out io.Writer, sid string, in *bufio.Reader) (exec
 // projections and is recorded into the very session it is deciding for.
 // human is a provider with no adapter (ADR-0018 Decision 2): the same ledger,
 // gate, and rehabilitation, executed by the user.
-func openTask(s *store.Store, out io.Writer, providerName, capability, size, intent string) (sid string, adapter executor.Adapter, human bool, err error) {
+//
+// tp is the task's Task Perception holder (ADR-0036 Decision 2b); it may be
+// nil, in which case autoDecide falls back to Decision 1's deterministic
+// tokens alone.
+func openTask(s *store.Store, out io.Writer, providerName, capability, size, intent string, tp *taskPerception) (sid string, adapter executor.Adapter, human bool, err error) {
 	human = providerName == "human"
 	if !human && providerName != "auto" {
 		if adapter, err = resolveProvider(providerName); err != nil {
@@ -898,7 +913,7 @@ func openTask(s *store.Store, out io.Writer, providerName, capability, size, int
 	}
 
 	if providerName == "auto" {
-		dec, err := autoDecide(s, out, sid, capability, size)
+		dec, err := autoDecide(s, out, sid, capability, size, tp)
 		if err != nil {
 			return "", nil, false, err
 		}
@@ -944,7 +959,7 @@ func ensureClaudeProfileIO(in *bufio.Reader, out io.Writer, providerName string,
 // nothing; "auto" derives the live menu, lets Curiosity propose into free
 // space, and runs the same decision rule over the plan bets; anything else
 // is a label or explicit steps.
-func resolvePlan(s *store.Store, sid, arg, capability, size string) (string, error) {
+func resolvePlan(s *store.Store, sid, arg, capability, size string, tp *taskPerception) (string, error) {
 	switch arg {
 	case "":
 		return "", nil
@@ -969,13 +984,29 @@ func resolvePlan(s *store.Store, sid, arg, capability, size string) (string, err
 		if err != nil {
 			return "", err
 		}
-		tokens := decisionTokens(capability, size)
+		var semantic []string
+		if tp != nil {
+			// os.Stdout, not an out param: resolvePlan already prints its own
+			// "proposed plan"/"plan:" lines straight to os.Stdout above and
+			// below (cmdDo's only caller), so the degrade log follows the
+			// same convention rather than inventing an io.Writer parameter
+			// this function has never taken.
+			semantic = tp.semanticTokens(os.Stdout)
+		}
+		tokens := perceptionTokens(capability, size, semantic)
 		dec := decide.ChoosePlan(conns, menu, tokens, size, now.UnixNano(), now.UnixMilli())
-		if err := s.AppendEvent(sid, "plan.selected", now.UnixMilli(), map[string]any{
+		payload := map[string]any{
 			"plan": dec.Provider, "seed": strconv.FormatInt(dec.Seed, 10),
 			"n": dec.N, "q": dec.Q, "fallback": dec.Fallback,
 			"cap": capability, "size": size,
-		}); err != nil {
+			"tokens": tokens, // ADR-0036 Decision 2d/2e: the actual scope-match input, for replay
+		}
+		if tp != nil {
+			if reason := tp.degradedReason(); reason != "" {
+				payload["perception_degraded"] = reason
+			}
+		}
+		if err := s.AppendEvent(sid, "plan.selected", now.UnixMilli(), payload); err != nil {
 			return "", err
 		}
 		fmt.Printf("plan: %s (n=%d)\n", dec.Provider, dec.N)
@@ -1037,10 +1068,10 @@ func stepPrompt(prompt, step string, i, total int) string {
 // scope no experience can ever have written.
 //
 // The semantic attributes (lang / framework / topic) need Task Perception —
-// unwired, and its cost against 第一の責務 is ADR-0036 Decision 2's open
-// question. Until that is decided, every Connection scoped on them stays
-// unreachable from the decision: the ledger grows structure the judgment
-// cannot read.
+// a guess, never certain before the run — so they do not belong in this
+// deterministic-only set. perceptionTokens below is the caller-facing token
+// list: decisionTokens' output plus whatever Task Perception adds, with this
+// function's tokens always taking precedence (ADR-0036 Decision 2b/2c).
 func decisionTokens(capability, size string) []string {
 	tokens := []string{core.CanonToken("cap", capability)}
 	if size != "" {
@@ -1049,19 +1080,149 @@ func decisionTokens(capability, size string) []string {
 	return tokens
 }
 
+// perceptionTokens folds Task Perception's semantic tokens (ADR-0036 Decision
+// 2b/2c) into decisionTokens' deterministic ones. cap and size — Decision 1's
+// tokens — always win: a token the extractor guessed at either key is
+// dropped, so the harness's own certain knowledge is never overwritten by a
+// model's guess at the same key (perceive.PerceiveTaskContext's own doc
+// leaves this precedence to the caller — this is that caller).
+//
+// size is dropped even when --size was left unset. The lottery's n(stakes)
+// reads the flag, not the token (decide.Draws), so a guessed size token would
+// name a scope the same decision never widened its draws for — the audit would
+// read size=large beside n=1. An attribute that only half the decision can see
+// is worse than an absent one.
+func perceptionTokens(capability, size string, semantic []string) []string {
+	tokens := decisionTokens(capability, size)
+	for _, tok := range semantic {
+		k, _, ok := strings.Cut(tok, "=")
+		if !ok || k == "cap" || k == "size" {
+			continue
+		}
+		tokens = append(tokens, tok)
+	}
+	return tokens
+}
+
+// contextTokens turns a Task Perception extraction map (already trimmed and
+// lowercased by perceive.PerceiveTaskContext) into canonical "k=v" scope
+// tokens — the caller's own CanonToken call PerceiveTaskContext's doc defers
+// to. Keys are sorted first so the result is deterministic (map iteration
+// order is not — ADR-0011: 判断は数学), which matters here because this slice
+// is what the decision audit records.
+func contextTokens(ctx map[string]string) []string {
+	keys := make([]string, 0, len(ctx))
+	for k := range ctx {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	tokens := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if ctx[k] == "" {
+			continue
+		}
+		tokens = append(tokens, core.CanonToken(k, ctx[k]))
+	}
+	return tokens
+}
+
+// taskExtractFunc extracts Task Perception's semantic tokens (ADR-0036
+// Decision 2) from a task's intent alone, before anything has run. A
+// taskPerception holder takes this as a function value, not a direct
+// store+extractor pair, so its own "extract once, lazily" logic (below) can
+// be pinned in tests against a plain counting fake instead of a real store
+// and a real LLM backend.
+type taskExtractFunc func(intent string) (map[string]string, error)
+
+// taskExtractFuncFor is the production taskExtractFunc: it gathers the known-
+// vocabulary map (taskVocab) and calls the wired extractor's own Task
+// Perception entry point (perceive.PerceiveTaskContext).
+func taskExtractFuncFor(s *store.Store, extractor perceive.Extractor) taskExtractFunc {
+	return func(intent string) (map[string]string, error) {
+		vocab, err := perceive.Vocab(s)
+		if err != nil {
+			return nil, err
+		}
+		return perceive.PerceiveTaskContext(extractor, intent, vocab)
+	}
+}
+
+// taskPerception is one task's lazy Task Perception holder (ADR-0036 Decision
+// 2b): whichever of autoDecide / ChoosePlan (resolvePlan) / pickDuelGap
+// (duelOffer) asks first runs extract exactly once; every later asker —
+// including a split child, which is handed the same holder rather than
+// building its own (ADR-0036 Decision 2b: 子ごとに再知覚しない) — reads the
+// cached result. A task nobody asks (--provider claude-code --plan direct,
+// duel unfired) never runs extract at all — the cost ADR-0036 measured is
+// spent only when it buys something. A nil *taskPerception is a valid,
+// silent "not participating" state (e.g. a duel child, whose provider is
+// already fixed to one side of the gap and never reaches autoDecide).
+type taskPerception struct {
+	intent  string
+	extract taskExtractFunc
+
+	once     sync.Once
+	tokens   []string // canonical semantic tokens; nil if never asked or degraded
+	degraded string   // why extraction produced no tokens; "" = never asked, or it worked
+}
+
+func newTaskPerception(intent string, extract taskExtractFunc) *taskPerception {
+	return &taskPerception{intent: intent, extract: extract}
+}
+
+// semanticTokens runs extraction on the first call and returns the cached
+// tokens on every later one (ADR-0036 Decision 2b: 遅延して1回). A missing
+// extractor or a failed extraction is not silence: one operational log line
+// (ADR-0009 — the machine's channel, not Tomo's voice) names the reason, and
+// the caller proceeds on Decision 1's deterministic tokens alone
+// (perceptionTokens above).
+func (tp *taskPerception) semanticTokens(out io.Writer) []string {
+	tp.once.Do(func() {
+		switch {
+		case tp.extract == nil:
+			tp.degraded = "no task perception extractor wired"
+		default:
+			ctx, err := tp.extract(tp.intent)
+			if err != nil {
+				tp.degraded = err.Error()
+			} else {
+				tp.tokens = contextTokens(ctx)
+			}
+		}
+		if tp.degraded != "" {
+			fmt.Fprintln(out, "perceive: task perception degraded —", tp.degraded, "— deciding on deterministic tokens only")
+		}
+	})
+	return tp.tokens
+}
+
+// degradedReason reports semanticTokens' failure reason, for the decision
+// audit (ADR-0036 Decision 2d) — "" both when extraction was never asked for
+// and when it succeeded, since neither has anything to confess.
+func (tp *taskPerception) degradedReason() string { return tp.degraded }
+
 // autoDecide runs the Decision Engine (ADR-0012) over the current
 // projections and records the full audit — seed included — as a
 // tomo.decided event, so the same ledger + the same seed replays the same
 // choice. The seed is stored as a string: a UnixNano exceeds JSON's exact
 // float64 integer range and would silently lose the bits that make the
 // lottery replayable.
-func autoDecide(s *store.Store, out io.Writer, sid, capability, size string) (decide.Decision, error) {
+//
+// tp is the task's Task Perception holder (ADR-0036 Decision 2b) — nil skips
+// semantic extraction entirely (decisionTokens' cap/size alone), which is
+// exactly right for a caller that structurally never wants it (a duel child,
+// whose provider is already the gap's own pick).
+func autoDecide(s *store.Store, out io.Writer, sid, capability, size string, tp *taskPerception) (decide.Decision, error) {
 	conns, err := s.AllConnections()
 	if err != nil {
 		return decide.Decision{}, err
 	}
 	now := time.Now()
-	tokens := decisionTokens(capability, size)
+	var semantic []string
+	if tp != nil {
+		semantic = tp.semanticTokens(out)
+	}
+	tokens := perceptionTokens(capability, size, semantic)
 	// human competes on the same ledger with the same gate (ADR-0018
 	// Decision 2) — the engine may honestly route the task to the user.
 	candidates := append(providerNames(), "human")
@@ -1078,6 +1239,17 @@ func autoDecide(s *store.Store, out io.Writer, sid, capability, size string) (de
 		"provider": dec.Provider, "seed": strconv.FormatInt(dec.Seed, 10),
 		"n": dec.N, "q": dec.Q, "fallback": dec.Fallback,
 		"cap": capability, "size": size, "candidates": cands,
+		// tokens is the actual scope-match input this decision read (ADR-0036
+		// Decision 2d/2e): with a semantic extractor in the loop, re-running
+		// extraction later is not guaranteed to reproduce it, so replay
+		// (ADR-0012 Decision 5) needs it recorded verbatim, not reconstructed
+		// from cap/size alone.
+		"tokens": tokens,
+	}
+	if tp != nil {
+		if reason := tp.degradedReason(); reason != "" {
+			payload["perception_degraded"] = reason
+		}
 	}
 	if err := s.AppendEvent(sid, "tomo.decided", now.UnixMilli(), payload); err != nil {
 		return decide.Decision{}, err
