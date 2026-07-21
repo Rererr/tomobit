@@ -29,7 +29,7 @@
 
 ### 意思決定の記録
 - [ADR-0001](docs/decisions/ADR-0001-connection-granularity.md) — Connectionの誕生モデル（粗→Split採用）
-- [ADR-0002](docs/decisions/ADR-0002-surprise-and-split-judgment.md) — Surpriseの定義（超過surprisal）とSplit有意判定（補正付きln BF＋ヒステリシス）
+- [ADR-0002](docs/decisions/ADR-0002-surprise-and-split-judgment.md) — Surpriseの定義（超過surprisal）とSplit有意判定（補正付きln BF＋ヒステリシス。Merge側の安全弁「誤Splitは減衰で静かに畳まれる」は減衰だけでは働かないと実測で判明 — ADR-0037）
 - [ADR-0003](docs/decisions/ADR-0003-outcome-and-preference.md) — Outcome三層信号、能力/好みの二重Connection、Tomoの質問
 - [ADR-0004](docs/decisions/ADR-0004-tech-stack.md) — 技術選定（Go / SQLite真実と射影の分離 / Ollama＋Deferred Perception / 段階的デーモン化。知覚バックエンド選択はADR-0029で一般化）
 - [ADR-0005](docs/decisions/ADR-0005-perception-model-and-schema-boundary.md) — 知覚の実装（qwen3:8b確定 / schemaは「形」・プロンプトは「意味」）
@@ -39,7 +39,7 @@
 - [ADR-0009](docs/decisions/ADR-0009-voice.md) — Tomoの声（発話＝Viewの写像 / LLM不使用 / 語調は確信度のView）
 - [ADR-0010](docs/decisions/ADR-0010-codex-adapter.md) — 2つ目のAdapter（codex / `do --provider` / 写像はエラー経路実採取＋仕様準拠）
 - [ADR-0011](docs/decisions/ADR-0011-meaning-by-model-judgment-by-math.md) — Meaning by Model, Judgment by Math（判断は純関数、LLMの座席はextractorのみ）
-- [ADR-0012](docs/decisions/ADR-0012-decision-rule-thompson-sampling.md) — 決定則＝Thompson Sampling（探索は好みの側で、ミスは構造になる）
+- [ADR-0012](docs/decisions/ADR-0012-decision-rule-thompson-sampling.md) — 決定則＝Thompson Sampling（探索は好みの側で、ミスは構造になる。Decision 3の名誉回復は継承事前下で未解決 — ADR-0037実測／ADR-0038 Proposed）
 - [ADR-0013](docs/decisions/ADR-0013-prior-inheritance-mean-only.md) — 事前分布の継承（平均だけ継ぎ、確信は継がない）
 - [ADR-0014](docs/decisions/ADR-0014-plan-learning-same-ledger.md) — Plan学習（台帳は賭ける対象を選ばない）
 - [ADR-0015](docs/decisions/ADR-0015-reflection.md) — Reflection（第一級の器官、実体は射影、核は双方向性。発火条件（対人ゲート）はADR-0035が改定）
@@ -64,7 +64,8 @@
 - [ADR-0034](docs/decisions/ADR-0034-forgetting-reach.md) — 忘却の到達範囲（`forget --id`は指名行だけでなく同一(session,kind)の下位世代も削除し版数の巻き戻りを防ぐ / 現行世代でないidの指名はエラー / 巻き添え行数は`+N superseded rows`で告知 — ADR-0033 Decision 2/5を改定）
 - [ADR-0035](docs/decisions/ADR-0035-boundary-organs-reach-the-pipe.md) — 対人ゲートの改版（Tomoの質問・鏡の発火条件を`isTTY(os.Stdin)`から`isTTY(os.Stdin) || --view ndjson`へ拡張しGUI経由でも境界の器官が届くようにする / 対人（`humanPresent`）と端末描画（`c.interactive`）の述語を分離 — ADR-0007/ADR-0015を改定）
 - [ADR-0036](docs/decisions/ADR-0036-task-perception-wiring.md) — **Proposed** 判断が読むトークン（判断は`cap=`1トークンしか読まず粒度1のConnectionとSplit子は到達不能 / Decision 1「決定的に既知の`size`もトークンにする」のみ先行実装 / タスク記述のTask Perception配線＝第一の責務とのトレードオフは所有者の判断待ち）
-- [ADR-0037](docs/decisions/ADR-0037-merge-reachability.md) — 継承事前の下での名誉回復（μ<0.48の親から生まれた子は減衰しても悲観ゲートを通らず、選ばれないから経験も来ずmerge判定機会も来ない自己強化デッドロック / ゲートも継承事前も変えずmerge判定の到達性だけを直す — ADR-0012 Decision 3を補完）
+- [ADR-0037](docs/decisions/ADR-0037-merge-reachability.md) — 継承事前の下での名誉回復を試みるも実測で頓挫（μ<0.48の親から生まれた子は減衰しても悲観ゲートを通らず、選ばれないから経験も来ずmerge判定機会も来ない自己強化デッドロック / merge判定の到達性は修復したが、実測でln BFはThetaMerge=0へ「上から」漸近するのみで実質到達不能（約15年）と判明 — 名誉回復は未解決のままADR-0038へ引き継ぐ）
+- [ADR-0038](docs/decisions/ADR-0038-gate-under-inherited-priors.md) — **Proposed** 継承事前下の能力ゲート（悲観ゲートの基準線を`q−margin`から`min(q, PriorQuantile(q))−margin`へ一般化し、低いμを継いだ子の恒久ゲート落ちを解消する案 / 一様事前の根では今日と同一判定・継承事前でも基準線が今日より厳しくなることはない片側緩和 — ADR-0012 Decision 3の未解決点への回答、所有者の判断待ち）
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。
@@ -101,9 +102,12 @@ tomobit perceive   # 未知覚セッションをOllamaかMLX LM Server（既定�
 tomobit rebuild    # 射影を破棄しexperiencesから再構築（決定的 — 姿も再現される）
 tomobit forget  --id <exp-id> [--id ...] | --session <id>  [--yes]
                    # 経験/セッションの物理削除（自動rebuild+VACUUM。非TTYは--yes必須。
-                   # 忘却は人間の動詞 — ADR-0033）
+                   # 忘却は人間の動詞 — ADR-0033。--id は指名行だけでなく同一
+                   # (session,kind)の下位世代も削除し版数の巻き戻りを防ぐ（巻き添えは
+                   # "+N superseded rows"で告知）／非現行世代の指名はエラー — ADR-0034）
 tomobit amend   --id <exp-id> [--context '<json>'] [--outcome '<json>'] [--provider <name>]
-                   # 経験の訂正＝人間による再知覚（追記・自動rebuild — ADR-0033）
+                   # 経験の訂正＝人間による再知覚（追記・自動rebuild。
+                   # --id は現行世代のみ指名可 — ADR-0033 Decision 3）
 tomobit status     # 相棒ビュー（見て終わる）
 tomobit-face       # Tomoのマスコット窓（表示専用・DBは読み取りのみ — ADR-0020）
 ```

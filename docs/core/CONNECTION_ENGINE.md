@@ -432,7 +432,8 @@ Stable       Confidence高 / Stability高
 Questioned   元Stable かつ Freshness低下 or Surprise発生
 Dormant      長期間、対象Contextが観測されない
 Revived      Dormant後に証拠が再流入
-Retired      Mergeで畳まれた / 減衰しきった
+Retired      Mergeで畳まれた / 減衰しきった（※Mergeは反証の証拠で起きる。
+             減衰だけではMerge帯に届かない — ADR-0037「実測による訂正」）
 ```
 
 Curiosity Engineはフラグを立てない。
