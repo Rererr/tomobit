@@ -1,6 +1,7 @@
 package perceive
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -296,6 +297,104 @@ func TestRunWithoutExtractorSkipsSemanticContext(t *testing.T) {
 	}
 }
 
+// expWithContext builds a minimal current-generation experience for
+// capVocab tests — only SessionID/TS/Context/Kind matter to the ranking.
+func expWithContext(id, sessionID string, ts int64, kind string, ctx map[string]string) *core.Experience {
+	return &core.Experience{
+		ID: id, SessionID: sessionID, TS: ts, Kind: kind,
+		ExtractorVer: 1, ExtractorModel: "none", Context: ctx, Source: "production",
+	}
+}
+
+func TestCapVocabKeepsEveryValueWhenUnderTheLimit(t *testing.T) {
+	exps := []*core.Experience{
+		expWithContext("a", "s1", 1, core.KindExecution, map[string]string{"lang": "go"}),
+		expWithContext("b", "s2", 2, core.KindExecution, map[string]string{"lang": "rust"}),
+	}
+	got := capVocab(exps, 20)
+	if strings.Join(got["lang"], ",") != "go,rust" {
+		t.Errorf("got %v, want [go rust]", got["lang"])
+	}
+}
+
+func TestCapVocabIgnoresEmptyContextValues(t *testing.T) {
+	exps := []*core.Experience{
+		expWithContext("a", "s1", 1, core.KindExecution, map[string]string{"lang": ""}),
+		expWithContext("b", "s2", 2, core.KindExecution, map[string]string{"lang": "go"}),
+	}
+	got := capVocab(exps, 20)
+	if len(got["lang"]) != 1 || got["lang"][0] != "go" {
+		t.Errorf("empty value should be excluded, got %v", got["lang"])
+	}
+}
+
+// TestCapVocabRanksByDistinctSessionCountOverAlphabeticalFirst pins the
+// primary ranking signal: a value used across more sessions is kept over
+// one used across fewer, even though a naive "first N alphabetically" cap
+// would have kept the alphabetically earlier value instead.
+func TestCapVocabRanksByDistinctSessionCountOverAlphabeticalFirst(t *testing.T) {
+	exps := []*core.Experience{
+		expWithContext("a1", "s1", 1, core.KindExecution, map[string]string{"lang": "axum-used-once"}),
+		expWithContext("b1", "s2", 2, core.KindExecution, map[string]string{"lang": "zig-used-thrice"}),
+		expWithContext("b2", "s3", 3, core.KindExecution, map[string]string{"lang": "zig-used-thrice"}),
+		expWithContext("b3", "s4", 4, core.KindExecution, map[string]string{"lang": "zig-used-thrice"}),
+	}
+	got := capVocab(exps, 1)
+	if len(got["lang"]) != 1 || got["lang"][0] != "zig-used-thrice" {
+		t.Errorf("the more-frequently-recurring value should survive the cap, got %v", got["lang"])
+	}
+}
+
+// TestCapVocabCountsSessionsNotExperienceRows pins the double-counting
+// guard: a session's preference experiences copy the execution
+// experience's Context verbatim (perceiveSession), so a single session
+// with several preferences must still count once, not once per row.
+func TestCapVocabCountsSessionsNotExperienceRows(t *testing.T) {
+	exps := []*core.Experience{
+		expWithContext("exec", "s1", 1, core.KindExecution, map[string]string{"lang": "rust"}),
+		expWithContext("pref1", "s1", 1, core.KindPreference, map[string]string{"lang": "rust"}),
+		expWithContext("pref2", "s1", 1, core.KindPreference, map[string]string{"lang": "rust"}),
+		expWithContext("pref3", "s1", 1, core.KindPreference, map[string]string{"lang": "rust"}),
+		expWithContext("other1", "s2", 2, core.KindExecution, map[string]string{"lang": "go"}),
+		expWithContext("other2", "s3", 3, core.KindExecution, map[string]string{"lang": "go"}),
+	}
+	got := capVocab(exps, 1)
+	if len(got["lang"]) != 1 || got["lang"][0] != "go" {
+		t.Errorf("four rows in one session must not outrank two distinct sessions, got %v", got["lang"])
+	}
+}
+
+// TestCapVocabBreaksFrequencyTiesByRecency pins the secondary ranking
+// signal: among equally-frequent values, the one used more recently
+// survives, so a long-dormant value cannot permanently block a currently
+// active one from ever entering the vocabulary.
+func TestCapVocabBreaksFrequencyTiesByRecency(t *testing.T) {
+	exps := []*core.Experience{
+		expWithContext("old", "s1", 1000, core.KindExecution, map[string]string{"lang": "cobol-old"}),
+		expWithContext("new", "s2", 9000, core.KindExecution, map[string]string{"lang": "zig-new"}),
+	}
+	got := capVocab(exps, 1)
+	if len(got["lang"]) != 1 || got["lang"][0] != "zig-new" {
+		t.Errorf("the more recently used value should win an equal-frequency tie, got %v", got["lang"])
+	}
+}
+
+// TestCapVocabBreaksRemainingTiesAlphabetically pins full determinism: with
+// count and recency both tied, selection must not depend on Go's
+// randomized map iteration order (ADR-0011: 判断は数学).
+func TestCapVocabBreaksRemainingTiesAlphabetically(t *testing.T) {
+	exps := []*core.Experience{
+		expWithContext("z", "s1", 5, core.KindExecution, map[string]string{"lang": "zig"}),
+		expWithContext("a", "s2", 5, core.KindExecution, map[string]string{"lang": "ada"}),
+	}
+	for i := 0; i < 20; i++ {
+		got := capVocab(exps, 1)
+		if len(got["lang"]) != 1 || got["lang"][0] != "ada" {
+			t.Fatalf("run %d: fully-tied selection must deterministically favor the lexicographically smaller value, got %v", i, got["lang"])
+		}
+	}
+}
+
 func TestRunHandsKnownVocabularyToExtractor(t *testing.T) {
 	s := openStore(t)
 	if err := s.InsertExperience(&core.Experience{
@@ -316,6 +415,33 @@ func TestRunHandsKnownVocabularyToExtractor(t *testing.T) {
 	langVocab := ext.lastVocab["lang"]
 	if len(langVocab) != 1 || langVocab[0] != "rust" {
 		t.Errorf("extractor should receive known lang vocabulary, got %v", langVocab)
+	}
+}
+
+// TestRunCapsVocabularyHandedToExtractor wires capVocab's limit through the
+// real Store: a ledger carrying more distinct lang values than vocabLimit
+// must not hand the extractor more than vocabLimit of them.
+func TestRunCapsVocabularyHandedToExtractor(t *testing.T) {
+	s := openStore(t)
+	for i := 0; i < vocabLimit+5; i++ {
+		if err := s.InsertExperience(&core.Experience{
+			ID: fmt.Sprintf("seed%d", i), SessionID: fmt.Sprintf("prior%d", i), TS: int64(i + 1),
+			Kind: core.KindExecution, ExtractorVer: 1, ExtractorModel: "none",
+			Context: map[string]string{"lang": fmt.Sprintf("lang%02d", i)}, Provider: "claude",
+			Outcome: core.Outcome{Adopted: "as-is"}, Source: "production",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finishedSession(t, s, "sess")
+	ext := &fakeExtractor{semantic: map[string]string{}}
+	p := &Perceiver{Store: s, Extractor: ext, Ver: 1}
+	if _, err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := len(ext.lastVocab["lang"]); got != vocabLimit {
+		t.Errorf("vocabulary handed to the extractor should be capped at %d, got %d", vocabLimit, got)
 	}
 }
 

@@ -226,6 +226,95 @@ func TestMLXExtractContextErrorsOnBraceThatNeverDecodesAsJSON(t *testing.T) {
 	}
 }
 
+// TestMLXExtractContextRecoversWhenAnEarlierObjectFailsShapeValidation pins
+// the bug this fix closes: a wrong-shaped JSON object earlier in content
+// (a leaked note, an echoed `{}`) must not shadow the real answer that
+// follows it, the way stopping at the first *decodable* object used to.
+func TestMLXExtractContextRecoversWhenAnEarlierObjectFailsShapeValidation(t *testing.T) {
+	cases := map[string]string{
+		"empty object before the answer": `{}` +
+			` {"lang":"go","framework":"","topic":"worker-pool","size":"medium"}`,
+		"partial-key aside before the answer": `Note: {"considering":"axum"} ` +
+			`the real classification is {"lang":"go","framework":"","topic":"worker-pool","size":"medium"}`,
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{
+				"choices": []map[string]any{{"message": map[string]any{"content": content}}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write(body)
+			}))
+			defer srv.Close()
+
+			m := &MLXLM{URL: srv.URL, Model: "m"}
+			out, gotErr := m.ExtractContext(nil, map[string][]string{})
+			if gotErr != nil {
+				t.Fatalf("a shape-invalid object earlier in content must not block the real one: %v", gotErr)
+			}
+			if out["lang"] != "go" || out["topic"] != "worker-pool" || out["size"] != "medium" {
+				t.Errorf("expected the later valid object to be adopted: %v", out)
+			}
+		})
+	}
+}
+
+// TestMLXExtractContextAdoptsTheFirstOfSeveralFullyValidObjects pins the
+// tie-break policy: when multiple objects in content each independently
+// satisfy the shape (a deviation from mlxShapeBlock's "one object" rule),
+// the earliest one wins rather than the last.
+func TestMLXExtractContextAdoptsTheFirstOfSeveralFullyValidObjects(t *testing.T) {
+	content := `{"lang":"go","framework":"","topic":"draft","size":"small"} ` +
+		`{"lang":"rust","framework":"","topic":"final","size":"large"}`
+	body, err := json.Marshal(map[string]any{
+		"choices": []map[string]any{{"message": map[string]any{"content": content}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "m"}
+	out, gotErr := m.ExtractContext(nil, map[string][]string{})
+	if gotErr != nil {
+		t.Fatal(gotErr)
+	}
+	if out["topic"] != "draft" || out["lang"] != "go" {
+		t.Errorf("expected the first fully valid object to win, got %v", out)
+	}
+}
+
+// TestMLXExtractContextErrorsUsingTheFirstCandidatesReasonWhenNoneValidate
+// pins the error-reporting side of the same policy: with several
+// shape-invalid candidates and no valid one, the message names the earliest
+// candidate's defect, not a later one's.
+func TestMLXExtractContextErrorsUsingTheFirstCandidatesReasonWhenNoneValidate(t *testing.T) {
+	content := `{"lang":"go","framework":"","topic":"x"} ` + // missing "size"
+		`{"lang":"go","framework":"","topic":"x","size":"huge"}` // size outside enum
+	body, err := json.Marshal(map[string]any{
+		"choices": []map[string]any{{"message": map[string]any{"content": content}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	m := &MLXLM{URL: srv.URL, Model: "m"}
+	_, gotErr := m.ExtractContext(nil, map[string][]string{})
+	if gotErr == nil || !strings.Contains(gotErr.Error(), `missing key "size"`) {
+		t.Errorf("expected the first candidate's missing-key reason, got %v", gotErr)
+	}
+}
+
 func TestMLXExtractContextErrorsOnNon200(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

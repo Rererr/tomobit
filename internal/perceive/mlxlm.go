@@ -107,20 +107,41 @@ func (m *MLXLM) ExtractContext(events []*store.Event, vocab map[string][]string)
 // parseMLXContent extracts the JSON object mlxShapeBlock asked for. Without
 // structured output, the response may carry a code fence or leading prose
 // around the object — and prose can itself contain stray braces ("braces
-// like { this } are punctuation") that are not the object at all. So every
-// '{' in content is tried in order, decoding straight into
+// like { this } are punctuation") or whole JSON-ish objects that are not the
+// answer (a leaked thinking fragment, an echoed `{}`, a schema restatement)
+// that are not the object at all.
+//
+// So every '{' in content is tried in order, decoding straight into
 // map[string]string: a non-object, a syntax error, or a non-string field
 // value all fail that attempt (the last case skips a JSON-valid-but-wrong-
-// shape object like {"a":1} for free) and move on to the next '{'; the first
-// attempt that decodes cleanly is adopted. Field validation (4 keys, size
-// enum) then runs once, on the adopted object — an invalid shape is an
-// error, never coerced to "" — because a session left pending (Deferred
-// Perception) is safer than an experience recorded with a silently wrong
-// shape (ADR-0005: 射影は静かに歪む).
+// shape object like {"a":1} for free) and move on to the next '{'. A
+// candidate that *does* decode still is not adopted on the spot — it must
+// also pass validateSemanticShape (the "form" ADR-0005/0029 assign to Go-side
+// validation, since mlxShapeBlock only asks for it, never enforces it). Only
+// decoding, not validating, was previously enough to stop the search, so a
+// well-formed but wrong-shaped object earlier in the text (e.g. a stray
+// {"note":"..."} aside) could shadow a correct object appearing later and
+// fail the whole extraction outright.
+//
+// The first candidate to pass full validation is adopted; scanning stops
+// there. When several fully valid objects exist, ADR-0029's prompt already
+// asks for exactly one, so nothing about the response's structure says
+// which is "more correct" — earliest-first keeps the common single-object
+// case unchanged and the scan a single monotonic left-to-right pass, rather
+// than guessing that a later object supersedes an earlier one (an unverified
+// assumption about model self-correction behavior this file has no
+// measurement for).
+//
+// If no candidate ever validates, the error from the first one that managed
+// to decode is surfaced — it is closest to being the intended answer — over
+// a generic "nothing found" message. An invalid shape is always an error,
+// never coerced to "" — a session left pending (Deferred Perception) is
+// safer than an experience recorded with a silently wrong shape (ADR-0005:
+// 射影は静かに歪む).
 func parseMLXContent(content string) (map[string]string, error) {
 	rest := content
 	sawBrace := false
-	var raw map[string]string
+	var firstShapeErr error
 	for {
 		idx := strings.IndexByte(rest, '{')
 		if idx < 0 {
@@ -130,18 +151,31 @@ func parseMLXContent(content string) (map[string]string, error) {
 		var candidate map[string]string
 		dec := json.NewDecoder(strings.NewReader(rest[idx:]))
 		if err := dec.Decode(&candidate); err == nil {
-			raw = candidate
-			break
+			out, shapeErr := validateSemanticShape(candidate, content)
+			if shapeErr == nil {
+				return out, nil
+			}
+			if firstShapeErr == nil {
+				firstShapeErr = shapeErr
+			}
 		}
 		rest = rest[idx+1:]
 	}
 	if !sawBrace {
 		return nil, fmt.Errorf("model returned no JSON object: %q", content)
 	}
-	if raw == nil {
+	if firstShapeErr == nil {
 		return nil, fmt.Errorf("model returned non-JSON content: %q", content)
 	}
+	return nil, firstShapeErr
+}
 
+// validateSemanticShape checks a decoded candidate against the "form"
+// ADR-0005/0029 assign to Go-side validation: every SemanticKeys entry
+// present as a string, and "size" inside its enum. content is carried
+// through only to annotate the error with the full response a rejected
+// candidate came from, not just the isolated object.
+func validateSemanticShape(raw map[string]string, content string) (map[string]string, error) {
 	out := make(map[string]string, len(SemanticKeys))
 	for _, k := range SemanticKeys {
 		v, ok := raw[k]

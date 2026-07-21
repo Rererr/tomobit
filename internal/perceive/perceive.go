@@ -6,6 +6,7 @@ package perceive
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Rererr/tomobit/internal/core"
@@ -15,6 +16,103 @@ import (
 // LLM-extracted context keys (SCHEMA.md R2). cap/model/provider are
 // deterministic and never asked of the model.
 var SemanticKeys = []string{"lang", "framework", "topic", "size"}
+
+// vocabLimit bounds how many known values each semantic key contributes to
+// the extraction prompt (SCHEMA.md D5). Unlike the rest of the prompt —
+// eventsSection (ollama.go) already bounds the session digest to
+// maxSessionChars=12000 — the vocabulary had no cap, so it grows with the
+// ledger forever.
+//
+// 20 is measured, not guessed: against the dogfood ledger
+// (/Users/example/.tomobit/tomobit.db, 2026-07-21, 28 experiences), known values
+// average 6-10 characters, so a saturated key's line stays under ~200
+// characters at this limit; four such keys are still a small, fixed
+// fraction of the 12000-character session digest budget they share the
+// prompt with, however large the ledger grows. The same ledger's most
+// diverse key (topic, free text) had only 11 distinct values, so the cap
+// changes nothing yet — it only starts trimming once growth actually
+// reaches it, which is the failure mode being closed here.
+const vocabLimit = 20
+
+// capVocab picks, per semantic key, the vocabLimit values most worth
+// showing the extraction prompt. SCHEMA.md D5 hands vocabulary to the
+// prompt so the model converges spelling variants ("axum"/"Axum"/
+// "axum-web") onto one form instead of inventing a new one each time.
+//
+// A value is worth protecting once it has recurred: a single occurrence
+// cannot yet have drifted into variants, so the value most in need of
+// convergence is the one reused across the most distinct sessions —
+// frequency is therefore the primary ranking signal. Recency breaks ties
+// in favor of the spelling actually in current use, so a value dormant for
+// a long time does not permanently hold a slot over one the user is
+// actively naming today. The value string itself is the final tiebreaker,
+// making the ranking independent of Go's randomized map order (ADR-0011:
+// 判断は数学 — the derivation must be deterministic).
+//
+// Frequency counts distinct SESSIONS, not experience rows: a session's
+// preference experiences (ADR-0003) copy the execution experience's
+// Context verbatim (perceiveSession below), so counting rows would let one
+// session with several preferences outrank several sessions that each used
+// a value once — the opposite of "recurred across real occurrences".
+func capVocab(exps []*core.Experience, limit int) map[string][]string {
+	type stat struct {
+		sessions map[string]bool
+		lastTS   int64
+	}
+	byKey := make(map[string]map[string]*stat, len(SemanticKeys))
+	for _, k := range SemanticKeys {
+		byKey[k] = map[string]*stat{}
+	}
+	for _, e := range exps {
+		for _, k := range SemanticKeys {
+			v := e.Context[k]
+			if v == "" {
+				continue
+			}
+			st, ok := byKey[k][v]
+			if !ok {
+				st = &stat{sessions: map[string]bool{}}
+				byKey[k][v] = st
+			}
+			st.sessions[e.SessionID] = true
+			if e.TS > st.lastTS {
+				st.lastTS = e.TS
+			}
+		}
+	}
+
+	out := make(map[string][]string, len(SemanticKeys))
+	for _, k := range SemanticKeys {
+		type ranked struct {
+			value  string
+			count  int
+			lastTS int64
+		}
+		entries := make([]ranked, 0, len(byKey[k]))
+		for v, st := range byKey[k] {
+			entries = append(entries, ranked{v, len(st.sessions), st.lastTS})
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].count != entries[j].count {
+				return entries[i].count > entries[j].count
+			}
+			if entries[i].lastTS != entries[j].lastTS {
+				return entries[i].lastTS > entries[j].lastTS
+			}
+			return entries[i].value < entries[j].value
+		})
+		if len(entries) > limit {
+			entries = entries[:limit]
+		}
+		values := make([]string, len(entries))
+		for i, e := range entries {
+			values[i] = e.value
+		}
+		sort.Strings(values) // prompt order stays alphabetical, matching Store.KnownValues before this change
+		out[k] = values
+	}
+	return out
+}
 
 // Extractor extracts semantic context attributes from a session's events.
 // vocab maps each semantic key to values already known to Tomobit,
@@ -63,15 +161,12 @@ func (p *Perceiver) perceiveSession(sessionID string) ([]*core.Experience, error
 
 	semantic := map[string]string{}
 	if p.Extractor != nil {
-		vocab := map[string][]string{}
-		for _, k := range SemanticKeys {
-			vals, err := p.Store.KnownValues(k)
-			if err != nil {
-				return nil, err
-			}
-			vocab[k] = vals
+		var known []*core.Experience
+		known, err = p.Store.CurrentExperiences()
+		if err != nil {
+			return nil, err
 		}
-		semantic, err = p.Extractor.ExtractContext(events, vocab)
+		semantic, err = p.Extractor.ExtractContext(events, capVocab(known, vocabLimit))
 		if err != nil {
 			return nil, err
 		}
