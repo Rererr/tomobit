@@ -145,12 +145,30 @@ func TestProposeBudgetAndSpace(t *testing.T) {
 	if !found {
 		t.Errorf("proposed variant should be live: %v", menu2)
 	}
+}
 
-	// At K variants the menu is full — no more proposals even with budget.
-	if len(menu2) >= K {
-		if extra, _ := Propose(s, "implement", menu2, now+ProposalWindowMs+1); extra != "" {
-			t.Errorf("full menu must not accept proposals, got %q", extra)
+// A menu at K variants is full: the survival cap (ADR-0014 Decision 5) closes
+// the proposal door even when the budget has come round again. The menu is
+// built to K here rather than grown through Live, because the rule under test
+// is the cap itself, not how a variant reaches the menu.
+func TestFullMenuAcceptsNoProposal(t *testing.T) {
+	s := openStore(t)
+	full := make([]string, 0, K)
+	for _, m := range Mutations(Steps("implement")) {
+		if len(full) == K {
+			break
 		}
+		full = append(full, Name(m.Steps))
+	}
+	if len(full) != K {
+		t.Fatalf("need %d legal variants to fill the menu, got %d", K, len(full))
+	}
+	extra, err := Propose(s, "implement", full, now)
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if extra != "" {
+		t.Errorf("a full menu must not accept a proposal, got %q", extra)
 	}
 }
 
