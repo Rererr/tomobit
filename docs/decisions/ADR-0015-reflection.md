@@ -102,3 +102,13 @@ Learning Realityとして記帳される（experiences kind='reflection'）。
   - 「それ違う」= `verdict: down` を同経験に載せ、通常のApply経路で
     該当Connectionへ（ADR-0003 第2層と同重み・rebuild安全）
   - トリガーは5種（ADR-0019 Decision 4の再知覚を含む）
+
+---
+
+## 追記（2026-07-21）: ADR-0035（境界の器官はviewストリームの向こうの人に届く）による改版
+
+上記実装追記（2026-07-16）の「反応UIは…TTYのみ」は撤回する。GUIが
+`tomobit chat --view ndjson` をpipeで飼う構成では、この条件下で鏡が
+構造上一度も発火しなかった。[ADR-0035](ADR-0035-boundary-organs-reach-the-pipe.md)が
+発火条件を `isTTY(os.Stdin) || --view ndjson`（pipeの向こうに人が居るという
+呼び出しごとの宣言）へ改め、GUI経由の対話でも鏡が届くようになった。

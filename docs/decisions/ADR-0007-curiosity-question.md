@@ -158,3 +158,13 @@ e_max     1.0        「好みを知らない」の上限
     書けるが意味論が濁る。初版はスキップと同義とする
   - 学習実行（残り5シグナルと非人間Executor、curiosity_queueの書き手）は別ADR
   - pull型 `tomobit ask`（予算外で人間側から質問を引く）の要否
+
+---
+
+## 追記（2026-07-21）: ADR-0035（境界の器官はviewストリームの向こうの人に届く）による改版
+
+Decision 4「聞く場所」の実装（発火条件 `isTTY(os.Stdin)`）は、GUIが
+`tomobit chat --view ndjson` をpipeで飼う構成では構造上一度も真にならず、
+Tomoの質問が永久に発火しなかった。[ADR-0035](ADR-0035-boundary-organs-reach-the-pipe.md)が
+発火条件を `isTTY(os.Stdin) || --view ndjson`（pipeの向こうに人が居るという
+呼び出しごとの宣言）へ改め、GUI経由の対話でも質問が届くようになった。

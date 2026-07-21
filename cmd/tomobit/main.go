@@ -589,7 +589,11 @@ func cmdDo(args []string) error {
 		}
 	}
 
-	return finishTask(s, sid, stdin, os.Stdout, result.Started, extractor)
+	// do has no declaration mouth for humanPresent (ADR-0035 Decision 2 — that
+	// argument was rejected as YAGNI): it hands finishTask the same
+	// isTTY(os.Stdin) the function used to read for itself, so behavior here is
+	// unchanged.
+	return finishTask(s, sid, stdin, os.Stdout, result.Started, isTTY(os.Stdin), extractor)
 }
 
 // providerSink builds the Executor Sink shared by a plain `do` run and each
@@ -692,7 +696,10 @@ func runSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]
 	if cancelled {
 		return nil // children and parent already hold task.cancelled; skip finishTask
 	}
-	return finishTask(s, parentSID, in, out, false, extractor)
+	// runSplit is do-only (chat's own split path, splitAndFold, folds back into
+	// the conversation instead of calling finishTask) — the same isTTY(os.Stdin)
+	// cmdDo's own call passes (ADR-0035 Decision 2).
+	return finishTask(s, parentSID, in, out, false, isTTY(os.Stdin), extractor)
 }
 
 // flattenGroups turns the Provider's declared group structure into the flat
@@ -753,7 +760,13 @@ func declaresGroups(groups [][]string) bool {
 // judged says the session produced something a human can judge — a run that
 // never started (e.g. the claude binary is missing) produced nothing, so the
 // Feedback question is skipped and the outcome carries no signal.
-func finishTask(s *store.Store, sid string, in *bufio.Reader, out io.Writer, judged bool, extractor perceive.Extractor) error {
+//
+// humanPresent gates the boundary organs proper — Tomo's question and the
+// mirror (ADR-0035 Decision 2) — and arrives as an argument rather than a
+// direct isTTY(os.Stdin) read here: a chat holds context (its own --view
+// ndjson) that this function cannot see, so the caller resolves the
+// predicate and hands it in.
+func finishTask(s *store.Store, sid string, in *bufio.Reader, out io.Writer, judged, humanPresent bool, extractor perceive.Extractor) error {
 	// The Feedback question runs at the end of every completed task (ADR-0006
 	// Decision 4): exit 0 is not a verdict, and even a failed run may have
 	// produced something the user keeps.
@@ -779,10 +792,10 @@ func finishTask(s *store.Store, sid string, in *bufio.Reader, out io.Writer, jud
 	// here — after perception — so today's work is already folded into the Gap
 	// derivation. The interruption is still once per boundary, so the position
 	// ADR-0007 protects is unchanged.
-	askWithIO(s, sid, in, out, isTTY(os.Stdin), time.Now().UnixMilli())
+	askWithIO(s, sid, in, out, humanPresent, time.Now().UnixMilli())
 
 	if snapErr == nil {
-		reflectWithIO(s, snap, extras, sid, in, out, isTTY(os.Stdin), time.Now().UnixMilli())
+		reflectWithIO(s, snap, extras, sid, in, out, humanPresent, time.Now().UnixMilli())
 	}
 	return nil
 }
@@ -799,9 +812,12 @@ func reflectBestEffort(s *store.Store, snap *reflection.Snapshot, extras []refle
 // extras are candidates the snapshot comparison cannot see (re-perception,
 // ADR-0019 Decision 4). The seed doubles as nowMs: millisecond resolution is
 // plenty for a 1/day lottery, and RecordAndApply persists it either way.
-func reflectWithIO(s *store.Store, snap *reflection.Snapshot, extras []reflection.Candidate, doSession string, in *bufio.Reader, out io.Writer, interactive bool, now int64) {
-	// A pipe has no reader to mirror to; the budget stays unspent.
-	if !interactive {
+// humanPresent is the same "is anyone there to read this" predicate askWithIO
+// takes (ADR-0035 Decision 2) — a terminal or a declared view stream, not
+// whether that reader has a screen to draw into.
+func reflectWithIO(s *store.Store, snap *reflection.Snapshot, extras []reflection.Candidate, doSession string, in *bufio.Reader, out io.Writer, humanPresent bool, now int64) {
+	// Nobody present has no reader to mirror to; the budget stays unspent.
+	if !humanPresent {
 		return
 	}
 	ok, err := reflection.HasBudget(s, now)
@@ -1062,15 +1078,16 @@ func autoDecide(s *store.Store, out io.Writer, sid, capability, size string) (de
 }
 
 // askWithIO is the Curiosity question at a task boundary (ADR-0007), and
-// finishTask's only way in. stdin/stdout/interactivity/clock are injected so
-// the budget check and the recording side effect can be exercised without a
-// real terminal.
-func askWithIO(s *store.Store, doSession string, in *bufio.Reader, out io.Writer, interactive bool, now int64) {
-	// Non-interactive stdin has no human to interrupt, so we neither ask nor
-	// record: the budget guards interruption frequency, and recording a
-	// tomo.asked here would silently burn 24h of budget on a headless run that
-	// interrupted no one.
-	if !interactive {
+// finishTask's only way in. stdin/stdout/clock are injected so the budget
+// check and the recording side effect can be exercised without a real
+// terminal; humanPresent is finishTask's own argument — a terminal or a
+// declared view stream, ADR-0035 Decision 1/2 — not a live isTTY() read.
+func askWithIO(s *store.Store, doSession string, in *bufio.Reader, out io.Writer, humanPresent bool, now int64) {
+	// Nobody present has no one to interrupt, so we neither ask nor record: the
+	// budget guards interruption frequency, and recording a tomo.asked here
+	// would silently burn 24h of budget on a headless run that interrupted no
+	// one.
+	if !humanPresent {
 		return
 	}
 	ok, err := curiosity.HasBudget(s, now)

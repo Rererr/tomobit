@@ -117,11 +117,21 @@ type chat struct {
 	timeout      time.Duration
 	size         string
 	extractor    perceive.Extractor
-	// interactive is whether a human is watching (both stdin and stdout are a
-	// terminal). It gates the split parallelism offer (splitAndFold): a pipe or CI
-	// never sees it and stays sequential. A field, not a live isTTY() call, so a
-	// test can drive the accept path deterministically without a real terminal.
+	// interactive is whether the terminal can draw — both stdin and stdout are
+	// a TTY (ADR-0035 Decision 2). It gates the split parallelism offer
+	// (splitAndFold), which shows a y/N prompt and a cost estimate meant for a
+	// screen: a pipe or CI never sees it and stays sequential. It answers "can
+	// this render", not "is anyone there" (humanPresent, below) — a view-stream
+	// consumer is present with no terminal to draw into. A field, not a live
+	// isTTY() call, so a test can drive the accept path deterministically
+	// without a real terminal.
 	interactive bool
+	// humanPresent is whether someone is on the other end of stdin to ask — a
+	// TTY, or a declared view stream (--view ndjson). It gates the boundary
+	// organs at finishTask (Tomo's question ADR-0007, the mirror ADR-0015),
+	// separately from interactive above (ADR-0035 Decision 2): a GUI piping
+	// --view ndjson has a person reading, but no terminal to render y/N into.
+	humanPresent bool
 
 	// sid == "" means no task is open: the next prompt starts one.
 	sid       string
@@ -224,6 +234,10 @@ func cmdChat(args []string) error {
 		permMode: *permMode, timeout: *timeout, size: *size,
 		extractor:   extractor,
 		interactive: isTTY(os.Stdin) && isTTY(os.Stdout),
+		// The declared view stream is the signal (ADR-0035 Decision 1) — not
+		// TOMOBIT_FACE, not config: *view is this call's own argv, so a script
+		// exporting TOMOBIT_FACE=1 never burns the question budget by accident.
+		humanPresent: isTTY(os.Stdin) || *view == "ndjson",
 	}
 	ed.Completer = c.complete
 	// The first screen is the companion view (ADR-0008), and its next line is
@@ -743,7 +757,7 @@ func (c *chat) closeTask() error {
 		out = newIndentWriter(c.out, gutter)
 	}
 	c.gap()
-	if err := finishTask(c.s, sid, c.in, out, true, c.extractor); err != nil {
+	if err := finishTask(c.s, sid, c.in, out, true, c.humanPresent, c.extractor); err != nil {
 		return err
 	}
 	// task.finished closes the stream's task after the boundary organs have run

@@ -1,12 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Rererr/tomobit/internal/core"
 	"github.com/Rererr/tomobit/internal/executor"
@@ -392,5 +398,186 @@ func TestValidateViewFlag(t *testing.T) {
 				t.Errorf("validateViewFlag(%q, tty=%v) err = %v, wantErr = %v", tc.view, tc.tty, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// buildTomobitBinary compiles the real CLI once per test into a throwaway
+// path — ADR-0035's fix lives in the wiring between cmdChat, finishTask and
+// askWithIO/reflectWithIO, which a chat literal built by hand (newViewChat,
+// above) never exercises: those tests set humanPresent/interactive directly,
+// so they can pin every organ's behavior once humanPresent is true but
+// cannot tell whether a real `--view ndjson` invocation ever makes it true.
+// A prior unit test did exactly the hand-set thing (TestAskWithIOInteractive-
+// RecordsTomoAsked passes interactive=true straight to askWithIO) and still
+// let the bug ship: finishTask read isTTY(os.Stdin) for itself, so no amount
+// of unit-level plumbing could have caught a pipe never reaching that branch.
+func buildTomobitBinary(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "tomobit")
+	cmd := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	return bin
+}
+
+// seedPreferenceGap opens dbPath directly (bypassing perception, like
+// growCapability's other callers) and grows a capability Connection pair that
+// clears every ADR-0007 Decision 2 gate: even (identical 4-success/1-revert
+// records), frequent (10 execution experiences in scope), and no preference
+// Connection yet. ts is anchored to "now" rather than a fixed constant — the
+// 90-day decay half-life (core.HalfLifeMs) would otherwise erase the evidence
+// by the time the real chat process, running moments later, computes its own
+// wall-clock now for curiosity.Gaps.
+func seedPreferenceGap(t *testing.T, dbPath string) {
+	t.Helper()
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	en := &core.Engine{Repo: s}
+	ts := time.Now().UnixMilli()
+	growCapability(t, s, en, "lang=rust", "claude", ts, 4, 1)
+	growCapability(t, s, en, "lang=rust", "codex", ts, 4, 1)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPipedChatViewDeliversTomoQuestionAndRecordsTomoAsked is ADR-0035's own
+// completion condition (Consequences: "検証は実環境で行う"): a real compiled
+// tomobit, chatting over a real OS pipe with --view ndjson, against a ledger
+// holding an open Preference Gap. Tomo's question must arrive as an
+// {"type":"note",...,"await":true} event over that pipe, and answering it
+// must record tomo.asked (and, since the reply picks a side, user.preference)
+// — the two facts ADR-0035 Context found never happened through the GUI's
+// entry point before this change.
+func TestPipedChatViewDeliversTomoQuestionAndRecordsTomoAsked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and execs a real binary")
+	}
+	bin := buildTomobitBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "tomobit.db")
+	seedPreferenceGap(t, dbPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "chat", "--db", dbPath,
+		"--provider", "human", "--view", "ndjson",
+		// Unreachable on purpose: perception is best-effort (ADR-0006 Decision
+		// 5) and this test's organs under test — Feedback, Tomo's question —
+		// never depend on it succeeding; a real Ollama would only add latency
+		// and an environment dependency this test does not need.
+		"--backend", "ollama", "--url", "http://127.0.0.1:1",
+		"first task")
+	// A from-scratch env, not os.Environ(): the developer running this test may
+	// have TOMOBIT_FACE=1 exported for daily use (ADR-0032 Consequences), which
+	// would spawn a real face window under a bare inherited env. HOME is a
+	// fresh temp dir so config.Load() finds no ~/.tomobit/config.json either.
+	cmd.Env = []string{"HOME=" + t.TempDir()}
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	events := make(chan map[string]any, 64)
+	go func() {
+		defer close(events)
+		sc := bufio.NewScanner(stdout)
+		sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+		for sc.Scan() {
+			var m map[string]any
+			if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
+				t.Errorf("stdout line is not valid JSON: %q: %v", sc.Text(), err)
+				continue
+			}
+			events <- m
+		}
+	}()
+
+	waitFor := func(pred func(map[string]any) bool, label string) {
+		t.Helper()
+		for {
+			select {
+			case ev, ok := <-events:
+				if !ok {
+					t.Fatalf("stdout closed before %s arrived — stderr:\n%s", label, stderr.String())
+				}
+				if pred(ev) {
+					return
+				}
+			case <-ctx.Done():
+				t.Fatalf("timed out waiting for %s — stderr:\n%s", label, stderr.String())
+			}
+		}
+	}
+	isAwaitNoteContaining := func(substr string) func(map[string]any) bool {
+		return func(ev map[string]any) bool {
+			if ev["type"] != "note" || ev["await"] != true {
+				return false
+			}
+			text, _ := ev["text"].(string)
+			return strings.Contains(text, substr)
+		}
+	}
+	isType := func(typ string) func(map[string]any) bool {
+		return func(ev map[string]any) bool { return ev["type"] == typ }
+	}
+
+	// The seed turn ("first task") opens the task under --provider human — no
+	// provider launches, so the next thing the process does is stand at the
+	// prompt, marked "ready" instead of the ` ❯ ` a terminal would draw
+	// (ADR-0032 Decision 1).
+	waitFor(isType("ready"), "the prompt after the opening turn")
+	if _, err := io.WriteString(stdin, "/exit\n"); err != nil {
+		t.Fatal(err)
+	}
+	// /exit closes the task: Feedback fires unconditionally (ADR-0006 Decision
+	// 4) and arrives as a partial line released by flush-on-read the moment the
+	// next stdin read blocks (ADR-0032 Decision 1).
+	waitFor(isAwaitNoteContaining("今回、どうだった?"), "the Feedback question")
+	if _, err := io.WriteString(stdin, "1\n"); err != nil {
+		t.Fatal(err)
+	}
+	// Tomo's question follows Feedback in finishTask (ADR-0007). Before this
+	// change it never fired here at all: humanPresent was isTTY(os.Stdin), and
+	// a piped stdin is never a TTY, view mode or not.
+	waitFor(isAwaitNoteContaining("Enter=スキップ"), "Tomo's Preference Gap question (ADR-0007)")
+	if _, err := io.WriteString(stdin, "1\n"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(isType("task.finished"), "task.finished")
+	// Drain to EOF before Wait(): StdoutPipe's contract is that every read
+	// completes before Wait is called, or the two can race the process exit.
+	for range events {
+	}
+
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("chat exited with error: %v — stderr:\n%s", err, stderr.String())
+	}
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if n := countEventsOfType(t, s, "tomo.asked"); n != 1 {
+		t.Errorf("tomo.asked: got %d, want 1 — the question must be recorded once it fired over the pipe", n)
+	}
+	// "1" picks gap.A, and Gaps sorts targets lexicographically — "claude" <
+	// "codex" — so the piped answer must resolve to that pair, not just any.
+	if p := payloadOf(t, s, "user.preference"); p["preferred"] != "claude" || p["over"] != "codex" {
+		t.Errorf("user.preference: got %v, want preferred=claude over=codex (the piped \"1\" answer)", p)
 	}
 }
