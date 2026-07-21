@@ -531,6 +531,109 @@ func TestJudgeMergesChildWhenDistinguishingTokenLosesSignal(t *testing.T) {
 	}
 }
 
+// TestReconcileMergesReachesAChildJudgeNeverTouchesAgain (ADR-0037 Decision
+// 2): a child that stops receiving experiences also stops being judged —
+// production only calls judge on connections an incoming experience's scope
+// touches. ReconcileMerges must still fold it back once its distinguishing
+// evidence has decayed into the merge zone, without ever going through
+// judge/Apply on the child itself.
+func TestReconcileMergesReachesAChildJudgeNeverTouchesAgain(t *testing.T) {
+	r := newFakeRepo()
+	en := &Engine{Repo: r}
+	childKey := NewScope("cap=impl", "lang=rust").Key()
+
+	var child *Connection
+	var triggerTS int64
+	for _, e := range splitScenario() {
+		r.exps = append(r.exps, e)
+		if err := en.Apply(e); err != nil {
+			t.Fatal(err)
+		}
+		if c, _ := r.GetConnection(ConnCapability, childKey, "claude"); c != nil {
+			child = c
+			triggerTS = e.TS
+			break
+		}
+	}
+	if child == nil {
+		t.Fatal("split never produced a child connection")
+	}
+
+	// No further Apply/judge call ever touches the child from here on —
+	// this is the gated-out lineage ADR-0037 describes. Reconciling right
+	// at birth must find the distinguishing evidence still fresh and leave
+	// it alone.
+	if err := en.ReconcileMerges(triggerTS); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := r.GetConnection(ConnCapability, childKey, "claude"); c == nil {
+		t.Fatal("fresh evidence should not merge the child yet")
+	}
+
+	// Long after birth, with no new evidence for this scope, the
+	// distinguishing token's ln BF has decayed into the merge zone. Reach
+	// it purely through ReconcileMerges — judge is never called on it.
+	farFuture := triggerTS + 1000*HalfLifeMs
+	if err := en.ReconcileMerges(farFuture); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := r.GetConnection(ConnCapability, childKey, "claude"); c != nil {
+		t.Error("decayed evidence should merge the child away even though judge never touched it")
+	}
+	if led, _ := r.LedgerFor(ConnCapability, childKey, "claude"); len(led) != 0 {
+		t.Errorf("child ledger should be deleted on reconciled merge, got %d entries", len(led))
+	}
+}
+
+// TestRebuildReconcilesMergesForAChildNoLaterExperienceTouches (ADR-0037
+// Decision 2 / "Rebuild で1回"): a child born mid-replay and never touched
+// by any later experience in the log — the gated-out lineage the ADR
+// describes — must still be folded back once the log's own last timestamp
+// has carried its evidence into the merge zone. The one reconciliation
+// sweep at the end of Rebuild is the only path that can reach it; judge's
+// touched-connection path never runs on this child again after birth.
+func TestRebuildReconcilesMergesForAChildNoLaterExperienceTouches(t *testing.T) {
+	r := newFakeRepo()
+	childKey := NewScope("cap=impl", "lang=rust").Key()
+
+	// Trim splitScenario() to the experience that triggers the split — the
+	// scenario's own tail (the remaining rust failures) would otherwise
+	// keep touching the child right after birth, muddying which mechanism
+	// (judge's touched path vs. the reconciliation sweep) reached it.
+	var triggerIdx int
+	scan := newFakeRepo()
+	enScan := &Engine{Repo: scan}
+	for i, e := range splitScenario() {
+		scan.exps = append(scan.exps, e)
+		if err := enScan.Apply(e); err != nil {
+			t.Fatal(err)
+		}
+		if c, _ := scan.GetConnection(ConnCapability, childKey, "claude"); c != nil {
+			triggerIdx = i
+			break
+		}
+	}
+	exps := splitScenario()[:triggerIdx+1]
+
+	// One experience in an unrelated scope (cap=doc, never lang=rust), far
+	// enough after the split for the child's distinguishing evidence to
+	// have decayed past ThetaMerge. It advances Rebuild's replay clock
+	// without ever touching the child.
+	last := exps[len(exps)-1]
+	exps = append(exps, execExp("advance-clock", last.TS+1000*HalfLifeMs,
+		"claude", map[string]string{"cap": "doc"}, Outcome{Adopted: "as-is"}))
+	r.exps = exps
+
+	en := &Engine{Repo: r}
+	if err := en.Rebuild(); err != nil {
+		t.Fatal(err)
+	}
+
+	if c, _ := r.GetConnection(ConnCapability, childKey, "claude"); c != nil {
+		t.Error("Rebuild's end-of-replay reconciliation should have merged the untouched child away")
+	}
+}
+
 func TestRebuildIsIdempotentAndWallClockIndependent(t *testing.T) {
 	r := newFakeRepo()
 	en := &Engine{Repo: r}
@@ -620,3 +723,47 @@ func TestApplyFeedsBothBetTargets(t *testing.T) {
 	got, _ := r.GetConnection(ConnPlan, "cap=impl", "implement>test")
 	almostEqual(t, got.Alpha, PriorAlpha+1.0, 1e-12, "plan posterior untouched by plan-less run")
 }
+
+// nonStationaryScenario is n experiences at one (cap, lang) scope, the first
+// half all adopted and the second half all reverted. lang never varies, so
+// it is the one candidate token split() ever has to score for the cap=impl
+// connection — and, being present in every experience, it never earns
+// enough evidence to clear ThetaSplit. The ledger is therefore never reset
+// (ADR-0002's designed "static, but Questioned" outcome), so every
+// remaining experience re-summons judge → split on a connection whose
+// matching-experience set keeps growing — the shape that made Rebuild
+// O(n²) before caching (ADR-0037 Decision 2 fix a/b).
+func nonStationaryScenario(n int) []*Experience {
+	exps := make([]*Experience, 0, n)
+	var ts int64 = 1_700_000_000_000
+	half := n / 2
+	for i := 0; i < n; i++ {
+		ts += 60000
+		o := Outcome{Adopted: "as-is"}
+		if i >= half {
+			o = Outcome{Reverted: true}
+		}
+		exps = append(exps, execExp(fmt.Sprintf("ns-%d", i), ts,
+			"claude", map[string]string{"cap": "impl", "lang": "rust"}, o))
+	}
+	return exps
+}
+
+func benchmarkRebuildNonStationary(b *testing.B, n int) {
+	exps := nonStationaryScenario(n)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		r := newFakeRepo()
+		r.exps = exps
+		en := &Engine{Repo: r}
+		if err := en.Rebuild(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRebuildNonStationary100(b *testing.B)  { benchmarkRebuildNonStationary(b, 100) }
+func BenchmarkRebuildNonStationary200(b *testing.B)  { benchmarkRebuildNonStationary(b, 200) }
+func BenchmarkRebuildNonStationary400(b *testing.B)  { benchmarkRebuildNonStationary(b, 400) }
+func BenchmarkRebuildNonStationary800(b *testing.B)  { benchmarkRebuildNonStationary(b, 800) }
+func BenchmarkRebuildNonStationary1600(b *testing.B) { benchmarkRebuildNonStationary(b, 1600) }

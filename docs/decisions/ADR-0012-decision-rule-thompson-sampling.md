@@ -60,6 +60,14 @@ Curiosity Never Blocks Production の精神に反する。
 
 忘却が寛容を生む。機構はすでにある。
 
+> **改版（[ADR-0037](ADR-0037-merge-reachability.md)）**: 上記は一様事前Beta(1,1)を
+> 前提にした約束であり、[ADR-0013](ADR-0013-prior-inheritance-mean-only.md)の
+> 継承事前を持つSplit子には成立しない — 親の事後平均μが低いまま生まれた子は、
+> 減衰しきってもゲートの下に留まる（減衰は事前の分位点へ**下から漸近**するだけ）。
+> ADR-0037はこのゲート自体は無改変のまま、名誉回復の担い手をmerge判定（子が畳まれ、
+> 親が読まれるようになる）へ移し、その判定が触れられたConnectionに限定されず
+> 届くようにした。
+
 ---
 
 ## Decision 4: 高stakesの温度 = サンプル数 n

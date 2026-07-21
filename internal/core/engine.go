@@ -27,6 +27,41 @@ type Repo interface {
 // Engine applies experiences to the Knowledge Network.
 type Engine struct {
 	Repo Repo
+
+	// exps/matches cache Repo.CurrentExperiences() and matchingExperiences
+	// results for one epoch — the span between resetEpoch calls (ADR-0037
+	// Decision 2 fix a/b). matchingExperiences used to re-fetch and
+	// re-unmarshal the whole experience log from the store on every
+	// candidate token and every merge check; that reload, repeated once per
+	// remaining experience on a connection stuck Questioned (ADR-0002's
+	// intended behavior, not a bug — the ledger is deliberately left
+	// un-cleared when no candidate clears the split bar), is what made
+	// Rebuild O(n²) on non-stationary data.
+	//
+	// Apply and ReconcileMerges each reset their own epoch at the start, so
+	// either always sees the Repo's current state — this must hold even
+	// when several Apply calls share one Engine with a new experience
+	// inserted between them (e.g. internal/reflection's tests insert one
+	// experience, apply it, and repeat against one shared Engine). Rebuild
+	// is the one caller that spans multiple experiences within a single
+	// epoch: nothing else touches the experience log during its replay, so
+	// it resets once and drives the unexported apply/reconcileMerges core
+	// directly — the reuse that makes the O(n²) reload tractable.
+	exps       []*Experience
+	expsLoaded bool
+	matches    map[matchKey][]*Experience
+}
+
+// matchKey identifies one matchingExperiences query.
+type matchKey struct {
+	kind, target, scopeKey string
+	nowMs                  int64
+}
+
+// resetEpoch discards the cached experience log and memoized queries, so
+// the next read reflects Repo's current state.
+func (en *Engine) resetEpoch() {
+	en.exps, en.expsLoaded, en.matches = nil, false, nil
 }
 
 // Apply folds one experience into the projections: births granularity-1
@@ -41,6 +76,14 @@ type Engine struct {
 // order the projection can diverge; `tomobit rebuild` restores the
 // canonical state.
 func (en *Engine) Apply(exp *Experience) error {
+	en.resetEpoch()
+	return en.apply(exp)
+}
+
+// apply is Apply's unexported core: everything Apply does except owning the
+// epoch boundary, so Rebuild's replay loop can drive it directly and share
+// one epoch across every experience instead of resetting per call.
+func (en *Engine) apply(exp *Experience) error {
 	y, ok := OutcomeWeight(exp)
 	if !ok {
 		return nil // no outcome signal (e.g. cancelled) — nothing to learn
@@ -153,23 +196,12 @@ func (en *Engine) LedgerSum(c *Connection, nowMs int64) (float64, error) {
 // then the Bayes-factor scan (Split), plus the reverse test (Merge) when
 // the connection is a child.
 func (en *Engine) judge(c *Connection, nowMs int64) error {
-	// Merge check for children: fold back when the corrected ln BF of the
-	// distinguishing token drops to the neutral point (ADR-0002 hysteresis).
-	if c.ParentKey != "" {
-		parentScope := ParseScopeKey(c.ParentKey)
-		distinguishing := c.Scope().Minus(parentScope)
-		if len(distinguishing) == 1 {
-			bf, err := en.tokenBF(c.Kind, c.Target, parentScope, distinguishing[0], nowMs)
-			if err != nil {
-				return err
-			}
-			if bf <= ThetaMerge {
-				if err := en.Repo.DeleteLedgerFor(c.Kind, c.ScopeKey, c.Target); err != nil {
-					return err
-				}
-				return en.Repo.DeleteConnection(c.Kind, c.ScopeKey, c.Target)
-			}
-		}
+	merged, err := en.mergeCheck(c, nowMs)
+	if err != nil {
+		return err
+	}
+	if merged {
+		return nil
 	}
 
 	// Split: trigger first (cheap), judgment only when summoned.
@@ -181,6 +213,74 @@ func (en *Engine) judge(c *Connection, nowMs int64) error {
 		return nil
 	}
 	return en.split(c, nowMs)
+}
+
+// mergeCheck folds c back into its parent when the corrected ln BF of its
+// distinguishing token has decayed to the neutral point (ADR-0002
+// hysteresis; ADR-0037 Decision 1 leaves the gate and this test untouched).
+// It is a pure function of decayed evidence at nowMs — the verdict does not
+// depend on why it is being asked — so judge's touched-connection path and
+// ReconcileMerges' independent sweep (ADR-0037 Decision 2) share this one
+// implementation (Same Test Both Ways).
+func (en *Engine) mergeCheck(c *Connection, nowMs int64) (merged bool, err error) {
+	if c.ParentKey == "" {
+		return false, nil
+	}
+	parentScope := ParseScopeKey(c.ParentKey)
+	distinguishing := c.Scope().Minus(parentScope)
+	if len(distinguishing) != 1 {
+		return false, nil
+	}
+	bf, err := en.tokenBF(c.Kind, c.Target, parentScope, distinguishing[0], nowMs)
+	if err != nil {
+		return false, err
+	}
+	if bf > ThetaMerge {
+		return false, nil
+	}
+	if err := en.Repo.DeleteLedgerFor(c.Kind, c.ScopeKey, c.Target); err != nil {
+		return false, err
+	}
+	if err := en.Repo.DeleteConnection(c.Kind, c.ScopeKey, c.Target); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ReconcileMerges gives merge judgment the reach judge's touched-connection
+// path cannot (ADR-0037 Decision 2): a child gated out of production is
+// never picked, so it never receives an experience, so judge never runs on
+// it, and its distinguishing token's ln BF — even once decay has carried it
+// well under ThetaMerge — is never read. That is the self-reinforcing
+// deadlock the ADR names: gated out → unused → untouched → unjudged.
+// mergeCheck is a pure function of decayed evidence at nowMs, so sweeping
+// every connection here reaches the same verdict the touched-connection
+// path would have reached for the same child; only the reach changes, the
+// rule does not.
+//
+// This is deliberately the "重い、呼ばれた時だけ" side of the two-stage
+// judge (ADR-0002): call it once per Apply batch and once per Rebuild
+// (Rebuild does, at the end of its replay) — never per experience, which is
+// exactly the cost ADR-0002's staging exists to avoid.
+func (en *Engine) ReconcileMerges(nowMs int64) error {
+	en.resetEpoch()
+	return en.reconcileMerges(nowMs)
+}
+
+// reconcileMerges is ReconcileMerges' unexported core (see apply/Apply):
+// Rebuild calls this directly so its closing sweep reuses the epoch its
+// replay already populated, instead of paying for one more full reload.
+func (en *Engine) reconcileMerges(nowMs int64) error {
+	conns, err := en.Repo.AllConnections()
+	if err != nil {
+		return err
+	}
+	for _, c := range conns {
+		if _, err := en.mergeCheck(c, nowMs); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // split scans candidate attributes and births the strongest partition whose
@@ -310,12 +410,30 @@ func (en *Engine) tokenBF(kind, target string, scope Scope, token string, nowMs 
 	return LnBF(kWith, nWith, kWithout, nWithout), nil
 }
 
+// currentExperiences returns Repo.CurrentExperiences(), cached for the
+// current epoch (see the Engine doc comment for the validity contract).
+func (en *Engine) currentExperiences() ([]*Experience, error) {
+	if !en.expsLoaded {
+		exps, err := en.Repo.CurrentExperiences()
+		if err != nil {
+			return nil, err
+		}
+		en.exps, en.expsLoaded = exps, true
+	}
+	return en.exps, nil
+}
+
 // matchingExperiences returns experiences up to nowMs (inclusive) that match
 // kind+target and contain scope. The nowMs bound keeps judgment causal: an
 // Apply anchored at exp.TS must never learn from evidence dated after it, or
-// live and rebuilt projections would disagree.
+// live and rebuilt projections would disagree. Memoized per (kind, target,
+// scope, nowMs) — see the matches field.
 func (en *Engine) matchingExperiences(kind, target string, scope Scope, nowMs int64) ([]*Experience, error) {
-	all, err := en.Repo.CurrentExperiences()
+	key := matchKey{kind, target, scope.Key(), nowMs}
+	if cached, ok := en.matches[key]; ok {
+		return cached, nil
+	}
+	all, err := en.currentExperiences()
 	if err != nil {
 		return nil, err
 	}
@@ -331,6 +449,10 @@ func (en *Engine) matchingExperiences(kind, target string, scope Scope, nowMs in
 			out = append(out, e)
 		}
 	}
+	if en.matches == nil {
+		en.matches = make(map[matchKey][]*Experience)
+	}
+	en.matches[key] = out
 	return out, nil
 }
 
@@ -350,14 +472,31 @@ func (en *Engine) Rebuild() error {
 	if err := en.Repo.ClearProjections(); err != nil {
 		return err
 	}
-	exps, err := en.Repo.CurrentExperiences()
+	// One epoch for the whole replay (ADR-0037 Decision 2 fix a/b): nothing
+	// else touches the experience log while Rebuild runs, so the cache
+	// populated by the first currentExperiences() call below stays valid
+	// through every apply and the closing reconcileMerges — resetEpoch is
+	// deliberately not called again until the next top-level Apply/Rebuild.
+	en.resetEpoch()
+	exps, err := en.currentExperiences()
 	if err != nil {
 		return err
 	}
 	for _, e := range exps {
-		if err := en.Apply(e); err != nil {
+		if err := en.apply(e); err != nil {
 			return fmt.Errorf("replaying %s: %w", e.ID, err)
 		}
 	}
-	return nil
+	if len(exps) == 0 {
+		return nil
+	}
+	// One reconciliation sweep closes ADR-0037's reachability gap for the
+	// whole replay: a child gated out partway through stops being touched
+	// by the remaining Apply calls, exactly as it would in a live
+	// deployment, so it needs the same batch-boundary sweep production
+	// gets. nowMs is the last experience's own timestamp, never the wall
+	// clock — Rebuild's output must stay a pure function of the ledger
+	// (TestRebuildIsIdempotentAndWallClockIndependent), and the moment
+	// `tomobit rebuild` happens to run must not leak into the projection.
+	return en.reconcileMerges(exps[len(exps)-1].TS)
 }

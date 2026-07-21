@@ -27,6 +27,16 @@ const (
 	// 行う (ADR-0012 Decision 3) would take literally forever. 0.02 puts a
 	// single fresh failure back inside the gate after ~3 half-lives
 	// (~9 months) — forgiveness on the same clock as forgetting.
+	//
+	// That ~3-half-life figure assumes a uniform prior Beta(1,1), where
+	// decay has nowhere to land but the blank slate. A Split child inherits
+	// its parent's posterior mean as its own prior (ADR-0013), and a child
+	// born under μ ≲ 0.48 decays toward a floor its own q20 never clears —
+	// the margin cannot rescue it, no matter how many half-lives pass. For
+	// that lineage rehabilitation is not this gate's job: it happens when
+	// the child's distinguishing evidence decays into Merge (ADR-0002) and
+	// the parent — whose own prior this gate does calibrate for — is read
+	// again (ADR-0037 Decision 2).
 	gateMargin = 0.02
 )
 

@@ -55,9 +55,9 @@ func TestParseScopeKeyIsInjectiveOverCanonTokens(t *testing.T) {
 			{"cap", "b|onus"}, {"lang", "rust"}, {"topic", "ci|cd"},
 		}, 3},
 		{"pipe and equals mixed in one value", [][2]string{{"topic", "a=b|c"}}, 1},
-		// CanonValue lowercases before mapping '|' to '-', so two raw values
-		// that only differ in case land on the same canonical token; NewScope
-		// must collapse them rather than let the duplicate survive into Key.
+		// CanonValue maps '|' to '-' and lowercases, so two raw values that
+		// differ only in case land on the same canonical token; NewScope must
+		// collapse them rather than let the duplicate survive into Key.
 		{"same pair collected twice under different casing collapses to one token", [][2]string{
 			{"topic", "CI|CD"}, {"topic", "ci|cd"},
 		}, 1},
