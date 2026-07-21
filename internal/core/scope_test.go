@@ -33,6 +33,53 @@ func TestParseScopeKeyRoundTrips(t *testing.T) {
 	}
 }
 
+// TestParseScopeKeyIsInjectiveOverCanonTokens fixes the contract Connection
+// matching depends on: for any tokens CanonToken can produce, Key/
+// ParseScopeKey must be a lossless round-trip — same token count, same
+// tokens, regardless of value content or the order attributes were
+// collected in. A value containing '|' (the token separator) previously
+// re-split into an extra token here, silently changing the token count and
+// orphaning the Connection.
+func TestParseScopeKeyIsInjectiveOverCanonTokens(t *testing.T) {
+	tests := []struct {
+		name       string
+		pairs      [][2]string // key, value
+		wantTokens int         // distinct tokens NewScope should keep, post dedupe
+	}{
+		{"single pipe in value", [][2]string{{"topic", "CI|CD"}}, 1},
+		{"multiple pipes in one value", [][2]string{{"topic", "a|b|c"}}, 1},
+		{"pipe alongside plain tokens", [][2]string{
+			{"topic", "ci|cd"}, {"lang", "rust"}, {"cap", "b|onus"},
+		}, 3},
+		{"same tokens, reversed collection order", [][2]string{
+			{"cap", "b|onus"}, {"lang", "rust"}, {"topic", "ci|cd"},
+		}, 3},
+		{"pipe and equals mixed in one value", [][2]string{{"topic", "a=b|c"}}, 1},
+		// CanonValue lowercases before mapping '|' to '-', so two raw values
+		// that only differ in case land on the same canonical token; NewScope
+		// must collapse them rather than let the duplicate survive into Key.
+		{"same pair collected twice under different casing collapses to one token", [][2]string{
+			{"topic", "CI|CD"}, {"topic", "ci|cd"},
+		}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			toks := make([]string, len(tt.pairs))
+			for i, p := range tt.pairs {
+				toks[i] = CanonToken(p[0], p[1])
+			}
+			scope := NewScope(toks...)
+			if len(scope) != tt.wantTokens {
+				t.Fatalf("got %d tokens %v, want %d", len(scope), scope, tt.wantTokens)
+			}
+			got := ParseScopeKey(scope.Key())
+			if !reflect.DeepEqual(got, scope) {
+				t.Errorf("round-trip broken: got %v, want %v", got, scope)
+			}
+		})
+	}
+}
+
 func TestSubsetOf(t *testing.T) {
 	tokens := []string{"a=1", "b=2"}
 	tests := []struct {

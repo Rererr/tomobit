@@ -230,18 +230,34 @@ func MarshalOutcome(o Outcome) string {
 	return string(b)
 }
 
-// CanonValue canonicalizes a single attribute value: trim, lowercase, and
-// strip every Unicode control character (ESC/CSI/BEL and friends). Control
-// chars are stripped before trimming so a stray one doesn't hide whitespace
-// at the new edge. LLM-extracted values are the entry point for this — a
-// hostile "value" could otherwise carry a terminal escape sequence all the
-// way to a rendered scope (SCHEMA.md D5).
+// CanonValue canonicalizes a single attribute value: trim, lowercase, strip
+// every Unicode control character (ESC/CSI/BEL and friends), and map '|' to
+// '-'. Control chars are stripped before trimming so a stray one doesn't
+// hide whitespace at the new edge. LLM-extracted values are the entry point
+// for this — a hostile "value" could otherwise carry a terminal escape
+// sequence all the way to a rendered scope (SCHEMA.md D5).
+//
+// '|' gets the same treatment for a different reason: it is the scope_key
+// token separator (Scope.Key, SCHEMA.md D5). An unconstrained lang/framework/
+// topic value containing it (e.g. an extractor returning "CI|CD") would
+// silently re-split into two tokens on the way through ParseScopeKey,
+// changing the token count and orphaning the Connection — it would never
+// SubsetOf-match its own scope again. Mapped to '-' rather than dropped so
+// "ci|cd" and "cicd" stay distinguishable, mirroring the control-char
+// stripping being a drop only because dropping there loses nothing. '=' is
+// deliberately left alone: it separates key from value within one token
+// (CanonToken), not tokens within a scope_key, and stripping it would mangle
+// legitimate values like "a=b" instead of protecting anything.
 func CanonValue(s string) string {
 	stripped := strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		switch {
+		case unicode.IsControl(r):
 			return -1
+		case r == '|':
+			return '-'
+		default:
+			return r
 		}
-		return r
 	}, s)
 	return strings.ToLower(strings.TrimSpace(stripped))
 }

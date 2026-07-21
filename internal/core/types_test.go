@@ -113,3 +113,26 @@ func TestCanonTokenStripsControlChars(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// TestCanonValueMapsPipeToHyphen guards the scope_key entry point: lang/
+// framework/topic carry no enum constraint (SCHEMA.md D5), so an extractor
+// is free to return a value containing '|', the scope_key token separator
+// (Scope.Key). Left untouched, "CI|CD" would canonicalize to "ci|cd" and
+// re-split into two tokens on ParseScopeKey, silently orphaning the
+// Connection built from it (its own future scope would never SubsetOf-match
+// it again).
+func TestCanonValueMapsPipeToHyphen(t *testing.T) {
+	if got, want := CanonValue("CI|CD"), "ci-cd"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestCanonValueLeavesEqualsUntouched documents the scope boundary: '=' only
+// separates key from value inside one token (CanonToken), never tokens
+// within a scope_key, so stripping or mapping it here would mangle a
+// legitimate value like "a=b" without protecting anything.
+func TestCanonValueLeavesEqualsUntouched(t *testing.T) {
+	if got, want := CanonValue("a=b"), "a=b"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
