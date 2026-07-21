@@ -145,4 +145,7 @@ ADR-0002 の θ_merge = 0 は「自然な中立点」として選ばれている
 
 ### 残された論点
 
-恒久ゲート落ちの解消は [ADR-0038](ADR-0038-gate-under-inherited-priors.md) へ引き継ぐ。
+恒久ゲート落ちの解消は [ADR-0038](ADR-0038-gate-under-inherited-priors.md) が引き継いだ
+（2026-07-21 Accepted）。本ADRの **Decision 1「ゲートの式は変えない」は ADR-0038 が改版する** —
+ゲートの基準線が定数 q からその Connection 自身の事前の q 分位点（min 付き）へ一般化された。
+Decision 2（merge 判定の到達性）と Decision 3（較正コメント）はそのまま残る。

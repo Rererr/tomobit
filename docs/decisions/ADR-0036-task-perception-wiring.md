@@ -1,6 +1,6 @@
 # ADR-0036: 判断が読むトークン — Task Perception の未配線
 
-- Status: **Proposed**（Decision 1 のみ先行して実装済み。Decision 2 は所有者の判断待ち）
+- Status: **Accepted**（Decision 1 は先行実装済み。Decision 2 は 2026-07-21 に所有者が採用）
 - Date: 2026-07-21
 - 関連: [PERCEPTION_ENGINE.md](../core/PERCEPTION_ENGINE.md)（Task Perception — 本ADRが扱う未実装部分）,
   [ADR-0011](ADR-0011-meaning-by-model-judgment-by-math.md)（Decision 3: タスク記述→extractor→Context属性トークン→Decision Engine）,
@@ -63,7 +63,7 @@ v1 では `cap` と `size` の2つ。
 これは新しい決定というより、ADR-0012 Decision 4 と ADR-0013 Decision 2 の間に空いていた穴を塞ぐ修正である。
 **適用は判断を行う全箇所**（`autoDecide` / `resolvePlan` の `ChoosePlan` / duel の `pickDuelGap`）— 判断の語彙が呼び出し口で揺れてはならない。
 
-## Decision 2: 意味属性の Task Perception — **所有者の判断待ち**
+## Decision 2: 意味属性の Task Perception — 採用（2026-07-21）
 
 `lang` / `framework` / `topic` はタスク記述からしか取れない。
 PERCEPTION_ENGINE.md の設計どおり実装するなら、判断の直前に extractor を1回通すことになる。

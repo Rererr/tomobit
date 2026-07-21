@@ -1,6 +1,6 @@
 # ADR-0038: 継承事前の下の能力ゲート — 無知はいつでも土俵に立てる
 
-- Status: **Proposed**（所有者の判断待ち。実装していない）
+- Status: **Accepted**（2026-07-21 所有者が採用を決定）
 - Date: 2026-07-21
 - 関連: [ADR-0012](ADR-0012-decision-rule-thompson-sampling.md)（Decision 3: 名誉回復は減衰だけで行う / 悲観ゲートの自己参照性）,
   [ADR-0013](ADR-0013-prior-inheritance-mean-only.md)（Decision 1: 平均だけ継ぎ、確信は継がない）,
@@ -40,7 +40,7 @@ ADR-0036 Decision 1 で判断のトークンに `size` が入ったため、
 
 ---
 
-## 提案する Decision: ゲートの基準線を「その Connection 自身の無知」に接地する
+## Decision: ゲートの基準線を「その Connection 自身の無知」に接地する
 
 ```text
 現在:  pass ⟺ Quantile(q) ≥ q − margin
@@ -86,15 +86,18 @@ ADR-0013 は「平均だけ継ぎ、確信は継がない」と決めた —
   親の成績が半分未満なら以後その Provider を選ばない」という規則を明文化することになる。
   ADR-0012 Decision 3 と正面から矛盾するので、明文化するならそちらの改版が要る
 
-## 決めてほしい点
+## 決定の記録
 
-1. この変更を入れるか（入れるなら `min` 付きの片側緩和でよいか）
-2. `PriorQuantile` は `Connection.Prior()` から求まるので新しいノブも状態も増えないが、
-   **既存の台帳を持つ環境では選ばれる Provider が変わりうる**。
-   変わってよいか（変わるのは「今まで恒久的に外されていた子が土俵に戻る」方向のみ）
-3. 入れない場合、上記「何もしない」の明文化として ADR-0012 Decision 3 を改版するか
+所有者は `min` 付きの片側緩和を採用した（2026-07-21）。
+既存の台帳で選ばれる Provider が変わりうることも了承済み —
+変わるのは「今まで恒久的に外されていた子が土俵に戻る」方向のみである。
 
-## Consequences（採る場合）
+同時に [ADR-0036](ADR-0036-task-perception-wiring.md) Decision 2（Task Perception の配線）も
+採用されたため、本ADRは**その前提条件**として先に効いている必要がある:
+配線によって lang/framework/topic を軸に生まれた Split 子が判断へ届き始め、
+恒久ゲート落ちの露出面が一気に広がるからである。
+
+## Consequences
 
 - `decide.go` のゲート1箇所と、その較正コメント（ADR-0037 Decision 3 で入れた但し書きは
   役目を終えて差し替えになる）

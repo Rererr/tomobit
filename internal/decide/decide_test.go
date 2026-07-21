@@ -1,6 +1,7 @@
 package decide
 
 import (
+	"math"
 	"testing"
 
 	"github.com/Rererr/tomobit/internal/core"
@@ -187,5 +188,69 @@ func TestPairWobble(t *testing.T) {
 	sure := conn(core.ConnPreference, "cap=implement", "a~b", 40, 1)
 	if w := PairWobble(sure, 128, 1, now); w > 0.05 {
 		t.Errorf("settled pair should not flicker, got %v", w)
+	}
+}
+
+// splitChild is a Connection born from a Split: it carries its parent's
+// posterior mean as its own prior (ADR-0013 Decision 1), scaled to the fixed
+// inheritance mass, and has no evidence of its own left after full decay.
+func splitChild(mu float64, lastUpdate int64) *core.Connection {
+	a, b := mu*core.InheritM0, (1-mu)*core.InheritM0
+	return &core.Connection{
+		Kind: core.ConnCapability, ScopeKey: "cap=implement|lang=rust", Target: "codex",
+		Alpha: a, Beta: b, PriorA: a, PriorB: b,
+		LastUpdate: lastUpdate, BornTS: lastUpdate, ParentKey: "cap=implement",
+	}
+}
+
+// A uniform prior keeps the bar exactly where ADR-0012 calibrated it: this
+// change must not move any judgment a parentless Connection takes part in
+// (ADR-0038 Consequences).
+func TestGateBarIsUnchangedForAUniformPrior(t *testing.T) {
+	root := conn(core.ConnCapability, "cap=implement", "codex", 1, 2)
+	want := QuantileQ - gateMargin
+	if got := gateBar(root); math.Abs(got-want) > 1e-9 {
+		t.Errorf("gateBar(uniform prior) = %v, want %v", got, want)
+	}
+	if got := gateBar(nil); math.Abs(got-want) > 1e-9 {
+		t.Errorf("gateBar(absent) = %v, want %v", got, want)
+	}
+}
+
+// The whole promise of ADR-0012 Decision 3 for an inherited prior: evidence
+// closes the gate, and decay alone opens it again. Under the constant bar the
+// decayed child never got back in, because its floor was its parent's mean
+// rather than the blank slate (ADR-0038 Context).
+func TestGateReopensByDecayForAChildOfALowMeanParent(t *testing.T) {
+	child := splitChild(0.30, now)
+	child.Observe(0, now)
+	child.Observe(0, now)
+	if GatePass(child, now) {
+		t.Fatalf("fresh failures should close the gate, quantile %v bar %v",
+			child.QuantileAt(now, QuantileQ), gateBar(child))
+	}
+	later := now + 50*core.HalfLifeMs
+	if !GatePass(child, later) {
+		t.Errorf("decay alone must re-open the gate for an inherited prior too, quantile %v bar %v",
+			child.QuantileAt(later, QuantileQ), gateBar(child))
+	}
+}
+
+// The relaxation is one-sided: a child of an excellent family is judged
+// against the uniform bar, not against its family's 0.86. Otherwise the
+// inherited mean would become an absolute floor, which is not what ADR-0013
+// asked of it (ADR-0038 Decision).
+func TestGateNeverBecomesStricterForAHighMeanParent(t *testing.T) {
+	child := splitChild(0.90, now)
+	want := QuantileQ - gateMargin
+	if got := gateBar(child); math.Abs(got-want) > 1e-9 {
+		t.Errorf("gateBar(μ=0.90 child) = %v, want %v — the bar must never rise above the uniform one", got, want)
+	}
+	// The bare self-reference this min() rejects would have demanded the
+	// family's own q20 instead; record what that would have been so the
+	// rejected alternative stays legible.
+	a, b := child.Prior()
+	if bare := core.BetaQuantile(a, b, QuantileQ); bare <= QuantileQ {
+		t.Fatalf("this test only says something while the family's bar (%v) is above the uniform one", bare)
 	}
 }

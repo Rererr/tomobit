@@ -6,6 +6,7 @@
 package decide
 
 import (
+	"math"
 	"math/rand"
 	"sort"
 
@@ -14,12 +15,13 @@ import (
 
 // Knobs (ADR-0012 Consequences: 分位点q と n(stakes)の固定表).
 const (
-	// QuantileQ is both the quantile level and (essentially) the gate's
-	// bar. The gate is self-referential — pass iff Quantile(q) ≥ q−margin —
-	// because the uniform prior's q-quantile is exactly q: a provider
-	// nobody knows anything about sits precisely on the bar and passes,
-	// while one failure drops it well below (Beta(1,2) q20 ≈ 0.106). No
-	// second semantic knob.
+	// QuantileQ is the quantile level, and — through gateBar — the bar for a
+	// connection whose prior is uniform. The gate is self-referential: a
+	// provider nobody knows anything about sits precisely on the bar and
+	// passes, while one failure drops it well below (Beta(1,2) q20 ≈ 0.106).
+	// For the uniform prior that state's q-quantile is exactly q, which is why
+	// this one constant used to serve as both; gateBar (ADR-0038) states the
+	// rule for every prior. No second semantic knob.
 	QuantileQ = 0.20
 
 	// gateMargin exists because decay approaches the prior's quantile from
@@ -28,15 +30,12 @@ const (
 	// single fresh failure back inside the gate after ~3 half-lives
 	// (~9 months) — forgiveness on the same clock as forgetting.
 	//
-	// That ~3-half-life figure assumes a uniform prior Beta(1,1), where
-	// decay has nowhere to land but the blank slate. A Split child inherits
-	// its parent's posterior mean as its own prior (ADR-0013), and a child
-	// born under μ ≲ 0.48 decays toward a floor its own q20 never clears —
-	// the margin cannot rescue it, no matter how many half-lives pass. For
-	// that lineage rehabilitation is not this gate's job: it happens when
-	// the child's distinguishing evidence decays into Merge (ADR-0002) and
-	// the parent — whose own prior this gate does calibrate for — is read
-	// again (ADR-0037 Decision 2).
+	// That ~3-half-life figure assumes a uniform prior Beta(1,1), where decay
+	// has nowhere to land but the blank slate. A Split child inherits its
+	// parent's posterior mean as its own prior (ADR-0013), so its floor is
+	// not the blank slate — which is why the bar itself is computed per
+	// connection now (gateBar, ADR-0038) instead of being this constant q.
+	// Against each connection's own floor the ~3 half-lives hold again.
 	gateMargin = 0.02
 )
 
@@ -107,7 +106,7 @@ func chooseKind(kind string, conns []*core.Connection, candidates, tokens []stri
 			cand.ScopeKey = c.ScopeKey
 			cand.Quantile = c.QuantileAt(nowMs, QuantileQ)
 		}
-		cand.Passed = cand.Quantile >= QuantileQ-gateMargin
+		cand.Passed = cand.Quantile >= gateBar(c)
 		if cand.Passed {
 			cand.Wins = 0
 			passers = append(passers, len(d.Candidates))
@@ -158,6 +157,33 @@ func chooseKind(kind string, conns []*core.Connection, candidates, tokens []stri
 // blankQuantile is BetaQuantile(1,1,q) = q: what an absent connection scores.
 const blankQuantile = QuantileQ
 
+// gateBar is the line one connection has to clear (ADR-0038): its own state
+// of ignorance, never higher than the uniform bar.
+//
+//	bar = min(q, PriorQuantile(q)) − margin
+//
+// The constant q was only ever the uniform prior's q-quantile written out —
+// the rule ADR-0012 states is "a provider nobody knows anything about sits
+// precisely on the bar". Under ADR-0013's inherited prior that state sits
+// below the constant, so a child of a family whose mean was under ~0.48 could
+// never re-enter no matter how far its evidence decayed, and ADR-0037 measured
+// that merge cannot rescue it either (ln BF approaches ThetaMerge=0 from
+// above, ~60 half-lives). Grounding the bar in the connection's own prior
+// restores the stated rule for every prior, not just the uniform one.
+//
+// The min keeps it a one-sided relaxation. A bare self-reference would demand
+// 0.86 of a child that inherited μ=0.9 and gate it out on a single failure —
+// the family's memory turning into an absolute floor, which is not what
+// ADR-0013 asked for. That memory already works where it belongs: in the
+// posterior mean the Thompson tournament samples.
+func gateBar(c *core.Connection) float64 {
+	if c == nil {
+		return QuantileQ - gateMargin
+	}
+	a, b := c.Prior()
+	return math.Min(QuantileQ, core.BetaQuantile(a, b, QuantileQ)) - gateMargin
+}
+
 // GatePass reports whether one connection clears the capability gate on its
 // own — the same bar Choose applies, exposed for rehabilitation detection
 // (ADR-0015: 名誉回復 = 悲観ゲートへの再入場). nil is the blank slate: pass.
@@ -165,7 +191,7 @@ func GatePass(c *core.Connection, nowMs int64) bool {
 	if c == nil {
 		return true
 	}
-	return c.QuantileAt(nowMs, QuantileQ) >= QuantileQ-gateMargin
+	return c.QuantileAt(nowMs, QuantileQ) >= gateBar(c)
 }
 
 // firstWins samples the pairwise preference "a preferred over b" n times and
