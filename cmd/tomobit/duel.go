@@ -89,7 +89,7 @@ func duelBudgetOK(s *store.Store, now int64) (bool, error) {
 // pre-run gap exists. Whatever the answer, the offer is recorded (a declined
 // offer still spends the budget — ADR-0007 Decision 3): the record both rate-
 // limits future offers and lets the face know Tomo asked.
-func duelOffer(s *store.Store, capability string, in *bufio.Reader, out io.Writer, interactive bool, now int64) (curiosity.Gap, bool) {
+func duelOffer(s *store.Store, capability, size string, in *bufio.Reader, out io.Writer, interactive bool, now int64) (curiosity.Gap, bool) {
 	if !interactive {
 		return curiosity.Gap{}, false
 	}
@@ -106,7 +106,7 @@ func duelOffer(s *store.Store, capability string, in *bufio.Reader, out io.Write
 		fmt.Fprintln(os.Stderr, "duel: gap derivation failed:", err)
 		return curiosity.Gap{}, false
 	}
-	gap, found := pickDuelGap(gaps, []string{core.CanonToken("cap", capability)})
+	gap, found := pickDuelGap(gaps, decisionTokens(capability, size))
 	if !found {
 		return curiosity.Gap{}, false
 	}

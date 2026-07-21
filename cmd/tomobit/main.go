@@ -474,7 +474,7 @@ func cmdDo(args []string) error {
 	// duel path and returns; anything else falls through to the normal run.
 	if duelEligible(providerExplicit, *providerName) {
 		now := time.Now().UnixMilli()
-		if gap, accepted := duelOffer(s, *capability, stdin, os.Stdout,
+		if gap, accepted := duelOffer(s, *capability, *size, stdin, os.Stdout,
 			isTTY(os.Stdin) && isTTY(os.Stdout), now); accepted {
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 			defer stop()
@@ -972,7 +972,7 @@ func resolvePlan(s *store.Store, sid, arg, capability, size string) (string, err
 		if err != nil {
 			return "", err
 		}
-		tokens := []string{core.CanonToken("cap", capability)}
+		tokens := decisionTokens(capability, size)
 		dec := decide.ChoosePlan(conns, menu, tokens, size, now.UnixNano(), now.UnixMilli())
 		if err := s.AppendEvent(sid, "plan.selected", now.UnixMilli(), map[string]any{
 			"plan": dec.Provider, "seed": strconv.FormatInt(dec.Seed, 10),
@@ -1025,6 +1025,33 @@ func stepPrompt(prompt, step string, i, total int) string {
 	return fmt.Sprintf("%s\n\n[plan %d/%d: %s] このステップでは%s。", prompt, i+1, total, step, inst)
 }
 
+// decisionTokens is the context the Decision Engine reads a Connection
+// against (ADR-0013 Decision 2: 判断は最細一致のみを読む). v1 carries only what
+// the harness knows for certain before anything runs — the capability asked
+// for and the stakes declared — because a token that is a guess would pick a
+// finer Connection on a guess (ADR-0036 Decision 1).
+//
+// size rides here as well as into Draws(): the same attribute cannot be the
+// stakes of the lottery and invisible to the scope match. Its absence was the
+// gap, not a decision.
+//
+// An empty value is not a token. Experience.Tokens() skips empty values when
+// it feeds engine.applyTo, so emitting "size=" here would ask the ledger for a
+// scope no experience can ever have written.
+//
+// The semantic attributes (lang / framework / topic) need Task Perception —
+// unwired, and its cost against 第一の責務 is ADR-0036 Decision 2's open
+// question. Until that is decided, every Connection scoped on them stays
+// unreachable from the decision: the ledger grows structure the judgment
+// cannot read.
+func decisionTokens(capability, size string) []string {
+	tokens := []string{core.CanonToken("cap", capability)}
+	if size != "" {
+		tokens = append(tokens, core.CanonToken("size", size))
+	}
+	return tokens
+}
+
 // autoDecide runs the Decision Engine (ADR-0012) over the current
 // projections and records the full audit — seed included — as a
 // tomo.decided event, so the same ledger + the same seed replays the same
@@ -1037,7 +1064,7 @@ func autoDecide(s *store.Store, out io.Writer, sid, capability, size string) (de
 		return decide.Decision{}, err
 	}
 	now := time.Now()
-	tokens := []string{core.CanonToken("cap", capability)}
+	tokens := decisionTokens(capability, size)
 	// human competes on the same ledger with the same gate (ADR-0018
 	// Decision 2) — the engine may honestly route the task to the user.
 	candidates := append(providerNames(), "human")

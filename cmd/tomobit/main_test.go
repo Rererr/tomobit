@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Rererr/tomobit/internal/config"
@@ -1275,5 +1277,52 @@ func TestRunSplitAutoInheritsDecisionEnginePerSubtask(t *testing.T) {
 		if n := countEventsOfTypeInSession(t, s, sid, "tomo.decided"); n != 1 {
 			t.Errorf("subtask %d should record tomo.decided under --provider auto, got %d", i, n)
 		}
+	}
+}
+
+// The Decision Engine must read the finest Connection the harness can name
+// without guessing (ADR-0013 Decision 2, ADR-0036 Decision 1). size is
+// declared by the caller, so a Connection born at that granularity is part of
+// the context — not structure the judgment grows and then cannot read.
+func TestDecisionReadsTheSizeScopedConnection(t *testing.T) {
+	registerFakeProvider(t, "prov-a", &fakeSplitAdapter{name: "prov-a"})
+	s := openTestStore(t)
+	en := &core.Engine{Repo: s}
+	now := time.Now().UnixMilli()
+	growCapability(t, s, en, "cap=implement", "prov-a", now, 4, 1)
+	// The child Split births once size explains the parent's surprise
+	// (ADR-0001/0002): a 2-token scope no single-token match can stand in for.
+	child := &core.Connection{
+		Kind: core.ConnCapability, ScopeKey: "cap=implement|size=large", Target: "prov-a",
+		Alpha: 5, Beta: 2, LastUpdate: now, BornTS: now,
+		ParentKey: "cap=implement", PriorA: 1, PriorB: 1,
+	}
+	if err := s.UpsertConnection(child); err != nil {
+		t.Fatal(err)
+	}
+
+	dec, err := autoDecide(s, io.Discard, "s-decide", "implement", "large")
+	if err != nil {
+		t.Fatalf("autoDecide: %v", err)
+	}
+	var got string
+	for _, c := range dec.Candidates {
+		if c.Provider == "prov-a" {
+			got = c.ScopeKey
+		}
+	}
+	if want := "cap=implement|size=large"; got != want {
+		t.Errorf("connection read for prov-a = %q, want %q — a size-scoped Connection is unreachable from the decision", got, want)
+	}
+}
+
+// An absent --size is not a token: Experience.Tokens() skips empty values, so
+// "size=" would name a scope no experience can ever have written.
+func TestDecisionTokensDropTheUndeclaredSize(t *testing.T) {
+	if got, want := decisionTokens("implement", ""), []string{"cap=implement"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("decisionTokens(implement, \"\") = %v, want %v", got, want)
+	}
+	if got, want := decisionTokens("implement", "Large"), []string{"cap=implement", "size=large"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("decisionTokens(implement, Large) = %v, want %v", got, want)
 	}
 }

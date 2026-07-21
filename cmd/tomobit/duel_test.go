@@ -180,7 +180,7 @@ func TestDuelOfferFiresOnRealOpenGap(t *testing.T) {
 	growCapability(t, s, en, "cap=implement", "prov-a", now, 4, 1)
 	growCapability(t, s, en, "cap=implement", "prov-b", now, 4, 1)
 
-	gap, accepted := duelOffer(s, "implement",
+	gap, accepted := duelOffer(s, "implement", "",
 		bufio.NewReader(strings.NewReader("y\n")), io.Discard, true, now)
 	if !accepted {
 		t.Fatal("an open capability gap plus y should accept the offer")
