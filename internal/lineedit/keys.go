@@ -26,14 +26,14 @@ const (
 	KeyKillToEnd
 	KeyClearInput
 	KeyKillWord
-	KeyYank        // Ctrl-Y: put the kill slot back at the cursor
+	KeyYank // Ctrl-Y: put the kill slot back at the cursor
 	KeyClearScreen
-	KeyTab         // completion
-	KeySearch      // Ctrl-R: reverse incremental history search
-	KeySuspend     // Ctrl-Z: hand the terminal back and stop (unix only)
-	KeyInterrupt   // Ctrl-C
-	KeyEOT         // Ctrl-D: end of input on an empty buffer, delete otherwise
-	KeyPaste       // Text holds the whole bracketed-paste block
+	KeyTab       // completion
+	KeySearch    // Ctrl-R: reverse incremental history search
+	KeySuspend   // Ctrl-Z: hand the terminal back and stop (unix only)
+	KeyInterrupt // Ctrl-C
+	KeyEOT       // Ctrl-D: end of input on an empty buffer, delete otherwise
+	KeyPaste     // Text holds the whole bracketed-paste block
 )
 
 // Key is a decoded keypress. Rune is set for KeyRune, Text for KeyPaste.
