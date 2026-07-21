@@ -154,11 +154,40 @@ func TestProposeBudgetAndSpace(t *testing.T) {
 	}
 }
 
+// TestProposalBudgetIsHarnessWide (ADR-0014 implementation note): the
+// proposal budget borrows the question budget's shape (ADR-0007's
+// `tomo.asked` check, which is one gate for the whole log) — it is spent
+// across every capability, not reset per capability. K's per-capability
+// survival cap (Decision 5) is a different knob and doesn't change this.
+func TestProposalBudgetIsHarnessWide(t *testing.T) {
+	s := openStore(t)
+	implementMenu, err := Live(s, "implement", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Propose(s, "implement", implementMenu, now); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewMenu, err := Live(s, "review", now+1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, err := Propose(s, "review", reviewMenu, now+1000); err != nil {
+		t.Fatal(err)
+	} else if again != "" {
+		t.Errorf("a different capability must still be blocked by the same window, got %q", again)
+	}
+}
+
 // TestRetirementDropsDormantVariants (ADR-0014 Decision 5): a proposed plan
 // whose connection went dormant leaves the menu; initial variants stay.
 func TestRetirementDropsDormantVariants(t *testing.T) {
 	s := openStore(t)
-	menu, _ := Live(s, "implement", now)
+	menu, err := Live(s, "implement", now)
+	if err != nil {
+		t.Fatal(err)
+	}
 	proposed, err := Propose(s, "implement", menu, now)
 	if err != nil || proposed == "" {
 		t.Fatal(err)
@@ -182,5 +211,62 @@ func TestRetirementDropsDormantVariants(t *testing.T) {
 	}
 	if len(live) != 3 {
 		t.Errorf("initial variants must survive retirement, got %v", live)
+	}
+}
+
+// TestRetiredVariantIsNeverReproposed (ADR-0014 implementation note): once a
+// proposed variant retires from the menu, Propose must not offer it again —
+// it advances to the next candidate in deterministic enumeration order
+// instead of retracing the same drop→swap→insert prefix forever. The two
+// expected names below are Mutations(full)'s first two entries (drop
+// "analyze", then drop "implement"), pinned by reading Mutations' actual
+// output rather than assumed.
+func TestRetiredVariantIsNeverReproposed(t *testing.T) {
+	const wantFirst = "implement>test>review"
+	const wantSecond = "analyze>test>review"
+
+	s := openStore(t)
+	menu, err := Live(s, "implement", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := Propose(s, "implement", menu, now)
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if first != wantFirst {
+		t.Fatalf("first proposal: got %q, want %q", first, wantFirst)
+	}
+
+	// Retire it: quiet for two half-lives.
+	old := now - 2*core.HalfLifeMs - 1000
+	if err := s.UpsertConnection(&core.Connection{
+		Kind: core.ConnPlan, ScopeKey: "cap=implement", Target: first,
+		Alpha: 2, Beta: 1, LastUpdate: old, BornTS: old,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	nextWindow := now + ProposalWindowMs
+	menu2, err := Live(s, "implement", nextWindow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range menu2 {
+		if n == first {
+			t.Fatalf("retired variant %q leaked back into the live menu", first)
+		}
+	}
+	if len(menu2) != 3 {
+		t.Fatalf("retired variant should have left no trace in the menu, got %v", menu2)
+	}
+
+	second, err := Propose(s, "implement", menu2, nextWindow)
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if second != wantSecond {
+		t.Fatalf("second proposal: got %q, want %q (the retired %q must be skipped, not just avoided)", second, wantSecond, first)
 	}
 }

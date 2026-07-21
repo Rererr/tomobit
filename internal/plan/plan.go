@@ -16,7 +16,11 @@ const (
 	K = 5
 
 	// ProposalWindowMs is the proposal budget: at most one plan.generated in
-	// the trailing window (the question budget's shape, borrowed again).
+	// the trailing window, checked across the whole event log — not
+	// per-capability. It borrows the question budget's shape (ADR-0007's
+	// `tomo.asked` check), and that budget is a single harness-wide gate,
+	// not one per Preference Gap topic; K's "per-capability" scope
+	// (Decision 5) is a separate knob and doesn't extend to this one.
 	ProposalWindowMs = 24 * 3600 * 1000
 
 	// maxSteps bounds mutation growth — a plan longer than this stops being
@@ -223,11 +227,22 @@ func isRetired(s *store.Store, capability, name string, nowMs int64) (bool, erro
 
 // Propose runs the Curiosity proposal (Decision 3/5): if the menu has room
 // and the budget allows, generate the first legal mutation of the current
-// menu that is not already in it, record plan.generated, and return the new
-// variant's name. Priority within the mutation space is deterministic
-// enumeration order — every candidate is a blank slate with identical
-// wobble, so VoI cannot separate them yet (ADR-0016's tie falls back to a
-// fixed order). Returns "" when nothing is proposed.
+// menu that has never been proposed before, record plan.generated, and
+// return the new variant's name. Priority within the mutation space is
+// deterministic enumeration order — every candidate is a blank slate with
+// identical wobble, so VoI cannot separate them yet (ADR-0016's tie falls
+// back to a fixed order). Returns "" when nothing is proposed.
+//
+// "Never proposed" is checked against the full plan.generated history, not
+// just the live menu: a retired variant has left the menu but its name is
+// still spent. Checking against the menu alone would make Propose retrace
+// the same drop→swap→insert prefix every window a variant retires — the
+// same mutation coming back as "the first one not in the menu" forever,
+// starving every candidate after it. Retired names stay excluded from
+// enumeration permanently; that's fine because it's not the only way back
+// in — an explicit `--plan <steps>` still resolves and records
+// plan.selected regardless of retirement, so evidence can revive a retired
+// plan's connection (CONNECTION_ENGINE Revived) without Propose's help.
 func Propose(s *store.Store, capability string, menu []string, nowMs int64) (string, error) {
 	if len(menu) >= K {
 		return "", nil
@@ -242,6 +257,13 @@ func Propose(s *store.Store, capability string, menu []string, nowMs int64) (str
 
 	existing := map[string]bool{}
 	for _, n := range menu {
+		existing[n] = true
+	}
+	generated, err := generatedPlans(s, capability)
+	if err != nil {
+		return "", err
+	}
+	for _, n := range generated {
 		existing[n] = true
 	}
 	for _, parent := range menu {
