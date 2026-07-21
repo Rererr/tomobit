@@ -34,7 +34,7 @@
 - [ADR-0004](docs/decisions/ADR-0004-tech-stack.md) — 技術選定（Go / SQLite真実と射影の分離 / Ollama＋Deferred Perception / 段階的デーモン化。知覚バックエンド選択はADR-0029で一般化）
 - [ADR-0005](docs/decisions/ADR-0005-perception-model-and-schema-boundary.md) — 知覚の実装（qwen3:8b確定 / schemaは「形」・プロンプトは「意味」）
 - [ADR-0006](docs/decisions/ADR-0006-executor-integration.md) — Executor統合（`tomobit do` / claude-code Adapter / ダイジェスト記帳 / Feedback）
-- [ADR-0007](docs/decisions/ADR-0007-curiosity-question.md) — Curiosityの最初の器官（Preference GapはView / 質問予算はeventsから導出 / doの区切りでTomoの質問）
+- [ADR-0007](docs/decisions/ADR-0007-curiosity-question.md) — Curiosityの最初の器官（Preference GapはView / 質問予算はeventsから導出 / doの区切りでTomoの質問。発火条件（対人ゲート）はADR-0035が改定）
 - [ADR-0008](docs/decisions/ADR-0008-appearance.md) — Tomoの姿（成長ステージはView / ドット絵＝半ブロック＋ANSI / 依存ゼロ — 端末描画はADR-0025で廃止）
 - [ADR-0009](docs/decisions/ADR-0009-voice.md) — Tomoの声（発話＝Viewの写像 / LLM不使用 / 語調は確信度のView）
 - [ADR-0010](docs/decisions/ADR-0010-codex-adapter.md) — 2つ目のAdapter（codex / `do --provider` / 写像はエラー経路実採取＋仕様準拠）
@@ -42,7 +42,7 @@
 - [ADR-0012](docs/decisions/ADR-0012-decision-rule-thompson-sampling.md) — 決定則＝Thompson Sampling（探索は好みの側で、ミスは構造になる）
 - [ADR-0013](docs/decisions/ADR-0013-prior-inheritance-mean-only.md) — 事前分布の継承（平均だけ継ぎ、確信は継がない）
 - [ADR-0014](docs/decisions/ADR-0014-plan-learning-same-ledger.md) — Plan学習（台帳は賭ける対象を選ばない）
-- [ADR-0015](docs/decisions/ADR-0015-reflection.md) — Reflection（第一級の器官、実体は射影、核は双方向性）
+- [ADR-0015](docs/decisions/ADR-0015-reflection.md) — Reflection（第一級の器官、実体は射影、核は双方向性。発火条件（対人ゲート）はADR-0035が改定）
 - [ADR-0016](docs/decisions/ADR-0016-curiosity-priority-voi.md) — Curiosityの優先度＝Value of Information
 - [ADR-0017](docs/decisions/ADR-0017-stage-function-calibration.md) — ステージ関数の改版（成長のゲートは量でなく較正度）
 - [ADR-0018](docs/decisions/ADR-0018-experience-sovereignty.md) — Experience Sovereignty（経験主権と、humanの台帳）
@@ -60,7 +60,11 @@
 - [ADR-0030](docs/decisions/ADR-0030-provider-tool-output.md) — Providerのツール出力を表示専用で受け取る（tool_resultは表示専用キーで運び台帳はR3不変 / mdliteに通さずSGRのみ通す＝色は残しレイアウト破壊を防ぐ / 先頭優先で上限に切る / codexも対称。ターン総量はADR-0031が追補）
 - [ADR-0031](docs/decisions/ADR-0031-turn-tool-output-budget.md) — ターンのツール出力表示予算（per-result上限はNで積む洪水を縛れない / turnViewにターン累積予算＝先頭優先のターンスケール拡張 / 予算切れは一度だけ省略行を出し以後沈黙・detail行と本文textは予算外 / 上限値は実stream計測で較正）
 - [ADR-0032](docs/decisions/ADR-0032-pipe-chat-first-class.md) — pipe chatのGUI一級市民化（`chat --view ndjson`＝stdout全体をNDJSON viewストリームにするオプトイン・台帳はR3不変 / cookedの行継続＝末尾`\`はrawの`\`+Enterと同じ意味論 / `TOMOBIT_FACE=1`の明示はpipeでも顔窓を出す＝TTYゲートはenv沈黙時の既定へ改版・presenceも同条件）
-- [ADR-0033](docs/decisions/ADR-0033-organ-of-forgetting.md) — 忘却の器官（忘却は主権の行使＝人間の動詞・Tomoは提案も実行もしない / `forget`＝物理削除+VACUUM・`amend`＝人間による再知覚（追記） / 人の手が入ったセッションは再知覚しない / 直後に自動rebuildで射影整合）
+- [ADR-0033](docs/decisions/ADR-0033-organ-of-forgetting.md) — 忘却の器官（忘却は主権の行使＝人間の動詞・Tomoは提案も実行もしない / `forget`＝物理削除+VACUUM・`amend`＝人間による再知覚（追記） / 人の手が入ったセッションは再知覚しない / 直後に自動rebuildで射影整合。忘却の到達範囲（行単位か世代単位か）はADR-0034が改定）
+- [ADR-0034](docs/decisions/ADR-0034-forgetting-reach.md) — 忘却の到達範囲（`forget --id`は指名行だけでなく同一(session,kind)の下位世代も削除し版数の巻き戻りを防ぐ / 現行世代でないidの指名はエラー / 巻き添え行数は`+N superseded rows`で告知 — ADR-0033 Decision 2/5を改定）
+- [ADR-0035](docs/decisions/ADR-0035-boundary-organs-reach-the-pipe.md) — 対人ゲートの改版（Tomoの質問・鏡の発火条件を`isTTY(os.Stdin)`から`isTTY(os.Stdin) || --view ndjson`へ拡張しGUI経由でも境界の器官が届くようにする / 対人（`humanPresent`）と端末描画（`c.interactive`）の述語を分離 — ADR-0007/ADR-0015を改定）
+- [ADR-0036](docs/decisions/ADR-0036-task-perception-wiring.md) — **Proposed** 判断が読むトークン（判断は`cap=`1トークンしか読まず粒度1のConnectionとSplit子は到達不能 / Decision 1「決定的に既知の`size`もトークンにする」のみ先行実装 / タスク記述のTask Perception配線＝第一の責務とのトレードオフは所有者の判断待ち）
+- [ADR-0037](docs/decisions/ADR-0037-merge-reachability.md) — 継承事前の下での名誉回復（μ<0.48の親から生まれた子は減衰しても悲観ゲートを通らず、選ばれないから経験も来ずmerge判定機会も来ない自己強化デッドロック / ゲートも継承事前も変えずmerge判定の到達性だけを直す — ADR-0012 Decision 3を補完）
 
 ### Archive
 `docs/archive/` — 改訂前の原本。参照のみ、更新しない。
@@ -79,9 +83,12 @@ raw modeに `x/term`、表示幅に `uniseg`。知覚バックエンドはADR-00
 ```
 tomobit            # 相棒ビュー（発話・Connection一覧）→ そのまま対話へ
                    # パイプ・リダイレクトなら見せて終わる
-tomobit chat [--provider claude-code|codex|human|auto] [--cap <capability>] ["<prompt>"]
+tomobit chat [--provider claude-code|codex|human|auto] [--cap <capability>]
+             [--view ndjson] ["<prompt>"]
                    # 対話セッション。1つの会話 = 1つのタスク = 1つの経験。
                    # /new か /exit で区切ると Feedback→知覚→Tomoの質問→鏡 が走る
+                   # --view ndjson: stdout全体をGUI向けNDJSON viewストリームにする
+                   # オプトイン（TTYには出せない — ADR-0032。境界の器官もこの信号で届く — ADR-0035）
 tomobit do [--provider claude-code|codex] [--cap <capability>] "<prompt>"
                    # 非対話の一発（スクリプト向け）。区切りの器官はchatと同じ。
                    # 分割プロトコルは常時ON: Providerが「難しすぎる/独立に分けられる」と
