@@ -2,7 +2,8 @@
 
 - Status: **Accepted**
 - Date: 2026-07-19
-- 関連: [ADR-0018](ADR-0018-experience-sovereignty.md)（経験主権 — 所有者だけが動かせる）,
+- 関連: [ADR-0034](ADR-0034-forgetting-reach.md)（忘却の到達範囲 — Decision 2/5 を改定）,
+  [ADR-0018](ADR-0018-experience-sovereignty.md)（経験主権 — 所有者だけが動かせる）,
   [SCHEMA.md](../design/SCHEMA.md)（D3 追記専用トリガー / D4 版数共存 / D10 rebuild）,
   [ADR-0004](ADR-0004-tech-stack.md)（真実と射影の分離）,
   [ADR-0005](ADR-0005-perception-model-and-schema-boundary.md)（知覚の版数）,
@@ -50,6 +51,13 @@ ADR-0018の「Tomobitを育てた経験は、誰にも持っていかれない�
 ---
 
 ## Decision 2: 二つの動詞 — forget（忘却）と amend（訂正）
+
+> **改版**: 本 Decision の `--id` は「指名した行の物理削除」として書かれたが、
+> 版数共存（D4）と噛み合っていなかった。指名の単位・到達範囲は
+> [ADR-0034](ADR-0034-forgetting-reach.md) が改定する — `--id` は現行世代の行のみを受理し、
+> 同じ (session, kind) の下位世代も併せて削除する。下の「巻き添えは作らない」は
+> `--session` と子セッションの関係についての規律であり、そちらは不変。
+> 世代方向の巻き添えは ADR-0034 Decision 3 が明示的な例外として置き、数えて告知する。
 
 ```text
 tomobit forget --id <exp-id> [--id ...]   経験単位の忘却（行を物理削除）
@@ -125,12 +133,37 @@ PendingSessions（Deferred Perception のキュー導出）は、このマーカ
 
 ## Decision 5: forget は物理消去 — VACUUM までやる
 
+> **改版**: 消す行の範囲は [ADR-0034](ADR-0034-forgetting-reach.md) が改定した。
+> 物理消去の対象は「指名された行」ではなく、その系譜の下位世代を含む削除結果である
+> — 旧世代に残る訂正前の本文まで消えて初めて、物理消去が主権の嘘にならない。
+
 - トリガーは**単一トランザクション内**で一時 DROP → DELETE → 再作成する。
   SCHEMA.md D3 が予定していた「意図的な保守作業ではその時だけDROP」の実装。
   DDLもトランザクショナルなので、途中で死んでもトリガーごとロールバックされる
-- COMMIT 後に `PRAGMA wal_checkpoint(TRUNCATE)` + `VACUUM` を実行し、
+- COMMIT 後に `VACUUM` → `PRAGMA wal_checkpoint(TRUNCATE)` の順で実行し、
   WALと空きページに残る痕跡ごと消す。**「消した」と言って消えていないのは
-  主権の嘘になる**（機微情報の忘却がこの器官の想定ユースケースに含まれる）
+  主権の嘘になる**（機微情報の忘却がこの器官の想定ユースケースに含まれる）。
+  順序が literal に効く: journal_mode=WAL では VACUUM が書き直す
+  コンパクトなページ列は本体 db ファイルではなく WAL フレームへ着地する。
+  先に checkpoint すると、その時点の WAL（VACUUM 前の、削除済みだが
+  未整地なページを持つ内容）だけを本体へ書き戻して終わり、後から走る
+  VACUUM の出力は WAL に残ったまま次の checkpoint を待つ — つまり
+  「消した」の対象が本体ファイルへ一度も辿り着かない。VACUUM を先に
+  走らせれば、WAL が持つ最新の内容は常に「削除済みかつ整地済み」になり、
+  その後の checkpoint(TRUNCATE) が本体ファイルへ書き戻して WAL を空にする
+  操作こそが、ディスク上の旧バイト列を実際に上書きする一手になる
+- checkpoint は**1回だけ**呼ぶ。リトライは張らない — 実測（modernc/sqlite・WAL・
+  `busy_timeout=5000`）で、アイドルの read-only 接続も SELECT を終えた接続も
+  TRUNCATE を妨げず（busy=0・1ms 未満）、妨げるのは**開いた読みトランザクションを
+  保持する接続だけ**で、その相手には PRAGMA 自身が busy_timeout を丸ごと待ってから
+  busy=1 を返す。待つ機構は既に busy_timeout であり、その外側のループは同じ5秒を
+  試行回数だけ掛け算する（実測: 5回で25秒）以外に何もしない。顔窓のポーリング
+  （ADR-0020、mode=ro）は問い合わせて返る側なので、そもそも妨げない
+- busy 報告は PRAGMA の**正常な出力**であってエラー返却ではないため、ここで
+  エラーへ変換しなければ沈黙になる。沈黙にはしない: 対象の行は既に論理削除
+  済みで、同じ id の forget をやり直しても「unknown experience」で弾かれる
+  — 物理消去だけを再試行する経路は無い。正直なエラーだけが
+  「物理消去は未完」を伝える唯一の機会である
 - 逆向きの嘘もつかない: VACUUM が失敗しても論理削除と rebuild は commit 済み。
   サマリを出した上で「物理消去は未完」を明示してエラー終了する —
   削除の成否と物理消去の成否を出力上分離する
@@ -145,9 +178,13 @@ PendingSessions（Deferred Perception のキュー導出）は、このマーカ
   生えていなかった Connection は消え、Split系譜も現存経験だけから再構築される
 - **plan.generated**: セッションと共に消えれば Plan メニューからも消える
   （メニューの生存は events から導出 — 真実が変われば導出も変わる、で一貫）
-- **curiosity_queue**: 状態であり射影ではない（rebuild で消えない）。忘れた
-  セッション由来のシグナルが残りうるが、payload は集約値のみで経験内容を
-  含まない。v1 では忘却の対象外 — 個別に消したければ既存の dismiss がある
+- **curiosity_queue**: 状態であり射影ではない（rebuild で消えない）。ただし
+  v1 時点では書き手が存在しない — Preference Gap は View として導出され
+  （ADR-0007 Decision 2）、残り 5 シグナルの書き手（「学習実行」）は ADR-0007
+  が別 ADR へ先送りしたまま未実装（Go 側に INSERT/SELECT が無い）。忘れた
+  セッション由来の行がここに残るという事態そのものが今は起こり得ないので、
+  忘却がこのテーブルに触れるかどうかはまだ問う必要がない — 書き手が実装
+  される時に、そのADRの中で決める
 - **GUIの口**: 本CLIがそのまま呼び口。メモリViewは mode=ro 読取のまま、
   書き込みは `tomobit forget` / `tomobit amend` のサブプロセス実行で行う
   （終了コード + 1行サマリ。既存コマンドと同じ流儀）

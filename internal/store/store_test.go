@@ -1,8 +1,13 @@
 package store
 
 import (
+	"bytes"
+	"database/sql"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Rererr/tomobit/internal/core"
@@ -563,12 +568,12 @@ func TestForgetExperiences(t *testing.T) {
 	insertExp(t, s, "e2", "s1", core.KindPreference, 1)
 	insertExp(t, s, "e3", "s2", core.KindExecution, 1)
 
-	n, err := s.ForgetExperiences(500, []string{"e1", "e3"})
+	named, superseded, err := s.ForgetExperiences(500, []string{"e1", "e3"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Errorf("forgot count: got %d, want 2", n)
+	if named != 2 || superseded != 0 {
+		t.Errorf("got named=%d superseded=%d, want named=2 superseded=0 (no lower generations to sweep)", named, superseded)
 	}
 
 	remaining := map[string]bool{}
@@ -616,7 +621,7 @@ func TestForgetExperiencesUnknownIDRollsBackEverything(t *testing.T) {
 	s := openTest(t)
 	insertExp(t, s, "e1", "s1", core.KindExecution, 1)
 
-	_, err := s.ForgetExperiences(500, []string{"e1", "ghost"})
+	_, _, err := s.ForgetExperiences(500, []string{"e1", "ghost"})
 	if err == nil || !strings.Contains(err.Error(), "ghost") {
 		t.Fatalf("a missing id must error naming it, got %v", err)
 	}
@@ -639,16 +644,84 @@ func TestForgetExperiencesDeduplicatesIDs(t *testing.T) {
 	s := openTest(t)
 	insertExp(t, s, "e1", "s1", core.KindExecution, 1)
 
-	n, err := s.ForgetExperiences(500, []string{"e1", "e1"})
+	named, superseded, err := s.ForgetExperiences(500, []string{"e1", "e1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Errorf("a duplicate id must count once, got %d", n)
+	if named != 1 || superseded != 0 {
+		t.Errorf("a duplicate id must count once, got named=%d superseded=%d", named, superseded)
 	}
 	ev := lastEventOfType(t, s, "s1", "user.forgot")
 	if got := forgotIDs(t, ev.Payload); strings.Join(got, ",") != "e1" {
 		t.Errorf("marker ids must be deduplicated, got %v", got)
+	}
+}
+
+// TestForgetSweepsLowerGenerationsInSameSessionKind (ADR-0034 Decision 1):
+// forgetting the current generation's row also removes every row of the same
+// (session, kind) at a lower extractor_ver — otherwise experiences_current's
+// max(extractor_ver) selection would fall through to the superseded
+// generation the moment its successor is gone, resurrecting a perception the
+// owner had already moved past. A current sibling that was not named
+// survives, and the marker names only the id the caller gave, not the rows
+// swept along with it.
+func TestForgetSweepsLowerGenerationsInSameSessionKind(t *testing.T) {
+	s := openTest(t)
+	insertExp(t, s, "a1", "sess", core.KindExecution, 1)
+	insertExp(t, s, "b1", "sess", core.KindExecution, 1)
+	insertExp(t, s, "a2", "sess", core.KindExecution, 2)
+	insertExp(t, s, "b2", "sess", core.KindExecution, 2)
+
+	named, superseded, err := s.ForgetExperiences(500, []string{"a2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if named != 1 || superseded != 2 {
+		t.Errorf("got named=%d superseded=%d, want named=1 superseded=2 (a1,b1 swept)", named, superseded)
+	}
+
+	var total int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM experiences`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Errorf("only the untouched current sibling should remain, got %d rows", total)
+	}
+	cur, err := s.CurrentExperiences()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cur) != 1 || cur[0].ID != "b2" {
+		t.Errorf("the current view must still show the untouched sibling b2, got %v", cur)
+	}
+
+	ev := lastEventOfType(t, s, "sess", "user.forgot")
+	if got := forgotIDs(t, ev.Payload); strings.Join(got, ",") != "a2" {
+		t.Errorf("marker must name only the requested id, not the swept superseded rows, got %v", got)
+	}
+}
+
+// TestForgetRejectsSupersededID (ADR-0034 Decision 2): naming a row that is
+// not the current generation is refused — the same discipline ADR-0033
+// Decision 3 already puts on amend. Its content still lives on in the
+// current generation's copy-forward, so deleting it alone would misreport
+// what was erased. The whole batch is rejected, nothing deleted.
+func TestForgetRejectsSupersededID(t *testing.T) {
+	s := openTest(t)
+	insertExp(t, s, "a1", "sess", core.KindExecution, 1)
+	insertExp(t, s, "a2", "sess", core.KindExecution, 2)
+
+	_, _, err := s.ForgetExperiences(500, []string{"a1"})
+	if err == nil || !strings.Contains(err.Error(), "superseded") {
+		t.Fatalf("a superseded id must be rejected, got %v", err)
+	}
+
+	var total int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM experiences`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 {
+		t.Errorf("a rejected forget must delete nothing, got %d rows", total)
 	}
 }
 
@@ -717,39 +790,54 @@ func TestPendingSessionsExcludesForgottenAndAmended(t *testing.T) {
 	}
 }
 
-// TestAmendExperiencesAppendsNewGeneration (ADR-0033 Decision 3): the amended
-// generation is added, the current view returns it (siblings included) while
-// the superseded rows remain in the truth table, and the user.amended marker
-// lands in the session.
-func TestAmendExperiencesAppendsNewGeneration(t *testing.T) {
+// TestAmendExperienceAppendsNewGeneration (ADR-0033 Decision 3): the amended
+// generation is added under fresh ids, the current view returns the whole
+// sibling set — the edited row plus the untouched one, which keeps its own
+// extractor_model — while the superseded originals remain in the truth
+// table, and the user.amended marker lands in the session.
+func TestAmendExperienceAppendsNewGeneration(t *testing.T) {
 	s := openTest(t)
 	insertExp(t, s, "e1", "s", core.KindExecution, 1)
 	insertExp(t, s, "e2", "s", core.KindExecution, 1)
 
-	next := []*core.Experience{
-		{ID: "n1", SessionID: "s", TS: 1, Kind: core.KindExecution, ExtractorVer: 2,
-			ExtractorModel: "human", Context: map[string]string{"lang": "go"},
-			Outcome: core.Outcome{Adopted: "as-is"}, Source: "production"},
-		{ID: "n2", SessionID: "s", TS: 1, Kind: core.KindExecution, ExtractorVer: 2,
-			ExtractorModel: "none", Context: map[string]string{}, Outcome: core.Outcome{}, Source: "production"},
-	}
-	if err := s.AmendExperiences(next, "s", 300, map[string]any{"id": "e1", "ver": 2}); err != nil {
+	newVer, err := s.AmendExperience("e1", 300, func(target *core.Experience) error {
+		target.Context = map[string]string{"lang": "go"}
+		target.Outcome = core.Outcome{Adopted: "as-is"}
+		return nil
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if newVer != 2 {
+		t.Errorf("newVer: got %d, want 2", newVer)
 	}
 
 	cur, err := s.CurrentExperiences()
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids := map[string]bool{}
+	if len(cur) != 2 {
+		t.Fatalf("current view must return the whole new generation, got %d rows: %+v", len(cur), cur)
+	}
+	var amended, carried *core.Experience
 	for _, e := range cur {
-		ids[e.ID] = true
+		if e.ExtractorModel == "human" {
+			amended = e
+		} else {
+			carried = e
+		}
 	}
-	if !ids["n1"] || !ids["n2"] {
-		t.Errorf("current view must return the whole new generation, got %v", ids)
+	if amended == nil || carried == nil {
+		t.Fatalf("want one human-amended row and one carried sibling, got %+v", cur)
 	}
-	if ids["e1"] || ids["e2"] {
-		t.Errorf("superseded rows must leave the current view, got %v", ids)
+	if amended.Context["lang"] != "go" || amended.Outcome.Adopted != "as-is" {
+		t.Errorf("the amended row must carry the edit, got %+v", amended)
+	}
+	if carried.ExtractorModel != "none" {
+		t.Errorf("the carried sibling must keep its own extractor_model, got %q", carried.ExtractorModel)
+	}
+	if amended.ExtractorVer != 2 || carried.ExtractorVer != 2 {
+		t.Errorf("both rows must share the bumped ver, got %d / %d", amended.ExtractorVer, carried.ExtractorVer)
 	}
 
 	var total int
@@ -757,10 +845,140 @@ func TestAmendExperiencesAppendsNewGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if total != 4 {
-		t.Errorf("the superseded rows must remain as history, got %d rows", total)
+		t.Errorf("the superseded originals must remain as history, got %d rows", total)
 	}
 	if n := countTypeInSession(t, s, "s", "user.amended"); n != 1 {
 		t.Errorf("amend must record one user.amended, got %d", n)
+	}
+}
+
+// TestAmendExperienceRejectsUnknownID: no such row in any generation.
+func TestAmendExperienceRejectsUnknownID(t *testing.T) {
+	s := openTest(t)
+	_, err := s.AmendExperience("ghost", 300, func(*core.Experience) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "no such experience") {
+		t.Errorf("an unknown id must error, got %v", err)
+	}
+}
+
+// TestAmendExperienceRejectsSupersededID (ADR-0033 Decision 3): only the
+// current generation can be amended — a past perception is history.
+func TestAmendExperienceRejectsSupersededID(t *testing.T) {
+	s := openTest(t)
+	insertExp(t, s, "old", "s", core.KindExecution, 1)
+	insertExp(t, s, "new", "s", core.KindExecution, 2)
+
+	_, err := s.AmendExperience("old", 300, func(*core.Experience) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "superseded") {
+		t.Errorf("a superseded id must error, got %v", err)
+	}
+}
+
+// TestAmendExperienceRollsBackOnApplyError (修正3): apply's error aborts the
+// whole read-modify-write — no new generation, no marker — proving the write
+// only happens once the caller's own validation (e.g. cmdAmend's
+// --provider/kind check) has accepted the edit inside the same transaction
+// the read came from.
+func TestAmendExperienceRollsBackOnApplyError(t *testing.T) {
+	s := openTest(t)
+	insertExp(t, s, "e1", "s", core.KindExecution, 1)
+
+	_, err := s.AmendExperience("e1", 300, func(*core.Experience) error {
+		return errors.New("apply rejected")
+	})
+	if err == nil || !strings.Contains(err.Error(), "apply rejected") {
+		t.Errorf("apply's error must propagate, got %v", err)
+	}
+	var total int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM experiences`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Errorf("a rejected apply must write nothing, got %d rows", total)
+	}
+	if n := countTypeInSession(t, s, "s", "user.amended"); n != 0 {
+		t.Errorf("a rejected apply must write no marker, got %d", n)
+	}
+}
+
+// TestConcurrentAmendsOfSiblingsDoNotRace (修正3+4): two Stores opened on the
+// same file — the shape of two separate `tomobit amend` processes, not two
+// callers sharing one connection — amend different siblings of the same
+// (session, kind) group at the same moment. Whichever transaction's BEGIN
+// IMMEDIATE (修正4) claims the write lock first runs to completion; the
+// other's Begin blocks on it rather than racing it with a now-stale read
+// snapshot, so it always sees the winner's committed generation once it
+// proceeds — and finds its own target id already superseded by the
+// copy-forward, the same everyday rejection amend gives a human who names a
+// row twice. Neither goroutine may surface a raw SQLite error: that would
+// mean the race broke through to the database instead of being serialized.
+func TestConcurrentAmendsOfSiblingsDoNotRace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	seed, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertExp(t, seed, "e1", "sess", core.KindExecution, 1)
+	insertExp(t, seed, "e2", "sess", core.KindExecution, 1)
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s1, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s1.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+
+	ready := make(chan struct{})
+	results := make([]error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-ready
+		_, results[0] = s1.AmendExperience("e1", 100, func(target *core.Experience) error {
+			target.Context = map[string]string{"lang": "go"}
+			return nil
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		<-ready
+		_, results[1] = s2.AmendExperience("e2", 100, func(target *core.Experience) error {
+			target.Context = map[string]string{"lang": "rust"}
+			return nil
+		})
+	}()
+	close(ready)
+	wg.Wait()
+
+	var wins, superseded int
+	for _, err := range results {
+		switch {
+		case err == nil:
+			wins++
+		case strings.Contains(err.Error(), "superseded"):
+			superseded++
+		default:
+			t.Errorf("a raced amend must fail as the ordinary superseded rejection, not a raw SQLite error: %v", err)
+		}
+	}
+	if wins != 1 || superseded != 1 {
+		t.Errorf("want exactly one winner and one superseded loser, got wins=%d superseded=%d (results=%v)", wins, superseded, results)
+	}
+
+	cur, err := s1.CurrentExperiences()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cur) != 2 {
+		t.Fatalf("the winner's generation must still carry both siblings forward, got %d: %+v", len(cur), cur)
 	}
 }
 
@@ -866,5 +1084,102 @@ func TestMigrationRebuildsPreReflectionExperiences(t *testing.T) {
 	}
 	if _, err := s.DB.Exec(`DELETE FROM experiences WHERE id='e1'`); err == nil {
 		t.Fatal("append-only trigger must be recreated after the rebuild")
+	}
+}
+
+// ---- Vacuum (ADR-0033 Decision 5 / 修正2) ----
+
+// TestVacuumErasesForgottenSecretFromTheDBFile: VACUUM must run before the
+// WAL checkpoint — in WAL mode VACUUM's rewritten, freed-page-free pages
+// land in WAL frames, not the main file, so checkpointing first (the
+// pre-fix order) leaves the pre-vacuum, still-secret-bearing pages on disk
+// regardless. Reading the .db file as raw bytes is the only check that can
+// tell "logically deleted" from "physically gone" apart.
+func TestVacuumErasesForgottenSecretFromTheDBFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	const secret = "UNIQUELY-IDENTIFIABLE-SECRET-9f3c1a"
+	insertExpCtx(t, s, "e1", "sess", map[string]string{"lang": secret})
+
+	if _, _, err := s.ForgetExperiences(1000, []string{"e1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Vacuum(); err != nil {
+		t.Fatalf("Vacuum: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(secret)) {
+		t.Error("forgotten content must not survive on disk after Vacuum")
+	}
+}
+
+// TestVacuumReportsIncompleteWhileAReaderHoldsTheWAL: a held read-only
+// transaction — the face window's own shape (ADR-0020: a mode=ro connection
+// kept open across polls instead of opened and closed each time) — pins a
+// WAL snapshot that blocks the checkpoint's TRUNCATE step specifically.
+// VACUUM's own commit is large enough to trigger SQLite's automatic
+// checkpoint regardless (measured: it backfills the main file even with the
+// reader present), but that automatic checkpoint cannot reset — the reader
+// holds it open — so the WAL file itself, holding the original INSERT's
+// frame among the ones it never got to erase, is exactly the residue
+// ADR-0033 Decision 5 names ("WALと空きページに残る痕跡ごと消す"). Vacuum
+// must report that residue as an error rather than claim success, and it
+// must still be sitting in the WAL file even after the writer's own
+// Store.Close(): proof this is Vacuum's own honest report, not something a
+// bare Close() (SQLite checkpoints on the very last connection's close)
+// would have quietly cleaned up once the reader let go.
+func TestVacuumReportsIncompleteWhileAReaderHoldsTheWAL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const secret = "UNIQUELY-IDENTIFIABLE-SECRET-b71e0d"
+	insertExpCtx(t, s, "e1", "sess", map[string]string{"lang": secret})
+	if _, _, err := s.ForgetExperiences(1000, []string{"e1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	readerDB, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readerDB.Close()
+	readerTx, err := readerDB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readerTx.Rollback()
+	var probe int
+	if err := readerTx.QueryRow(`SELECT count(*) FROM events`).Scan(&probe); err != nil {
+		t.Fatal(err)
+	}
+	// readerTx stays open (no Commit/Rollback yet) — pinning its snapshot for
+	// the rest of the test, matching the face window's held connection.
+
+	if err := s.Vacuum(); err == nil {
+		t.Error("Vacuum should report incomplete physical erasure while a reader holds the WAL")
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	walRaw, err := os.ReadFile(path + "-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(walRaw, []byte(secret)) {
+		t.Error("without a completed checkpoint the WAL file should still hold the un-truncated residue — Vacuum must not have silently claimed success")
 	}
 }

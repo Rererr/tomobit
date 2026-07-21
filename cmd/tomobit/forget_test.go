@@ -130,6 +130,64 @@ func TestForgetSessionRemovesEvents(t *testing.T) {
 	}
 }
 
+// TestForgetSummaryReportsSupersededRows (ADR-0034 Decision 1/3): forgetting
+// a current-generation experience whose (session, kind) has a lower
+// generation beneath it sweeps that generation along and reports the swept
+// count in the one-line summary — the stdout contract a GUI parses
+// (ADR-0033 Decision 6) must not hide the extra cost.
+func TestForgetSummaryReportsSupersededRows(t *testing.T) {
+	path := seedForgetDB(t, func(s *store.Store) {
+		mustInsert(t, s, &core.Experience{
+			ID: "a1", SessionID: "s1", TS: 1000, Kind: core.KindExecution,
+			ExtractorVer: 1, ExtractorModel: "none",
+			Context: map[string]string{"lang": "go"}, Provider: "claude-code",
+			Outcome: core.Outcome{}, Source: "production",
+		})
+		mustInsert(t, s, &core.Experience{
+			ID: "a2", SessionID: "s1", TS: 1000, Kind: core.KindExecution,
+			ExtractorVer: 2, ExtractorModel: "none",
+			Context: map[string]string{"lang": "go"}, Provider: "claude-code",
+			Outcome: core.Outcome{}, Source: "production",
+		})
+	})
+
+	stdout, _ := captureStdoutStderr(t, func() {
+		if err := cmdForget([]string{"--db", path, "--id", "a2", "--yes"}); err != nil {
+			t.Fatalf("cmdForget: %v", err)
+		}
+	})
+
+	if !strings.Contains(stdout, "forgot: 1 experiences (+1 superseded rows)") {
+		t.Errorf("stdout must report the swept superseded row, got %q", stdout)
+	}
+}
+
+// TestForgetRejectsSupersededID (ADR-0034 Decision 2, CLI level): naming a
+// superseded row through the CLI is refused just like a nonexistent one —
+// the discipline holds at the entrypoint the GUI actually calls, not just at
+// the store's own API.
+func TestForgetRejectsSupersededID(t *testing.T) {
+	path := seedForgetDB(t, func(s *store.Store) {
+		mustInsert(t, s, &core.Experience{
+			ID: "a1", SessionID: "s1", TS: 1000, Kind: core.KindExecution,
+			ExtractorVer: 1, ExtractorModel: "none",
+			Context: map[string]string{"lang": "go"}, Provider: "claude-code",
+			Outcome: core.Outcome{}, Source: "production",
+		})
+		mustInsert(t, s, &core.Experience{
+			ID: "a2", SessionID: "s1", TS: 1000, Kind: core.KindExecution,
+			ExtractorVer: 2, ExtractorModel: "none",
+			Context: map[string]string{"lang": "go"}, Provider: "claude-code",
+			Outcome: core.Outcome{}, Source: "production",
+		})
+	})
+
+	err := cmdForget([]string{"--db", path, "--id", "a1", "--yes"})
+	if err == nil || !strings.Contains(err.Error(), "superseded") {
+		t.Errorf("a superseded id must be rejected, got %v", err)
+	}
+}
+
 // TestForgetRejectsBothOrNeitherSelector: --id and --session are exclusive and
 // one is required.
 func TestForgetRejectsBothOrNeitherSelector(t *testing.T) {

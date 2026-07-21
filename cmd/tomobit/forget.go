@@ -13,7 +13,6 @@ import (
 
 	"github.com/Rererr/tomobit/internal/core"
 	"github.com/Rererr/tomobit/internal/perceive"
-	"github.com/Rererr/tomobit/internal/store"
 )
 
 // idList collects a repeatable --id flag into a slice (ADR-0033 Decision 2:
@@ -91,11 +90,11 @@ func cmdForget(args []string) error {
 	}
 
 	now := time.Now().UnixMilli()
-	var events, exps, n int
+	var events, exps, named, superseded int
 	if *session != "" {
 		events, exps, err = s.ForgetSession(*session)
 	} else {
-		n, err = s.ForgetExperiences(now, ids)
+		named, superseded, err = s.ForgetExperiences(now, ids)
 	}
 	if err != nil {
 		return err
@@ -113,11 +112,19 @@ func cmdForget(args []string) error {
 	if err != nil {
 		return err
 	}
-	if *session != "" {
+	switch {
+	case *session != "":
 		fmt.Printf("forgot: session %s (%d events, %d experiences; rebuilt: %d connections)\n",
 			*session, events, exps, len(conns))
-	} else {
-		fmt.Printf("forgot: %d experiences (rebuilt: %d connections)\n", n, len(conns))
+	case superseded > 0:
+		// ADR-0034 Decision 3: the sweep of superseded generations (Decision 1)
+		// is a named cost, not a hidden one — it shows up in the one-line summary
+		// a GUI parses (ADR-0033 Decision 6), same as the session-forget child
+		// notice shows up on stderr instead of being silent.
+		fmt.Printf("forgot: %d experiences (+%d superseded rows) (rebuilt: %d connections)\n",
+			named, superseded, len(conns))
+	default:
+		fmt.Printf("forgot: %d experiences (rebuilt: %d connections)\n", named, len(conns))
 	}
 
 	if err := s.Vacuum(); err != nil {
@@ -189,103 +196,58 @@ func cmdAmend(args []string) error {
 		return fmt.Errorf("amend: give at least one of --context, --outcome, --provider")
 	}
 
+	// Parsed ahead of the store call: context/outcome/provider validity does
+	// not depend on which row *id resolves to, so it need not share the
+	// atomic read-modify-write transaction below (修正3) — only the
+	// --provider/kind mismatch does, since kind is only known once the
+	// target row is read.
+	var newContext map[string]string
+	var newOutcome core.Outcome
+	var err error
+	if setContext {
+		if newContext, err = parseAmendContext(*ctxJSON); err != nil {
+			return err
+		}
+	}
+	if setOutcome {
+		if newOutcome, err = parseAmendOutcome(*outcomeJSON); err != nil {
+			return err
+		}
+	}
+	if setProvider && !validProvider(*providerName) {
+		return fmt.Errorf("amend: unknown provider %q (available: %s, human)",
+			*providerName, strings.Join(providerNames(), ", "))
+	}
+
 	s, err := openStore(*db)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
 
-	sessionID, kind, found, err := s.ExperienceSessionKind(*id)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return fmt.Errorf("amend: no such experience %q", *id)
-	}
-
-	current, err := s.CurrentExperiencesBySessionKind(sessionID, kind)
-	if err != nil {
-		return err
-	}
-	var target *core.Experience
-	for _, e := range current {
-		if e.ID == *id {
-			target = e
-			break
-		}
-	}
-	if target == nil {
-		return fmt.Errorf("amend: %s is superseded — past perceptions cannot be amended (ADR-0033 Decision 3)", *id)
-	}
-
-	newContext := target.Context
-	if setContext {
-		if newContext, err = parseAmendContext(*ctxJSON); err != nil {
-			return err
-		}
-	}
-	newOutcome := target.Outcome
-	if setOutcome {
-		if newOutcome, err = parseAmendOutcome(*outcomeJSON); err != nil {
-			return err
-		}
-	}
-	newProvider := target.Provider
-	if setProvider {
-		// A reflection row also carries a provider (reflection.go: which
-		// Connection the insight was about — the mirror's own bookkeeping), but
-		// that is not a capability bet target. Rewriting it would change what the
-		// reflection was *about*, not correct an executor, so --provider is
-		// execution-only; preference rows have no provider at all.
-		if kind != core.KindExecution {
-			return fmt.Errorf("amend: --provider applies to execution experiences only (this is %s)", kind)
-		}
-		if !validProvider(*providerName) {
-			return fmt.Errorf("amend: unknown provider %q (available: %s, human)",
-				*providerName, strings.Join(providerNames(), ", "))
-		}
-		newProvider = *providerName
-	}
-
 	now := time.Now().UnixMilli()
-	newVer := 0
-	for _, e := range current {
-		if e.ExtractorVer > newVer {
-			newVer = e.ExtractorVer
+	newVer, err := s.AmendExperience(*id, now, func(target *core.Experience) error {
+		if setProvider {
+			// A reflection row also carries a provider (reflection.go: which
+			// Connection the insight was about — the mirror's own bookkeeping),
+			// but that is not a capability bet target. Rewriting it would change
+			// what the reflection was *about*, not correct an executor, so
+			// --provider is execution-only; preference rows have no provider at
+			// all.
+			if target.Kind != core.KindExecution {
+				return fmt.Errorf("amend: --provider applies to execution experiences only (this is %s)", target.Kind)
+			}
+			target.Provider = *providerName
 		}
-	}
-	newVer++
-
-	// Copy the whole sibling set forward: experiences_current selects the max
-	// extractor_ver per (session, kind), so bumping only the target would hide
-	// the siblings. A copied sibling keeps its own extractor_model — the origin
-	// does not lie (ADR-0033 Decision 3) — while the target's becomes human.
-	next := make([]*core.Experience, 0, len(current))
-	for _, e := range current {
-		gen := &core.Experience{
-			ID:             store.NewID(now),
-			SessionID:      e.SessionID,
-			TS:             e.TS,
-			Kind:           e.Kind,
-			ExtractorVer:   newVer,
-			ExtractorModel: e.ExtractorModel,
-			Context:        e.Context,
-			Provider:       e.Provider,
-			Plan:           e.Plan,
-			Outcome:        e.Outcome,
-			Source:         e.Source,
+		if setContext {
+			target.Context = newContext
 		}
-		if e.ID == *id {
-			gen.Context = newContext
-			gen.Outcome = newOutcome
-			gen.Provider = newProvider
-			gen.ExtractorModel = "human"
+		if setOutcome {
+			target.Outcome = newOutcome
 		}
-		next = append(next, gen)
-	}
-
-	marker := map[string]any{"id": *id, "ver": newVer}
-	if err := s.AmendExperiences(next, sessionID, now, marker); err != nil {
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 
