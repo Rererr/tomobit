@@ -296,6 +296,12 @@ func recordDuelVerdict(s *store.Store, en *core.Engine, gap curiosity.Gap, prefe
 	if err := en.Apply(exp); err != nil {
 		return fmt.Errorf("apply duel preference: %w (experience saved; `tomobit rebuild` repairs the projection)", err)
 	}
+	// This experience is its own batch (ADR-0037 Decision 2): reconcile at
+	// its boundary so merge judgment reaches children this Apply didn't
+	// touch, the same reach Rebuild's closing sweep already has.
+	if err := en.ReconcileMerges(now); err != nil {
+		return fmt.Errorf("reconcile merges: %w (experience saved; `tomobit rebuild` repairs the projection)", err)
+	}
 	return nil
 }
 

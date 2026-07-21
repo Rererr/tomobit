@@ -531,13 +531,20 @@ func TestJudgeMergesChildWhenDistinguishingTokenLosesSignal(t *testing.T) {
 	}
 }
 
-// TestReconcileMergesReachesAChildJudgeNeverTouchesAgain (ADR-0037 Decision
-// 2): a child that stops receiving experiences also stops being judged —
-// production only calls judge on connections an incoming experience's scope
-// touches. ReconcileMerges must still fold it back once its distinguishing
-// evidence has decayed into the merge zone, without ever going through
-// judge/Apply on the child itself.
-func TestReconcileMergesReachesAChildJudgeNeverTouchesAgain(t *testing.T) {
+// TestReconcileMergesReachesAnUntouchedChildButOnlyMergesOnceEvidenceNumericallyVanishes
+// (ADR-0037 Decision 2, corrected by the ADR's own 実測による訂正): a child
+// that stops receiving experiences also stops being judged — production
+// only calls judge on connections an incoming experience's scope touches.
+// ReconcileMerges reaches it independently of judge/Apply, but the ln BF of
+// its distinguishing token decays toward ThetaMerge=0 from above at O(d²)
+// and never crosses it in finite time; only once decay has driven every
+// term to float64's exact zero (measured: ~55-60 half-lives for this
+// scenario) does mergeCheck's `bf <= ThetaMerge` fire. The ADR-0012
+// calibrated timescale (~3 half-lives, decide.go's margin comment) is far
+// short of that and must not merge — decay's rescue here is numerical, not
+// the ADR-0012 Decision 3 "forgetting" story (that story is merge's, not
+// this test's — see ADR-0038).
+func TestReconcileMergesReachesAnUntouchedChildButOnlyMergesOnceEvidenceNumericallyVanishes(t *testing.T) {
 	r := newFakeRepo()
 	en := &Engine{Repo: r}
 	childKey := NewScope("cap=impl", "lang=rust").Key()
@@ -570,36 +577,45 @@ func TestReconcileMergesReachesAChildJudgeNeverTouchesAgain(t *testing.T) {
 		t.Fatal("fresh evidence should not merge the child yet")
 	}
 
-	// Long after birth, with no new evidence for this scope, the
-	// distinguishing token's ln BF has decayed into the merge zone. Reach
-	// it purely through ReconcileMerges — judge is never called on it.
-	farFuture := triggerTS + 1000*HalfLifeMs
-	if err := en.ReconcileMerges(farFuture); err != nil {
+	// ADR-0012's own calibrated forgetting timescale (~3 half-lives) leaves
+	// ln BF at ~0.22 for this scenario (measured) — nowhere near ThetaMerge.
+	calibrated := triggerTS + 3*HalfLifeMs
+	if err := en.ReconcileMerges(calibrated); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := r.GetConnection(ConnCapability, childKey, "claude"); c == nil {
+		t.Fatal("ADR-0012's calibrated decay timescale should not merge the child (ADR-0037 実測による訂正)")
+	}
+
+	// Only once decay has run long enough for the distinguishing token's
+	// evidence to underflow to an exact float64 zero does the child fold
+	// back — reached purely through ReconcileMerges, judge is never called
+	// on it.
+	numericallyVanished := triggerTS + 1000*HalfLifeMs
+	if err := en.ReconcileMerges(numericallyVanished); err != nil {
 		t.Fatal(err)
 	}
 	if c, _ := r.GetConnection(ConnCapability, childKey, "claude"); c != nil {
-		t.Error("decayed evidence should merge the child away even though judge never touched it")
+		t.Error("numerically vanished evidence should merge the child away even though judge never touched it")
 	}
 	if led, _ := r.LedgerFor(ConnCapability, childKey, "claude"); len(led) != 0 {
 		t.Errorf("child ledger should be deleted on reconciled merge, got %d entries", len(led))
 	}
 }
 
-// TestRebuildReconcilesMergesForAChildNoLaterExperienceTouches (ADR-0037
-// Decision 2 / "Rebuild で1回"): a child born mid-replay and never touched
-// by any later experience in the log — the gated-out lineage the ADR
-// describes — must still be folded back once the log's own last timestamp
-// has carried its evidence into the merge zone. The one reconciliation
-// sweep at the end of Rebuild is the only path that can reach it; judge's
-// touched-connection path never runs on this child again after birth.
-func TestRebuildReconcilesMergesForAChildNoLaterExperienceTouches(t *testing.T) {
-	r := newFakeRepo()
+// gatedChildScenario trims splitScenario() to the experience that triggers
+// the cap=impl|lang=rust split — the scenario's own tail (the remaining
+// rust failures) would otherwise keep touching the child right after birth,
+// muddying which mechanism (judge's touched path vs. a reconciliation
+// sweep) reached it — then appends one experience in an unrelated scope
+// (cap=doc, never lang=rust) advance milliseconds later. That experience
+// advances the log's own clock without ever touching the child, producing
+// the gated-out lineage ADR-0037 Decision 2 describes.
+func gatedChildScenario(t *testing.T, advance int64) []*Experience {
+	t.Helper()
 	childKey := NewScope("cap=impl", "lang=rust").Key()
 
-	// Trim splitScenario() to the experience that triggers the split — the
-	// scenario's own tail (the remaining rust failures) would otherwise
-	// keep touching the child right after birth, muddying which mechanism
-	// (judge's touched path vs. the reconciliation sweep) reached it.
+	var child *Connection
 	var triggerIdx int
 	scan := newFakeRepo()
 	enScan := &Engine{Repo: scan}
@@ -609,21 +625,35 @@ func TestRebuildReconcilesMergesForAChildNoLaterExperienceTouches(t *testing.T) 
 			t.Fatal(err)
 		}
 		if c, _ := scan.GetConnection(ConnCapability, childKey, "claude"); c != nil {
-			triggerIdx = i
+			child, triggerIdx = c, i
 			break
 		}
 	}
+	if child == nil {
+		t.Fatal("split never produced a child connection")
+	}
+
 	exps := splitScenario()[:triggerIdx+1]
-
-	// One experience in an unrelated scope (cap=doc, never lang=rust), far
-	// enough after the split for the child's distinguishing evidence to
-	// have decayed past ThetaMerge. It advances Rebuild's replay clock
-	// without ever touching the child.
 	last := exps[len(exps)-1]
-	exps = append(exps, execExp("advance-clock", last.TS+1000*HalfLifeMs,
+	exps = append(exps, execExp("advance-clock", last.TS+advance,
 		"claude", map[string]string{"cap": "doc"}, Outcome{Adopted: "as-is"}))
-	r.exps = exps
+	return exps
+}
 
+// TestRebuildReconcilesMergesForAChildNoLaterExperienceTouches (ADR-0037
+// Decision 2 / "Rebuild で1回"): a child born mid-replay and never touched
+// by any later experience in the log — the gated-out lineage the ADR
+// describes — must still be folded back once the log's own last timestamp
+// has carried its evidence to numerically vanish (ADR-0037 実測による訂正).
+// The one reconciliation sweep at the end of Rebuild is the only path that
+// can reach it; judge's touched-connection path never runs on this child
+// again after birth.
+func TestRebuildReconcilesMergesForAChildNoLaterExperienceTouches(t *testing.T) {
+	childKey := NewScope("cap=impl", "lang=rust").Key()
+	exps := gatedChildScenario(t, 1000*HalfLifeMs)
+
+	r := newFakeRepo()
+	r.exps = exps
 	en := &Engine{Repo: r}
 	if err := en.Rebuild(); err != nil {
 		t.Fatal(err)
@@ -631,6 +661,83 @@ func TestRebuildReconcilesMergesForAChildNoLaterExperienceTouches(t *testing.T) 
 
 	if c, _ := r.GetConnection(ConnCapability, childKey, "claude"); c != nil {
 		t.Error("Rebuild's end-of-replay reconciliation should have merged the untouched child away")
+	}
+}
+
+// TestLiveApplyAloneDoesNotReproduceRebuildForAGatedChild measures the gap
+// Apply's doc comment now names: live Apply calls never sweep, so the same
+// gated-out child Rebuild folds back (previous test) is still present after
+// an equivalent live-only replay.
+func TestLiveApplyAloneDoesNotReproduceRebuildForAGatedChild(t *testing.T) {
+	childKey := NewScope("cap=impl", "lang=rust").Key()
+	exps := gatedChildScenario(t, 1000*HalfLifeMs)
+
+	live := newFakeRepo()
+	enLive := &Engine{Repo: live}
+	for _, e := range exps {
+		live.exps = append(live.exps, e)
+		if err := enLive.Apply(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// No ReconcileMerges call — this is Apply alone, the way a caller that
+	// forgets ADR-0037 Decision 2's batch-boundary responsibility would run.
+
+	rebuilt := newFakeRepo()
+	rebuilt.exps = append(rebuilt.exps, exps...)
+	enRebuilt := &Engine{Repo: rebuilt}
+	if err := enRebuilt.Rebuild(); err != nil {
+		t.Fatal(err)
+	}
+
+	liveChild, _ := live.GetConnection(ConnCapability, childKey, "claude")
+	rebuiltChild, _ := rebuilt.GetConnection(ConnCapability, childKey, "claude")
+	if liveChild == nil {
+		t.Fatal("scenario broken: live Apply alone should still hold the gated child — that gap is what this test exists to pin")
+	}
+	if rebuiltChild != nil {
+		t.Fatal("scenario broken: Rebuild should have reconciled the gated child away")
+	}
+}
+
+// TestLiveApplyWithReconcileMergesAtBatchBoundaryMatchesRebuildForAGatedChild
+// confirms the invariant Apply's doc comment now describes: the gap the
+// previous test pins closes once the caller also calls ReconcileMerges once
+// at its batch boundary — the responsibility cmd/tomobit, internal/curiosity
+// and internal/reflection each hold after their ADR-0037 Decision 2 wiring.
+func TestLiveApplyWithReconcileMergesAtBatchBoundaryMatchesRebuildForAGatedChild(t *testing.T) {
+	exps := gatedChildScenario(t, 1000*HalfLifeMs)
+
+	live := newFakeRepo()
+	enLive := &Engine{Repo: live}
+	for _, e := range exps {
+		live.exps = append(live.exps, e)
+		if err := enLive.Apply(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := enLive.ReconcileMerges(exps[len(exps)-1].TS); err != nil {
+		t.Fatal(err)
+	}
+
+	rebuilt := newFakeRepo()
+	rebuilt.exps = append(rebuilt.exps, exps...)
+	enRebuilt := &Engine{Repo: rebuilt}
+	if err := enRebuilt.Rebuild(); err != nil {
+		t.Fatal(err)
+	}
+
+	lc, rc := mustAll(t, live), mustAll(t, rebuilt)
+	if len(lc) != len(rc) {
+		t.Fatalf("connection count differs: live %d, rebuild %d", len(lc), len(rc))
+	}
+	for i := range lc {
+		a, b := lc[i], rc[i]
+		if a.Kind != b.Kind || a.ScopeKey != b.ScopeKey || a.Target != b.Target ||
+			a.Alpha != b.Alpha || a.Beta != b.Beta || a.LastUpdate != b.LastUpdate ||
+			a.BornTS != b.BornTS || a.ParentKey != b.ParentKey {
+			t.Errorf("connection %d differs:\n live=%+v\n rebuild=%+v", i, a, b)
+		}
 	}
 }
 

@@ -1243,6 +1243,13 @@ func perceiveBestEffort(s *store.Store, out io.Writer, extractor perceive.Extrac
 		}
 		expIDs = append(expIDs, e.ID)
 	}
+	// One reconciliation sweep at this batch's boundary (ADR-0037 Decision
+	// 2): gives merge judgment reach into children this batch's Apply calls
+	// never touched, the same reach Rebuild's closing sweep already has.
+	if err := en.ReconcileMerges(exps[len(exps)-1].TS); err != nil {
+		fmt.Fprintf(out, "perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
+		return nil
+	}
 
 	after, err := s.AllConnections()
 	if err != nil {
@@ -1325,6 +1332,13 @@ func cmdPerceive(args []string) error {
 			fmt.Printf("perceived %s: %s %s → %s\n",
 				e.SessionID, e.Kind, core.NewScope(e.Tokens()...).Key(), e.Target())
 			expIDs = append(expIDs, e.ID)
+		}
+		// One reconciliation sweep at this batch's boundary (ADR-0037
+		// Decision 2): gives merge judgment reach into children this batch's
+		// Apply calls never touched, the same reach Rebuild's closing sweep
+		// already has.
+		if err := en.ReconcileMerges(exps[len(exps)-1].TS); err != nil {
+			return fmt.Errorf("reconcile merges: %w (experiences are saved; the projection is stale — run `tomobit rebuild` to repair)", err)
 		}
 
 		after, snapErr := s.AllConnections()

@@ -69,12 +69,21 @@ func (en *Engine) resetEpoch() {
 // posteriors, then summons the judgment where the ledger has surfaced.
 //
 // All time arithmetic is anchored to exp.TS, never the wall clock, and the
-// judgment only ever consults experiences at or before exp.TS. Rebuild is
-// therefore the canonical form: replaying experiences_current in (ts, id)
-// order reproduces the live state exactly, provided the live stream was
-// applied in that same order. If a live Apply ever runs out of (ts, id)
-// order the projection can diverge; `tomobit rebuild` restores the
-// canonical state.
+// judgment only ever consults experiences at or before exp.TS.
+//
+// Apply alone does not reproduce Rebuild's state: judge only runs on
+// connections the incoming experience's scope touches, so a child gated out
+// of production (ADR-0037) never gets judged again by Apply, while Rebuild
+// always closes its replay with one reconcileMerges sweep over every
+// connection (measured in TestLiveApplyAloneDoesNotReproduceRebuildForAGatedChild —
+// live-only Apply calls leave such a child in place after Rebuild has
+// already merged it away). The invariant is restored only when the caller
+// also calls ReconcileMerges once at its own batch boundary — the
+// responsibility cmd/tomobit, internal/curiosity and internal/reflection
+// each hold after ADR-0037 Decision 2's wiring (confirmed in
+// TestLiveApplyWithReconcileMergesAtBatchBoundaryMatchesRebuildForAGatedChild).
+// If a live Apply ever runs out of (ts, id) order the projection can
+// diverge regardless; `tomobit rebuild` restores the canonical state.
 func (en *Engine) Apply(exp *Experience) error {
 	en.resetEpoch()
 	return en.apply(exp)
@@ -475,9 +484,12 @@ func (en *Engine) Rebuild() error {
 	// One epoch for the whole replay (ADR-0037 Decision 2 fix a/b): nothing
 	// else touches the experience log while Rebuild runs, so the cache
 	// populated by the first currentExperiences() call below stays valid
-	// through every apply and the closing reconcileMerges — resetEpoch is
-	// deliberately not called again until the next top-level Apply/Rebuild.
+	// through every apply and the closing reconcileMerges. The deferred
+	// resetEpoch releases it the moment this call returns (n=1600 pins ~1.9M
+	// Experience pointers / 20.7MB HeapAlloc, measured) instead of leaving it
+	// held until whatever Apply/Rebuild the caller happens to run next.
 	en.resetEpoch()
+	defer en.resetEpoch()
 	exps, err := en.currentExperiences()
 	if err != nil {
 		return err

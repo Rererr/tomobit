@@ -412,6 +412,12 @@ func RecordAndApply(s *store.Store, en *core.Engine, cand Candidate, seed int64,
 	if err := en.Apply(exp); err != nil {
 		return fmt.Errorf("apply reflection: %w (experience is saved; run `tomobit rebuild` to repair the projection)", err)
 	}
+	// This experience is its own batch (ADR-0037 Decision 2): reconcile at
+	// its boundary so merge judgment reaches children this Apply didn't
+	// touch, the same reach Rebuild's closing sweep already has.
+	if err := en.ReconcileMerges(nowMs); err != nil {
+		return fmt.Errorf("reconcile merges: %w (experience is saved; run `tomobit rebuild` to repair the projection)", err)
+	}
 	return nil
 }
 
