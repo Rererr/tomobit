@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -323,6 +324,61 @@ func TestRunGroupParallelRunsAutoRoutedHumanMembers(t *testing.T) {
 		if n := countEventsOfTypeInSession(t, s, sid, "provider.error"); n != 0 {
 			t.Errorf("a human member has no failure signal, got provider.error = %d", n)
 		}
+	}
+}
+
+// ADR-0040 Decision 1 applies to every subtask, not just the parent: a flat
+// proposal (no declared groups) always takes runSubtasksSequential regardless
+// of the gate answer (parallelGate itself never fires without declared
+// groups), so under --view ndjson each subtask's own --provider auto call
+// must emit its own "decided" — carrying that subtask's own sid, distinct
+// from its sibling's and from the parent's — the correlation a GUI running
+// several subtasks needs.
+func TestExecuteSplitViewEmitsOneDecidedPerSubtaskWithItsOwnSID(t *testing.T) {
+	s := openTestStore(t)
+	saved := providers
+	providers = map[string]executor.Adapter{} // auto's only candidate is human — deterministic
+	t.Cleanup(func() { providers = saved })
+	const parentSID = "parent-view-split"
+	openParentTask(t, s, parentSID)
+
+	buf := &bytes.Buffer{}
+	stream := newNDJSONStream(buf)
+	newView := func(name string) view { return &ndjsonView{s: stream, name: name, n: 1} }
+	groups := [][]string{{"sub one"}, {"sub two"}} // flat: parallelGate never fires
+
+	if _, _, err := executeSplit(context.Background(), s, parentSID, groups, "big task",
+		"auto", "implement", "", "", 0, bufio.NewReader(strings.NewReader("")),
+		noteWriter{s: stream}, false, newView, nil); err != nil {
+		t.Fatalf("executeSplit: %v", err)
+	}
+
+	subs := subtaskSessionIDs(t, s, parentSID)
+	if len(subs) != 2 {
+		t.Fatalf("want 2 subtask sessions, got %d", len(subs))
+	}
+
+	var decided []map[string]any
+	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("stream line not JSON: %q: %v", line, err)
+		}
+		if ev["type"] == "decided" {
+			decided = append(decided, ev)
+		}
+	}
+	if len(decided) != 2 {
+		t.Fatalf("one decided per subtask, got %d: %v", len(decided), decided)
+	}
+	for i, ev := range decided {
+		if ev["sid"] != subs[i] {
+			t.Errorf("subtask %d decided sid = %v, want its own session %q — never the parent %q",
+				i, ev["sid"], subs[i], parentSID)
+		}
+	}
+	if decided[0]["sid"] == decided[1]["sid"] {
+		t.Errorf("sibling subtasks must not share a decided sid: %v", decided)
 	}
 }
 

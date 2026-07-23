@@ -384,6 +384,34 @@ func TestChatHumanProviderRecordsRoutingAndRunsNothing(t *testing.T) {
 	}
 }
 
+// ADR-0040 Decision 1 is view-only: a plain (non-ndjson) chat's out is a bare
+// io.Writer, not a decidedViewer, so autoDecide's structured payload never
+// reaches it — only the unchanged human-readable "decided ..." line and voice
+// note do.
+func TestChatPlainModeAutoDecideEmitsNoDecidedJSON(t *testing.T) {
+	s := openTestStore(t)
+	a := &threadAdapter{}
+	saved := providers
+	providers = map[string]executor.Adapter{"fake": a}
+	t.Cleanup(func() { providers = saved })
+	c, out := newTestChat(t, s, a, "")
+	c.providerName = "auto"
+
+	if err := c.turn("implement it"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "decided ") {
+		t.Errorf("the human-readable routing line must still print: %q", got)
+	}
+	for _, leak := range []string{`"type":"decided"`, `"candidates"`, `"scope"`} {
+		if strings.Contains(got, leak) {
+			t.Errorf("plain mode must never print the decided payload as JSON, found %q in: %q", leak, got)
+		}
+	}
+}
+
 // A failed run still produced something the user may keep, so the boundary
 // still asks — and the failure is recorded once (ADR-0006 Decision 4).
 func TestChatFailedTurnStillReachesTheAdoptionQuestion(t *testing.T) {

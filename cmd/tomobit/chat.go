@@ -16,10 +16,12 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Rererr/tomobit/internal/decide"
 	"github.com/Rererr/tomobit/internal/executor"
 	"github.com/Rererr/tomobit/internal/lineedit"
 	"github.com/Rererr/tomobit/internal/mdlite"
@@ -1217,6 +1219,33 @@ func (w noteWriter) Write(p []byte) (int, error) {
 		}
 	}
 	return len(p), nil
+}
+
+// viewDecided implements decidedViewer (ADR-0040 Decision 1): the same
+// decide.Decision autoDecide just wrote to tomo.decided, as a typed event
+// rather than framed prose — a GUI reads candidates as data, not a line to
+// parse. Candidate keys match tomo.decided's own ("scope", not "scope_key")
+// so the ledger and the view never give the same audit two names. Seed rides
+// as a string, matching tomo.decided's own encoding: a UnixNano exceeds
+// JSON's exact float64 integer range.
+//
+// Invariant: decided can reach the stream before this task's own
+// task.started — autoDecide runs, and records tomo.decided, before openTask/
+// openSubtask emit anything else — so a reader must correlate by sid, never
+// by "the most recently opened task".
+func (w noteWriter) viewDecided(sid string, dec decide.Decision) {
+	cands := make([]map[string]any, len(dec.Candidates))
+	for i, c := range dec.Candidates {
+		cands[i] = map[string]any{
+			"provider": c.Provider, "scope": c.ScopeKey,
+			"quantile": c.Quantile, "passed": c.Passed, "wins": c.Wins,
+		}
+	}
+	w.s.emit(map[string]any{
+		"type": "decided", "sid": sid, "provider": dec.Provider,
+		"n": dec.N, "q": dec.Q, "fallback": dec.Fallback,
+		"seed": strconv.FormatInt(dec.Seed, 10), "candidates": cands,
+	})
 }
 
 // flushReader calls flush just before each read that reaches the underlying

@@ -375,6 +375,92 @@ func TestChatViewAutoRoutingStaysJSON(t *testing.T) {
 	// would have failed). A human pick records provider.selected=human.
 }
 
+// ADR-0040 Decision 1: --provider auto's decision rides the NDJSON stream as a
+// typed "decided" event — once per task, tagged with the task's own sid so a
+// GUI can correlate it (it can arrive before this task's own task.started —
+// see viewDecided) — carrying the exact same audit (provider/n/q/fallback/
+// seed and each candidate's scope/quantile/passed/wins) that landed in the
+// same tomo.decided ledger record, whether autoDecide picked a provider or
+// routed to human.
+func TestChatViewEmitsDecidedEventMatchingLedger(t *testing.T) {
+	s := openTestStore(t)
+	a := &threadAdapter{}
+	saved := providers
+	providers = map[string]executor.Adapter{"fake": a}
+	t.Cleanup(func() { providers = saved })
+
+	buf := &bytes.Buffer{}
+	stream := newNDJSONStream(buf)
+	dev, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dev.Close() })
+	ed := lineedit.New(dev, dev)
+	ed.SetReader(flushReader{r: strings.NewReader(""), flush: stream.flushAwait})
+	c := &chat{
+		s: s, ed: ed, in: ed.Reader(), out: noteWriter{s: stream}, stream: stream,
+		providerName: "auto", capability: "implement",
+		extractor: &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}},
+	}
+	stream.emit(map[string]any{"type": "init", "v": viewVersion})
+
+	if err := c.turn("implement it"); err != nil {
+		t.Fatal(err)
+	}
+
+	var decided []map[string]any
+	for _, e := range viewEvents(t, buf) {
+		if e["type"] == "decided" {
+			decided = append(decided, e)
+		}
+	}
+	if len(decided) != 1 {
+		t.Fatalf("decided must fire exactly once per task, got %d", len(decided))
+	}
+	view := decided[0]
+	ledger := payloadOf(t, s, "tomo.decided")
+
+	if view["sid"] != c.sid {
+		t.Errorf("decided sid = %v, want the task's own session %q", view["sid"], c.sid)
+	}
+	for _, key := range []string{"provider", "n", "q", "fallback", "seed"} {
+		if view[key] != ledger[key] {
+			t.Errorf("decided view %q = %v, want the same tomo.decided record's %v", key, view[key], ledger[key])
+		}
+	}
+
+	viewCands, _ := view["candidates"].([]any)
+	ledgerCands, _ := ledger["candidates"].([]any)
+	if len(viewCands) == 0 || len(viewCands) != len(ledgerCands) {
+		t.Fatalf("candidate count: view=%d ledger=%d, want equal and non-zero", len(viewCands), len(ledgerCands))
+	}
+	for i := range viewCands {
+		vc := viewCands[i].(map[string]any)
+		lc := ledgerCands[i].(map[string]any)
+		if vc["provider"] != lc["provider"] || vc["quantile"] != lc["quantile"] ||
+			vc["passed"] != lc["passed"] || vc["scope"] != lc["scope"] || vc["wins"] != lc["wins"] {
+			t.Errorf("candidate %d must audit the same decision, key-for-key with the ledger: view=%v ledger=%v", i, vc, lc)
+		}
+	}
+}
+
+// ADR-0040 Decision 1 depends on autoDecide's out being exactly the writer
+// decidedViewer is implemented on — chat wires c.out straight into openTask
+// (startTask) and executeSplit (splitAndFold) with nothing in between. A
+// future change that wraps c.out (e.g. an indent writer) before either call
+// would compile cleanly — io.Writer satisfaction says nothing about
+// decidedViewer — and silently stop the emit. This pins today's wiring: under
+// --view ndjson, c.out must still assert to decidedViewer.
+func TestChatViewOutStillImplementsDecidedViewer(t *testing.T) {
+	s := openTestStore(t)
+	c, _ := newViewChat(t, s, &threadAdapter{}, "")
+
+	if _, ok := c.out.(decidedViewer); !ok {
+		t.Fatalf("c.out (%T) no longer implements decidedViewer — autoDecide's ADR-0040 view emit would silently stop firing", c.out)
+	}
+}
+
 // ADR-0032 Decision 1: --view takes only ndjson, and ndjson refuses a TTY (the
 // view mode assumes every terminal gate shut). Pure, so both rejections pin
 // without a real terminal.

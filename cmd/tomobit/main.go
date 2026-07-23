@@ -1209,6 +1209,17 @@ func (tp *taskPerception) semanticTokens(out io.Writer) []string {
 // and when it succeeded, since neither has anything to confess.
 func (tp *taskPerception) degradedReason() string { return tp.degraded }
 
+// decidedViewer lets autoDecide's out writer double as the sink for the
+// ADR-0040 decided view event, without giving autoDecide (or the whole
+// openTask/openSubtask/duelOffer/runSplit call chain above it, shared by both
+// `do` and chat) a second parameter just to carry an optional stream. chat's
+// noteWriter is the only implementer. sid rides along because a split's
+// subtasks each call autoDecide for their own session — the GUI's only way
+// to tell whose decision this is.
+type decidedViewer interface {
+	viewDecided(sid string, dec decide.Decision)
+}
+
 // autoDecide runs the Decision Engine (ADR-0012) over the current
 // projections and records the full audit — seed included — as a
 // tomo.decided event, so the same ledger + the same seed replays the same
@@ -1241,6 +1252,12 @@ func autoDecide(s *store.Store, out io.Writer, sid, capability, size string, tp 
 		cands[i] = map[string]any{
 			"provider": c.Provider, "quantile": c.Quantile,
 			"passed": c.Passed, "scope": c.ScopeKey,
+			// wins is -1 for a gated-out candidate (never entered the pairwise
+			// tournament) and the win tally otherwise (ADR-0012) — recorded
+			// here so the ledger, not just the view, holds the full audit
+			// ADR-0040 says autoDecide already has (Decision 1: view mirrors
+			// the ledger, it does not add to it).
+			"wins": c.Wins,
 		}
 	}
 	payload := map[string]any{
@@ -1261,6 +1278,15 @@ func autoDecide(s *store.Store, out io.Writer, sid, capability, size string, tp 
 	}
 	if err := s.AppendEvent(sid, "tomo.decided", now.UnixMilli(), payload); err != nil {
 		return decide.Decision{}, err
+	}
+	// The same audit rides the NDJSON view stream (ADR-0040 Decision 1) — dec
+	// itself, not a recomputation, so a GUI can show "why this provider"
+	// without ever reading the ledger. out is the only signal available here
+	// (autoDecide has no chat/stream argument of its own): a chat's noteWriter
+	// implements decidedViewer under --view ndjson, do's os.Stdout and a plain
+	// chat's out do not, so this is silently a no-op everywhere else.
+	if dv, ok := out.(decidedViewer); ok {
+		dv.viewDecided(sid, dec)
 	}
 	// Operational log line (ADR-0009: machine channel, not Tomo's voice). It
 	// rides out, not os.Stdout, so a chat's auto decision (openTask / a split's

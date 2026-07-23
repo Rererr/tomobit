@@ -39,15 +39,21 @@ Companionship の取りこぼしである。
 のと**同じ内容**を view にも流す:
 
 ```json
-{"type":"decided","provider":"claude-code","n":3,"q":0.72,"fallback":false,
- "seed":1721793600123,
+{"type":"decided","sid":"0019f8ff...","provider":"claude-code","n":3,"q":0.72,
+ "fallback":false,"seed":"1721793600123",
  "candidates":[
-   {"provider":"claude-code","scope_key":"cap=implement","quantile":0.72,"passed":true,"wins":41},
-   {"provider":"codex","scope_key":"cap=implement","quantile":0.31,"passed":true,"wins":23}]}
+   {"provider":"claude-code","scope":"cap=implement","quantile":0.72,"passed":true,"wins":41},
+   {"provider":"codex","scope":"cap=implement","quantile":0.31,"passed":true,"wins":23}]}
 ```
 
 - 内容の正本は `decide.Decision` そのもの。**viewのために新しい計算はしない** —
-  記帳と同じ構造体を同じ場所で書くだけ（付加コストゼロ）
+  記帳と同じ構造体を同じ場所で書くだけ（付加コストゼロ）。台帳の `tomo.decided`
+  ペイロードにも `wins` を持たせ、view と台帳は同じキー名（`scope`）・同じ値で一致する
+- `seed` は台帳と同じく文字列（int64 を JSON number にすると精度が落ちる）
+- `wins:-1` はゲート未通過（トーナメント不参加）の意味
+- `sid` は記帳先 ledger session の id。`decided` は view の `task.started` より
+  先に流れうるため、読み手は順序でなく sid で相関する
+- split（ADR-0023/0028）の下では各サブタスクが自分の sid 付きで独立に `decided` を流す
 - 声（`voice.Decided` の note）は今のまま変えない。人格は語り、データは流れる —
   ADR-0030 の「表示専用受け取り」と同じ二層
 - 未知 type を読み手が無視する前方互換契約（ADR-0032 Decision 1）により、

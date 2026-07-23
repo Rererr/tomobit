@@ -43,6 +43,7 @@ GUI という**対話的なフロントエンド**が同じ経路に乗った。
 {"type":"init","v":1}                                  ストリーム冒頭。契約バージョン
 {"type":"ready"}                                       入力待ち（プロンプトマーカーの代替）
 {"type":"task.started","sid":"..."}                    タスク開始（ledger session と同じ id）
+{"type":"decided","sid":"...","provider":"...","candidates":[...]}  判断の監査行（ADR-0040。task.started より先に流れうる — sid で相関）
 {"type":"turn.started","n":1,"provider":"claude-code"} ターン実行開始
 {"type":"provider","name":"claude-code","model":"..."} provider.selected 到着時（auto の答え合わせ）
 {"type":"text","text":"..."}                           本文 — 吹き出しの中身。生 markdown
