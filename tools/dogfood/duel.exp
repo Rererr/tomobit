@@ -1,0 +1,30 @@
+#!/usr/bin/expect -f
+# Drives one full duel (ADR-0026) in a real PTY: offer -> y -> two stub
+# providers race -> verdict 1 (claude-code). Any expect timeout is a FAILURE
+# (never let a timeout fall through silently).
+set timeout 30
+set dog [lindex $argv 0]
+set db [lindex $argv 1]
+
+set env(HOME) "$dog/home"
+set env(TOMOBIT_FACE) 0
+set env(TOMOBIT_CLAUDE_CONFIG_DIR) ""
+set env(PATH) "$dog/bin:$env(PATH)"
+
+spawn $dog/tomobit do --db $db --backend ollama --url http://127.0.0.1:11499 --model stub "implement service duel probe"
+
+expect {
+    -re {\[y/N\]} { send "y\r" }
+    timeout { puts "\nEXPECT-FAIL: duel offer never appeared"; exit 2 }
+}
+expect {
+    "どっちが good" { }
+    timeout { puts "\nEXPECT-FAIL: verdict prompt never appeared"; exit 2 }
+}
+send "1\r"
+expect {
+    eof { }
+    timeout { puts "\nEXPECT-FAIL: process did not finish"; exit 2 }
+}
+catch wait result
+exit [lindex $result 3]

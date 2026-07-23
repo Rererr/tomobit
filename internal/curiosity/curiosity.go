@@ -93,7 +93,7 @@ func Gaps(repo core.Repo, nowMs int64) ([]Gap, error) {
 	}
 
 	var gaps []Gap
-	// stats reads the outcome tallies keyed по the given attribute of each
+	// stats reads the outcome tallies keyed by the given attribute of each
 	// matching experience: the provider for capability bets, the plan for
 	// plan bets.
 	collect := func(byScope map[string][]string, targetOf func(*core.Experience) string) {

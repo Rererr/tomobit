@@ -1,0 +1,31 @@
+#!/usr/bin/expect -f
+# Budget re-offer suppression (ADR-0026 Decision 2): right after a duel, a
+# second interactive do must NOT offer another duel (tomo.duel_offered is
+# inside the 24h window). Seeing the offer again is the failure.
+set timeout 30
+set dog [lindex $argv 0]
+set db [lindex $argv 1]
+
+set env(HOME) "$dog/home"
+set env(TOMOBIT_FACE) 0
+set env(TOMOBIT_CLAUDE_CONFIG_DIR) ""
+set env(PATH) "$dog/bin:$env(PATH)"
+
+spawn $dog/tomobit do --db $db --backend ollama --url http://127.0.0.1:11499 --model stub "implement service piece again"
+
+expect {
+    -re {\[y/N\]} { puts "\nEXPECT-FAIL: duel re-offered inside the budget window"; exit 2 }
+    "どうだった?" { send "\r" }
+    timeout { puts "\nEXPECT-FAIL: neither offer nor feedback prompt appeared"; exit 2 }
+}
+expect {
+    eof { }
+    -re {\[1=.*2=.*\]} {
+        # a curiosity question or mirror may take this boundary; skip it
+        send "\r"
+        exp_continue
+    }
+    timeout { puts "\nEXPECT-FAIL: process did not finish"; exit 2 }
+}
+catch wait result
+exit [lindex $result 3]

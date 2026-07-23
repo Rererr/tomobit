@@ -17,4 +17,4 @@ require (
 	modernc.org/sqlite v1.53.0 // indirect
 )
 
-replace github.com/Rererr/tomobit => /Users/example/personal-dev/tomobit
+replace github.com/Rererr/tomobit => ../../..
