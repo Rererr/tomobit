@@ -57,10 +57,21 @@ func Draws(size string) int {
 // Candidate is one provider's audit row in a Decision.
 type Candidate struct {
 	Provider string
-	ScopeKey string  // capability connection actually read ("" = blank slate)
-	Quantile float64 // pessimistic quantile at decision time
+	// ScopeKey/Quantile name the connection this row reports on. For a passer
+	// it is the finest match selection actually read ("" = blank slate); for a
+	// provider gated out under ADR-0042 対案2 it is the refusing sibling — the
+	// most pessimistic same-granularity connection that missed its bar.
+	ScopeKey string
+	Quantile float64 // pessimistic quantile of that connection at decision time
 	Passed   bool
 	Wins     int // pairwise preference wins among gate passers (-1 = gated)
+
+	// readQuantile is the finest match's quantile — the row selection read —
+	// even when Quantile has been swapped to a refusing sibling for the audit.
+	// The fallback's least-bad ranking runs on this so ADR-0042's audit swap
+	// never leaks into selection (ADR-0042 W1: 選択は最細一致のまま). Unexported:
+	// it is decision bookkeeping, not part of the audit record.
+	readQuantile float64
 }
 
 // Decision is the full audit record of one choice.
@@ -100,13 +111,7 @@ func chooseKind(kind string, conns []*core.Connection, candidates, tokens []stri
 	// 「できないかもしれない」の探索を本番のタスクで張らない).
 	var passers []int
 	for _, p := range sorted {
-		c := finestMatch(conns, kind, p, tokens)
-		cand := Candidate{Provider: p, Quantile: blankQuantile, Wins: -1}
-		if c != nil {
-			cand.ScopeKey = c.ScopeKey
-			cand.Quantile = c.QuantileAt(nowMs, QuantileQ)
-		}
-		cand.Passed = cand.Quantile >= gateBar(c)
+		cand := gateAll(conns, kind, p, tokens, nowMs)
 		if cand.Passed {
 			cand.Wins = 0
 			passers = append(passers, len(d.Candidates))
@@ -120,7 +125,9 @@ func chooseKind(kind string, conns []*core.Connection, candidates, tokens []stri
 		d.Fallback = true
 		best := 0
 		for i := 1; i < len(d.Candidates); i++ {
-			if d.Candidates[i].Quantile > d.Candidates[best].Quantile {
+			// Rank by the finest match each candidate read, not the refusing
+			// sibling its audit row now names (ADR-0042 W1).
+			if d.Candidates[i].readQuantile > d.Candidates[best].readQuantile {
 				best = i
 			}
 		}
@@ -184,9 +191,12 @@ func gateBar(c *core.Connection) float64 {
 	return math.Min(QuantileQ, core.BetaQuantile(a, b, QuantileQ)) - gateMargin
 }
 
-// GatePass reports whether one connection clears the capability gate on its
-// own — the same bar Choose applies, exposed for rehabilitation detection
-// (ADR-0015: 名誉回復 = 悲観ゲートへの再入場). nil is the blank slate: pass.
+// GatePass reports whether ONE connection clears its own bar — the per-
+// connection question rehabilitation asks (ADR-0015: 名誉回復 = 悲観ゲートへの
+// 再入場). This is a finer grain than Choose's gate, which under ADR-0042 対案2
+// clears a provider only if EVERY same-granularity sibling passes: a connection
+// can GatePass on its own yet still see its provider gated out by a failing
+// sibling. nil is the blank slate: pass.
 func GatePass(c *core.Connection, nowMs int64) bool {
 	if c == nil {
 		return true
@@ -211,6 +221,69 @@ func firstWins(rng *rand.Rand, conns []*core.Connection, tokens []string, a, b s
 		}
 	}
 	return sum/float64(n) >= 0.5
+}
+
+// gateAll builds a provider's capability candidate under ADR-0042 対案2. The
+// selection side (Thompson Sampling, firstWins) still reads the single finest
+// match, but the pessimistic gate reads EVERY finest-granularity match and
+// clears the provider only if all of them clear their own bar — 選ぶのは一つ、
+// 拒否は全員ができる, revising ADR-0013 Decision 2's「判断は最細一致のみを読む」
+// for the gate alone.
+//
+// This exists because finestMatch breaks same-granularity ties lexically
+// (「監査が一意の行を指すため」), so under {cap=implement, lang=rust} the cap=
+// connection always shadowed the lang= one — a provider that had failed rust
+// 11 times still passed on its healthy cap=implement row (ADR-0042 実測: 選択
+// 分布 claude 81/200, lang=rust connection 一度も読まれず). Reading only the
+// finest match let the decision stay blind to a danger the ledger already held.
+//
+// The min over siblings is confined to the gate decision alone. A passer keeps
+// the finest match it read in ScopeKey/Quantile; only when the provider is
+// gated out does the audit swap in the refuser — the most pessimistic sibling
+// that missed its own bar (lexical ScopeKey breaks equal-quantile ties, like
+// finestMatch, so the row never depends on the store's ORDER BY). Selection
+// never touches the swapped value: readQuantile carries the finest quantile for
+// the fallback's least-bad ranking, and the passer tie-break only compares
+// passers (never swapped). 「なぜ落ちたか」は拒否者を、「何を読んで選んだか」は
+// 最細を指す。On a ledger with no same-granularity ties the only sibling is the
+// finest match itself, so a pass leaves the finest row and a fail names that
+// same row — bit-identical to reading one connection (ADR-0038 不変条件).
+func gateAll(conns []*core.Connection, kind, provider string, tokens []string, nowMs int64) Candidate {
+	sel := finestMatch(conns, kind, provider, tokens)
+	cand := Candidate{Provider: provider, Quantile: blankQuantile, readQuantile: blankQuantile, Passed: true, Wins: -1}
+	if sel == nil {
+		return cand // blank slate: bar = q − margin, blank quantile = q, passes
+	}
+	bestLen := len(sel.Scope())
+	selQ := sel.QuantileAt(nowMs, QuantileQ)
+	cand.ScopeKey = sel.ScopeKey
+	cand.Quantile = selQ
+	cand.readQuantile = selQ
+
+	var refuser *core.Connection
+	refuserQ := math.Inf(1)
+	for _, c := range conns {
+		if c.Kind != kind || c.Target != provider {
+			continue
+		}
+		scope := c.Scope()
+		if len(scope) != bestLen || !scope.SubsetOf(tokens) {
+			continue
+		}
+		q := c.QuantileAt(nowMs, QuantileQ)
+		if q >= gateBar(c) {
+			continue
+		}
+		if q < refuserQ || (q == refuserQ && c.ScopeKey < refuser.ScopeKey) {
+			refuser, refuserQ = c, q
+		}
+	}
+	if refuser != nil {
+		cand.Passed = false
+		cand.ScopeKey = refuser.ScopeKey
+		cand.Quantile = refuserQ
+	}
+	return cand
 }
 
 // finestMatch returns the finest-scoped connection of the kind/target whose
