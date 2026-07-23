@@ -291,7 +291,10 @@ usage:
                    経験の訂正(ADR-0033)。削除ではなく人間による再知覚として追記
                    (現行世代のみ・過去世代は不可)。context/outcome/providerを
                    全置換。key閉集合・provider登録名+humanに限定。自動rebuild
-  tomobit status   same as no args
+  tomobit status   [--view human|json] same as no args
+                   --view json は顔窓を起動せず、TTY装飾も挨拶記帳もせず
+                   {type,exists,stage,stage_name,mood,speak} を1行書いて終わる
+                   (ADR-0039、GUIヘッダ向けオプトイン)
   tomobit setup    対話式でこの機械の配線を決める(claude profile / 知覚バックエンド / 顔窓)。
                    再実行すれば診断を兼ねる。書き先は ~/.tomobit/config.json
 
@@ -1584,14 +1587,114 @@ func cmdRebuild(args []string) error {
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	db := dbFlag(fs)
+	view := fs.String("view", "human", "output view: human (default) or json")
 	fs.Parse(args)
-	maybeLaunchFace(*db)
-	s, err := openStore(*db)
+	switch *view {
+	case "human":
+		maybeLaunchFace(*db)
+		s, err := openStore(*db)
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		return showStatus(os.Stdout, s)
+	case "json":
+		return statusJSON(os.Stdout, *db)
+	default:
+		return fmt.Errorf("unknown --view %q (human, json)", *view)
+	}
+}
+
+// statusPayload is the machine view `tomobit status --view json` writes
+// (ADR-0039 Decision 1): the one derivation GUI reads instead of hand-porting
+// stage.go. Stage is a pointer so a real S0 (毛玉, the zero stage constant)
+// still serializes as "stage":0 rather than vanishing under omitempty —
+// only the absent-ledger case leaves it nil.
+type statusPayload struct {
+	Type      string      `json:"type"`
+	Exists    bool        `json:"exists"`
+	Stage     *int        `json:"stage,omitempty"`
+	StageName string      `json:"stage_name,omitempty"`
+	Mood      *statusMood `json:"mood,omitempty"`
+	Speak     string      `json:"speak,omitempty"`
+}
+
+type statusMood struct {
+	Name   string `json:"name"`
+	Marker string `json:"marker"`
+}
+
+// statusCandidates reduces connections to the voice.Candidate rows and state
+// names both status views read. Shared between showStatus and statusJSON so
+// the reduction can't drift between the human and machine view — the same
+// divergence ADR-0039 exists to kill between binaries.
+func statusCandidates(s *store.Store, conns []*core.Connection, now int64) ([]voice.Candidate, []string, error) {
+	en := &core.Engine{Repo: s}
+	cands := make([]voice.Candidate, len(conns))
+	states := make([]string, len(conns))
+	for i, c := range conns {
+		sum, err := en.LedgerSum(c, now)
+		if err != nil {
+			return nil, nil, err
+		}
+		state := c.State(now, sum)
+		cands[i] = voice.Candidate{Conn: c, State: state, LedgerSum: sum}
+		states[i] = state
+	}
+	return cands, states, nil
+}
+
+// statusJSON writes the machine view. It stats the DB path before opening it
+// (ADR-0039 Decision 1): openStore's MkdirAll+store.Open would otherwise
+// create a ledger just because a machine reader asked to look — a mutation
+// the human `status` never had reason to guard against, since it always drew
+// the companion view anyway. No face window, no greeting: a machine reader is
+// not the person the return greeting or the desktop sprite are for.
+//
+// Unlike chat's --view ndjson, a TTY is not rejected: that gate protects a
+// stream whose framing assumes every terminal organ stayed closed, while this
+// is a one-shot object with those organs unconditionally off — a human piping
+// it through jq on a terminal breaks nothing.
+func statusJSON(w io.Writer, dbPath string) error {
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return json.NewEncoder(w).Encode(statusPayload{Type: "status", Exists: false})
+		}
+		return err
+	}
+
+	s, err := openStore(dbPath)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-	return showStatus(os.Stdout, s)
+
+	now := time.Now().UnixMilli()
+	stage, err := face.StageFrom(s, now)
+	if err != nil {
+		return err
+	}
+	conns, err := s.AllConnections()
+	if err != nil {
+		return err
+	}
+	cands, states, err := statusCandidates(s, conns, now)
+	if err != nil {
+		return err
+	}
+	moodName, moodMarker := face.Mood(states)
+
+	payload := statusPayload{
+		Type:      "status",
+		Exists:    true,
+		Stage:     &stage,
+		StageName: face.StageName(stage),
+		Mood:      &statusMood{Name: moodName, Marker: moodMarker},
+	}
+	if text, ok := voice.Suggest(cands, now); ok {
+		payload.Speak = text
+	}
+	return json.NewEncoder(w).Encode(payload)
 }
 
 // showStatus draws the companion view on an already-open store, so a chat can
@@ -1628,14 +1731,9 @@ func showStatus(w io.Writer, s *store.Store) error {
 		return nil
 	}
 
-	en := &core.Engine{Repo: s}
-	cands := make([]voice.Candidate, len(conns))
-	for i, c := range conns {
-		sum, err := en.LedgerSum(c, now)
-		if err != nil {
-			return err
-		}
-		cands[i] = voice.Candidate{Conn: c, State: c.State(now, sum), LedgerSum: sum}
+	cands, _, err := statusCandidates(s, conns, now)
+	if err != nil {
+		return err
 	}
 
 	if tty {
