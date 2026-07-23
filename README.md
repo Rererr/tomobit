@@ -4,6 +4,28 @@
 
 複数のコーディングAIの前に立ち、経験（Experience）からConnectionを育てる **Living Harness**。
 
+## Getting Started
+
+前提:
+
+- Go 1.26+
+- Provider CLI — [claude](https://claude.com/claude-code)（claude-code）/ codex の少なくとも一方が PATH にあること
+- 知覚バックエンド（任意・推奨）— [Ollama](https://ollama.com) または mlx-lm。
+  無くてもタスク実行はでき、知覚（Connectionを育てる素材の抽出）は保留と表示され、
+  後から `tomobit perceive` で追いつける。選択の背景は [ADR-0029](docs/decisions/ADR-0029-perception-backend-choice.md)
+
+```sh
+git clone https://github.com/Rererr/tomobit.git && cd tomobit
+go install ./cmd/tomobit ./cmd/tomobit-face   # tomobit-face は顔窓（無くても動く。警告1行で続行）
+tomobit setup    # 対話式で配線を決める(claude profile / 知覚バックエンド / 顔窓) → ~/.tomobit/config.json
+tomobit          # 相棒ビュー → そのまま対話へ。単発なら `tomobit do "..."`
+```
+
+台帳は `~/.tomobit/tomobit.db` に住む（[経験主権 — ADR-0018](docs/decisions/ADR-0018-experience-sovereignty.md)）。
+コマンド一覧は `tomobit help`。初期導入の設計は [ADR-0021](docs/decisions/ADR-0021-onboarding.md)。
+
+デスクトップGUIは別リポジトリ [tomobit-gui](https://github.com/Rererr/tomobit-gui)。
+
 ## Docs
 
 ### 思想
@@ -66,3 +88,5 @@
 - [ADR-0036](docs/decisions/ADR-0036-task-perception-wiring.md) — 判断が読むトークン（判断は`cap=`1トークンしか読まず粒度1のConnectionとSplit子は到達不能だった / Decision 1は決定的に既知の`size`もトークンにする / Decision 2はタスク記述をextractorに通して`lang`/`framework`/`topic`を判断へ配線＝遅延して1タスク1回・誰も読まないなら叩かない・期限ノブは置かない・判断の記録は抽出プロンプトから外す・事前知覚と事後知覚のズレは埋めず監査に残す）
 - [ADR-0037](docs/decisions/ADR-0037-merge-reachability.md) — 継承事前の下での名誉回復を試みるも実測で頓挫（μ<0.48の親から生まれた子は減衰しても悲観ゲートを通らず、選ばれないから経験も来ずmerge判定機会も来ない自己強化デッドロック / merge判定の到達性は修復したが、実測でln BFはThetaMerge=0へ「上から」漸近するのみで実質到達不能（約15年）と判明 — 名誉回復は未解決のままADR-0038へ引き継ぐ）
 - [ADR-0038](docs/decisions/ADR-0038-gate-under-inherited-priors.md) — 継承事前下の能力ゲート（悲観ゲートの基準線を`q−margin`から`min(q, PriorQuantile(q))−margin`へ一般化し、低いμを継いだ子の恒久ゲート落ちを解消 / 一様事前の根では今日と同一判定・継承事前でも今日より厳しくならない片側緩和 / 定数0.20は一様事前のq分位点を書き下したたまたまの値だった — ADR-0012 Decision 3の未解決点への回答、ADR-0037 Decision 1を改版）
+- [ADR-0039](docs/decisions/ADR-0039-status-machine-view.md) — 相棒ビューの機械可読view（`tomobit status --view json` でstage/mood/speakを1オブジェクトで出す / 台帳が無ければ作らず`exists:false` / 顔窓起動・挨拶記帳なし — GUIのstage移植570行を廃し、台帳を書くバイナリ自身が導出する。Proposed）
+- [ADR-0040](docs/decisions/ADR-0040-decision-audit-view.md) — 判断の監査行をviewへ流す（`tomo.decided`に記帳済みのCandidates〈分位点・ゲート・勝ち数〉を`chat --view ndjson`の`decided`イベントとしても流し、GUIが「なぜこのProviderか」を開示可能にする / 声は不変・既定は畳む — ADR-0011根拠3の監査可能性を表示経路へ延伸。Proposed）
