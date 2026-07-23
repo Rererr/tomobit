@@ -1,0 +1,6 @@
+#!/bin/sh
+# Stub codex CLI: emits minimal codex exec --json stream.
+echo '{"type":"thread.started","thread_id":"stub-codex-thread"}'
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"done (stub codex)"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}'
+exit 0

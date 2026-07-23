@@ -1,0 +1,77 @@
+# ADR-0042: Split の飢餓と辞書順の遮蔽 — 決定が既知の危険を読めない
+
+- Status: **Proposed（問題提起 — 対策は所有者の裁定待ち。実装していない）**
+- Date: 2026-07-24
+- 関連: [ADR-0002](ADR-0002-surprise-and-split-judgment.md)（Split トリガ = excess surprisal）,
+  [ADR-0012](ADR-0012-decision-rule-thompson-sampling.md)（悲観ゲート）,
+  [ADR-0013](ADR-0013-prior-inheritance-mean-only.md)（Decision 2: 判断は最細一致のみを読む）,
+  [ADR-0016](ADR-0016-curiosity-priority-voi.md)（VoI — 対案3の器官）,
+  [ADR-0037](ADR-0037-merge-reachability.md)（同族: 選ばれない→証拠が来ない→直らない）
+
+---
+
+## Context（合成 dogfood 2026-07-24 の実測。再現一式は tools/dogfood）
+
+claude-code に go 成功11件 + **rust 失敗11連続**（うち7件は直近1週間）を積んだ
+台帳で、rust タスクの decide を 200 seed 実行した:
+
+- 選択分布: **claude-code 81 / codex 65 / human 54 — 11連敗中の Provider が最頻**
+- 監査行: claude の読まれた Connection は `scope="cap=implement"`（quantile
+  0.313, passed）。`lang=rust|claude-code`（strength **0.08**, evidence 10.6）は
+  台帳に**存在するのに一度も読まれない**
+
+機構は二段になっている:
+
+1. **Split の飢餓**: go 成功と rust 失敗の均衡混合は親の p を最大エントロピー
+  近傍に保ち、excess surprisal（誤較正の検出器, ADR-0002）が発火しない。
+  実測 LedgerSum(cap=implement/claude)=1.07 < ThetaTrigger 2.0。一方、
+  反実仮想の lnBF(lang=rust で分割)=**5.95 ≥ 発火線** — 召喚さえされれば
+  即分割の証拠量が眠っている。しかも定常状態では逆進する: 親の mean が
+  0.40 の今、次の rust 失敗の excess は **−0.16（負）** — **証拠が増えるほど
+  トリガ統計量が減る**
+2. **辞書順の遮蔽**: `{cap=implement, lang=rust}` の下で同粒度（1トークン）の
+  一致が複数あるとき、tie-break は ScopeKey 辞書順（decide.go finestMatch —
+  「監査が一意の行を指すため」）。`cap=` < `lang=` なので **lang= 系の
+  Connection は cap= 系が存在する限り系統的に読まれない**。乱択ですらなく、
+  常に同じ側が遮蔽される
+
+帰結: 「知覚は記録し、網は保持し、決定だけが盲目」— ADR-0037 が扱った
+自己強化デッドロックの同族で、今回は**悲観ゲートが守るべき本番タスク**で
+守れていない。
+
+## なぜ即修正しないか
+
+どの対策も判断数学そのものに触れ、既存台帳で選ばれる Provider が変わる。
+ADR-0038 のときこの種の変更は所有者の明示的な了承のもとで入った。
+また対策次第で ADR-0002（トリガの較正）/ ADR-0013 Decision 2（最細一致）/
+ADR-0016（VoI）のどれを改版するかが分かれる — 設計の分岐点である。
+
+## 対案（トレードオフ列挙 — 裁定待ち）
+
+1. **tie-break を「証拠の重い側」へ変える**（decide.go の1箇所）
+   同粒度なら evidence（LedgerSum）最大の Connection を読む。決定的で監査
+   一意性は保たれ、遮蔽が「たまたまの語彙順」でなく「より多く見た側」に
+   なる。ただし本件の直接原因（lang=rust evidence 10.6 > cap 側の読み値）は
+   解消するが、**Split 飢餓（1.）は残る** — 2トークン子は依然生まれない
+2. **同粒度一致はゲートだけ全数読む**
+   選択（TS）は最細一致のまま、悲観ゲートは同粒度一致全ての min(quantile) で
+   引く。「危険を知っているのに黙る」は消える。ADR-0013 Decision 2 の
+   「読むのは一つ」を「選ぶのは一つ、拒否は全員ができる」へ改版する必要
+3. **Split 召喚を Curiosity へも配線する**（ADR-0016 の延伸）
+   excess surprisal（受動トリガ）に加え、反実仮想 lnBF の大きい分割候補を
+   VoI 队列に積み、余裕のあるときに Split 判定を走らせる。トリガの較正
+   （ADR-0002）を触らず飢餓だけを解く。器官が一つ仕事を増やす
+4. **トリガ統計量の改版**（ADR-0002 の改版）
+   excess surprisal をトークン条件付きの誤較正検定に置き換える。最も根治的
+   だが最も重い — 較正・テスト・過去挙動の説明の全てをやり直す
+5. **何もしない（明文化）** → 「サブスコープの連敗は、親スコープが均衡して
+   いる限り判断に反映されない」を仕様と認めることになる。Living Harness の
+   看板と正面衝突するため、明文化するなら VISION 側の但し書きが要る
+
+組み合わせも成立する（例: 1+3 は小さく入れて根治は待つ）。
+
+## Consequences（裁定後）
+
+- 選ばれる Provider が変わりうることの了承（ADR-0038 と同じ手続き）
+- 再現・較正の材料は tools/dogfood（本ADRの実測を生成したハーネス）にある
+- 採る対案に応じて ADR-0002 / 0013 / 0016 の該当 Decision に改版注記

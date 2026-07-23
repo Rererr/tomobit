@@ -1,0 +1,6 @@
+#!/bin/sh
+# Stub claude CLI: emits minimal claude-code stream-json (ADR-0006 fixtures shape).
+echo '{"type":"system","subtype":"init","session_id":"stub-claude-sess","model":"stub-model","tools":[]}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"done (stub claude)"}]}}'
+echo '{"type":"result","subtype":"success","is_error":false,"duration_ms":12,"total_cost_usd":0.0011,"num_turns":1,"result":"ok"}'
+exit 0
