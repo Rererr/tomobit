@@ -1,6 +1,6 @@
 # ADR-0039: 相棒ビューの機械可読view — レンダラはひとつの導出を読む
 
-- Status: **Proposed**（2026-07-24 起草。所有者の採否待ち）
+- Status: **Proposed / 先行適用済み**（2026-07-24 起草・同日 goal 指示の自律セッションが実装を main へ適用。所有者の追認待ち — 却下時は revert で戻る）
 - Date: 2026-07-24
 - 関連: [ADR-0001(GUI)](https://github.com/Rererr/tomobit-gui/blob/main/docs/decisions/ADR-0001-gui-architecture.md)（Decision 5: テキストViewの移植を暫定許容）,
   [ADR-0017](ADR-0017-stage-function-revision.md)（ステージ関数の改版 — 較正ノブは動く）,

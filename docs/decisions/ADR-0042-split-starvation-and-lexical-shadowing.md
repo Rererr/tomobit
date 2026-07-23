@@ -1,6 +1,6 @@
 # ADR-0042: Split の飢餓と辞書順の遮蔽 — 決定が既知の危険を読めない
 
-- Status: **Proposed（問題提起 — 対策は所有者の裁定待ち。実装していない）**
+- Status: **Proposed / 対案2を先行適用済み**（2026-07-24 起草・同日、実測5案比較と一般性スイープ5形状ののち goal 指示の自律セッションが対案2を main へマージ。所有者の追認待ち — 却下時はマージの revert で戻る。対案3=Split召喚のVoI配線は別ADRの論点として残る）
 - Date: 2026-07-24
 - 関連: [ADR-0002](ADR-0002-surprise-and-split-judgment.md)（Split トリガ = excess surprisal）,
   [ADR-0012](ADR-0012-decision-rule-thompson-sampling.md)（悲観ゲート）,

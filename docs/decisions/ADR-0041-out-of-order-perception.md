@@ -1,6 +1,6 @@
 # ADR-0041: 順序外の知覚は正典に立ち返る — 乖離は静かに残さない
 
-- Status: **Proposed**（2026-07-24 起草。所有者の採否待ち）
+- Status: **Proposed / 先行適用済み**（2026-07-24 起草・同日 goal 指示の自律セッションが実装を main へ適用。所有者の追認待ち — 却下時は revert で戻る）
 - Date: 2026-07-24
 - 関連: [ADR-0005](ADR-0005-perception-implementation.md)（知覚の実装）,
   [ADR-0029](ADR-0029-perception-backend-choice.md)（バックエンド停止時は pending に積まれる — 本件の露出条件）,
