@@ -13,6 +13,17 @@ type fakeRepo struct {
 	conns  map[string]*Connection
 	ledger map[string]*LedgerEntry
 	exps   []*Experience
+
+	// clearCalls counts ClearProjections invocations — Rebuild's one
+	// defining move that live Apply never makes — so tests can tell the two
+	// paths apart directly instead of inferring it from projection numbers
+	// or log output (ADR-0041).
+	clearCalls int
+	// clearErr, when set, makes ClearProjections fail — the deterministic
+	// way to force Rebuild to fail, so tests can pin PerceiveBatch's
+	// "attempted a rebuild" vs "the rebuild actually succeeded" distinction
+	// (ADR-0041).
+	clearErr error
 }
 
 func newFakeRepo() *fakeRepo {
@@ -122,6 +133,10 @@ func (r *fakeRepo) CurrentExperiences() ([]*Experience, error) {
 }
 
 func (r *fakeRepo) ClearProjections() error {
+	r.clearCalls++
+	if r.clearErr != nil {
+		return r.clearErr
+	}
 	r.conns = map[string]*Connection{}
 	r.ledger = map[string]*LedgerEntry{}
 	return nil
@@ -784,6 +799,311 @@ func TestRebuildIsIdempotentAndWallClockIndependent(t *testing.T) {
 	}
 	if len(conns1) == 0 {
 		t.Fatal("scenario should have produced connections")
+	}
+}
+
+// connsEqual compares two AllConnections snapshots the same way
+// TestLiveApplyMatchesRebuildAcrossASplit and
+// TestRebuildIsIdempotentAndWallClockIndependent do: same fields, same
+// order (both come from the (kind, scope_key, target)-sorted fakeRepo).
+func connsEqual(t *testing.T, got, want []*Connection) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("connection count differs: got %d, want %d", len(got), len(want))
+	}
+	for i := range got {
+		a, b := got[i], want[i]
+		if a.Kind != b.Kind || a.ScopeKey != b.ScopeKey || a.Target != b.Target ||
+			a.Alpha != b.Alpha || a.Beta != b.Beta || a.LastUpdate != b.LastUpdate ||
+			a.BornTS != b.BornTS || a.ParentKey != b.ParentKey {
+			t.Errorf("connection %d differs:\n got =%+v\n want=%+v", i, a, b)
+		}
+	}
+}
+
+// TestPerceiveBatchInOrderAppliesLiveWithoutRebuilding pins ADR-0041's
+// no-op case: a batch that stays newer than everything already perceived
+// must take the live Apply+ReconcileMerges path untouched — proven here by
+// ClearProjections' call count, Rebuild's one defining move, rather than by
+// log output or by projection values that could coincidentally agree.
+func TestPerceiveBatchInOrderAppliesLiveWithoutRebuilding(t *testing.T) {
+	r := newFakeRepo()
+	en := &Engine{Repo: r}
+
+	known := execExp("known", 1000, "claude", map[string]string{"cap": "impl"}, Outcome{Adopted: "as-is"})
+	known.SessionID = "sess-known"
+	r.exps = append(r.exps, known)
+	if err := en.Apply(known); err != nil {
+		t.Fatal(err)
+	}
+	if err := en.ReconcileMerges(known.TS); err != nil {
+		t.Fatal(err)
+	}
+	beforeCurrent, err := r.CurrentExperiences()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A distinct session (a session is perceived into at most one execution
+	// experience, so ordinary new evidence never shares (session_id, kind)
+	// with something already known — only re-perception does).
+	next := execExp("next", 2000, "claude", map[string]string{"cap": "impl"}, Outcome{Adopted: "as-is"})
+	next.SessionID = "sess-next"
+	r.exps = append(r.exps, next)
+	batch := []*Experience{next}
+
+	r.clearCalls = 0
+	rebuilt, err := en.PerceiveBatch(batch, beforeCurrent, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt {
+		t.Error("an in-order batch must not report a rebuild")
+	}
+	if r.clearCalls != 0 {
+		t.Errorf("an in-order batch must never clear projections, got %d ClearProjections calls", r.clearCalls)
+	}
+}
+
+// TestPerceiveBatchOutOfOrderRebuildsMatchingCanonicalProjection reproduces,
+// minimized, the dogfood divergence ADR-0041 measured (live α=7.6604 vs
+// rebuild 7.4789): a late-arriving batch older than what live Apply has
+// already folded in adds its evidence at decay weight 1.0 instead of the
+// weight true chronological replay would give it (Observe's own doc comment
+// names this: "an out-of-order observation ... already adds undecayed via
+// PosteriorAt"). PerceiveBatch must detect this and hand the projection to
+// Rebuild instead, landing on exactly what an independent rebuild of the
+// same two experiences produces.
+func TestPerceiveBatchOutOfOrderRebuildsMatchingCanonicalProjection(t *testing.T) {
+	const base int64 = 1000
+
+	r := newFakeRepo()
+	en := &Engine{Repo: r}
+
+	// Perceived first, while the backend was healthy — chronologically the
+	// *later* of the two experiences (one half-life after base). A distinct
+	// session from `late` below: this test isolates the out-of-order
+	// condition alone, not the (session_id, kind) re-perception one.
+	known := execExp("known", base+HalfLifeMs, "claude", map[string]string{"cap": "impl"}, Outcome{Adopted: "as-is"})
+	known.SessionID = "sess-known"
+	r.exps = append(r.exps, known)
+	if err := en.Apply(known); err != nil {
+		t.Fatal(err)
+	}
+	if err := en.ReconcileMerges(known.TS); err != nil {
+		t.Fatal(err)
+	}
+	beforeCurrent, err := r.CurrentExperiences()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Perceived late (ADR-0029: the backend was down when this session
+	// happened) — chronologically the *earlier* experience, arriving after
+	// `known` has already been live-applied.
+	late := execExp("late", base, "claude", map[string]string{"cap": "impl"}, Outcome{Adopted: "as-is"})
+	late.SessionID = "sess-late"
+	r.exps = append(r.exps, late)
+	batch := []*Experience{late}
+
+	rebuilt, err := en.PerceiveBatch(batch, beforeCurrent, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rebuilt {
+		t.Fatal("a batch older than already-perceived evidence must trigger a rebuild")
+	}
+	got := mustAll(t, r)
+
+	canon := newFakeRepo()
+	canon.exps = append(canon.exps, known, late)
+	enCanon := &Engine{Repo: canon}
+	if err := enCanon.Rebuild(); err != nil {
+		t.Fatal(err)
+	}
+	want := mustAll(t, canon)
+
+	connsEqual(t, got, want)
+
+	// The regression this guards: applying `late` live and out of order
+	// (skipping PerceiveBatch's guard entirely) does diverge from the same
+	// canonical projection — confirming the scenario actually exercises the
+	// bug ADR-0041 describes, not a vacuously-passing one.
+	diverged := newFakeRepo()
+	diverged.exps = append(diverged.exps, known, late)
+	enDiverged := &Engine{Repo: diverged}
+	if err := enDiverged.Apply(known); err != nil {
+		t.Fatal(err)
+	}
+	if err := enDiverged.Apply(late); err != nil {
+		t.Fatal(err)
+	}
+	divergedConns := mustAll(t, diverged)
+	if len(divergedConns) != len(want) {
+		t.Fatalf("setup error: diverged scenario connection count = %d, want %d", len(divergedConns), len(want))
+	}
+	same := true
+	for i := range divergedConns {
+		if divergedConns[i].Alpha != want[i].Alpha || divergedConns[i].Beta != want[i].Beta {
+			same = false
+		}
+	}
+	if same {
+		t.Fatal("setup error: applying `late` live out of order should have diverged from rebuild — scenario no longer exercises the bug")
+	}
+}
+
+// TestBatchSupersedesKnownDetectsSameSessionKindRegardlessOfID pins ADR-0041
+// 決定2's premise directly: a re-perceived generation shares its old one's ts
+// exactly (an experience's ts is its session's last event, unchanged across
+// extractor_ver bumps), so only the id differs — and by nothing but a fresh
+// random suffix. Detection must not depend on which way that coin falls.
+func TestBatchSupersedesKnownDetectsSameSessionKindRegardlessOfID(t *testing.T) {
+	known := []*Experience{
+		{ID: "aaaa", SessionID: "sess-1", TS: 5000, Kind: KindExecution},
+	}
+	lowerID := []*Experience{
+		{ID: "0000", SessionID: "sess-1", TS: 5000, Kind: KindExecution},
+	}
+	higherID := []*Experience{
+		{ID: "zzzz", SessionID: "sess-1", TS: 5000, Kind: KindExecution},
+	}
+	unrelated := []*Experience{
+		{ID: "mmmm", SessionID: "sess-2", TS: 5000, Kind: KindExecution},
+	}
+
+	if !batchSupersedesKnown(lowerID, known) {
+		t.Error("a re-perceived id lower than known's must still be detected as a superseding generation")
+	}
+	if !batchSupersedesKnown(higherID, known) {
+		t.Error("a re-perceived id higher than known's must still be detected as a superseding generation")
+	}
+	if batchSupersedesKnown(unrelated, known) {
+		t.Error("a different session must not be flagged as a re-perceived generation")
+	}
+
+	// The gap batchSupersedesKnown exists to close: batchOutOfOrder alone
+	// sees the higher-id case as perfectly in order (same ts, a larger id),
+	// so it cannot tell a re-perception from ordinary new evidence — that
+	// coin-flip case is exactly why ADR-0041 needs a second condition.
+	if batchOutOfOrder(higherID, known) {
+		t.Fatal("setup error: this case must look in-order by (ts, id) alone, or it no longer demonstrates the gap")
+	}
+}
+
+// TestPerceiveBatchRebuildsOnReperceivedGenerationRegardlessOfIDDirection is
+// TestBatchSupersedesKnownDetectsSameSessionKindRegardlessOfID's end-to-end
+// counterpart: PerceiveBatch itself, not just the predicate, must rebuild a
+// re-perceived generation whichever way its fresh id happens to sort against
+// the generation it replaces.
+func TestPerceiveBatchRebuildsOnReperceivedGenerationRegardlessOfIDDirection(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		newID string
+	}{
+		{"lower id", "0000-lower"},
+		{"higher id", "zzzz-higher"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newFakeRepo()
+			en := &Engine{Repo: r}
+
+			gen1 := execExp("gen1-fixed-id", 5000, "claude", map[string]string{"cap": "impl"}, Outcome{Adopted: "as-is"})
+			r.exps = append(r.exps, gen1)
+			if err := en.Apply(gen1); err != nil {
+				t.Fatal(err)
+			}
+			if err := en.ReconcileMerges(gen1.TS); err != nil {
+				t.Fatal(err)
+			}
+			beforeCurrent, err := r.CurrentExperiences()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Same session+kind, same ts (the session's last event, replayed
+			// unchanged by re-perception) — only extractor output and id differ.
+			gen2 := execExp(tc.newID, gen1.TS, "claude", map[string]string{"cap": "impl", "lang": "go"}, Outcome{Adopted: "as-is"})
+			r.exps = append(r.exps, gen2)
+
+			rebuilt, err := en.PerceiveBatch([]*Experience{gen2}, beforeCurrent, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !rebuilt {
+				t.Errorf("re-perceiving the same session+kind at a %s must trigger a rebuild", tc.name)
+			}
+		})
+	}
+}
+
+// TestPerceiveBatchLogsBeforeRebuildStarts pins ADR-0041's 前提と残す露出:
+// Rebuild is not one transaction, so the one honest log line must run before
+// Rebuild is attempted, not after it returns — a crash partway through must
+// not leave the operator without even that line.
+func TestPerceiveBatchLogsBeforeRebuildStarts(t *testing.T) {
+	r := newFakeRepo()
+	en := &Engine{Repo: r}
+
+	known := execExp("known", 2000, "claude", map[string]string{"cap": "impl"}, Outcome{Adopted: "as-is"})
+	r.exps = append(r.exps, known)
+	if err := en.Apply(known); err != nil {
+		t.Fatal(err)
+	}
+	beforeCurrent, err := r.CurrentExperiences()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	late := execExp("late", 1000, "claude", map[string]string{"cap": "impl"}, Outcome{Adopted: "as-is"})
+	r.exps = append(r.exps, late)
+
+	called := false
+	var clearCallsAtCallback int
+	onRebuild := func() {
+		called = true
+		clearCallsAtCallback = r.clearCalls
+	}
+	if _, err := en.PerceiveBatch([]*Experience{late}, beforeCurrent, onRebuild); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("onRebuild must run whenever PerceiveBatch decides to rebuild")
+	}
+	if clearCallsAtCallback != 0 {
+		t.Errorf("onRebuild must run before Rebuild's ClearProjections, but %d call(s) had already happened", clearCallsAtCallback)
+	}
+}
+
+// TestPerceiveBatchReportsRebuiltOnlyWhenRebuildSucceeds guards against
+// conflating "a rebuild was attempted" with "the projection is now
+// canonical": Rebuild is not one transaction (ADR-0041 前提と残す露出), so a
+// caller deciding whether the live projection can be trusted needs to know
+// it actually finished, not merely that PerceiveBatch tried.
+func TestPerceiveBatchReportsRebuiltOnlyWhenRebuildSucceeds(t *testing.T) {
+	r := newFakeRepo()
+	en := &Engine{Repo: r}
+
+	known := execExp("known", 2000, "claude", map[string]string{"cap": "impl"}, Outcome{Adopted: "as-is"})
+	r.exps = append(r.exps, known)
+	if err := en.Apply(known); err != nil {
+		t.Fatal(err)
+	}
+	beforeCurrent, err := r.CurrentExperiences()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	late := execExp("late", 1000, "claude", map[string]string{"cap": "impl"}, Outcome{Adopted: "as-is"})
+	r.exps = append(r.exps, late)
+
+	r.clearErr = fmt.Errorf("disk full")
+	rebuilt, err := en.PerceiveBatch([]*Experience{late}, beforeCurrent, nil)
+	if err == nil {
+		t.Fatal("the injected Rebuild failure must propagate")
+	}
+	if rebuilt {
+		t.Error(`PerceiveBatch must report rebuilt=false when Rebuild itself failed — "attempted" is not "succeeded"`)
 	}
 }
 

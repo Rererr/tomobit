@@ -42,10 +42,10 @@ func main() {
 			panic(err)
 		}
 		var p struct {
-			Provider string   `json:"provider"`
-			Seed     string   `json:"seed"`
-			Size     string   `json:"size"`
-			Tokens   []string `json:"tokens"`
+			Provider   string   `json:"provider"`
+			Seed       string   `json:"seed"`
+			Size       string   `json:"size"`
+			Tokens     []string `json:"tokens"`
 			Candidates []struct {
 				Provider string  `json:"provider"`
 				Quantile float64 `json:"quantile"`

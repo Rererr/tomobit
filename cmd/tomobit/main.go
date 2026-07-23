@@ -1392,6 +1392,38 @@ func feedbackPayload(in *bufio.Reader, out io.Writer) map[string]any {
 	}
 }
 
+// perceiveLive sorts a perceive run's batch into the (ts, id) order
+// Engine.PerceiveBatch's contract requires, then folds it into the live
+// projection through that one call (ADR-0041): live Apply+ReconcileMerges,
+// or a Rebuild — logged to stderr immediately before Rebuild starts, since
+// Rebuild is not one transaction and a mid-rebuild crash must not go silent
+// (ADR-0041 前提と残す露出) — when the batch is out of order or re-perceives
+// an already-known session. cmdPerceive and perceiveBestEffort both route
+// through this one function so the guard reaches do/chat's tail perception
+// exactly as it reaches the operational command, not just one of them.
+//
+// curErr is the error from the CurrentExperiences() call that produced
+// beforeCurrent, checked here rather than trusted to the caller: a failed
+// fetch silently handing PerceiveBatch a nil/incomplete `known` would defeat
+// both of its guards without anyone noticing (cmdPerceive used to do
+// exactly that, ignoring the error until a later, unrelated read).
+func perceiveLive(en *core.Engine, batch, beforeCurrent []*core.Experience, curErr error) error {
+	if curErr != nil {
+		return fmt.Errorf("reading experiences_current: %w", curErr)
+	}
+	sort.Slice(batch, func(i, j int) bool {
+		if batch[i].TS != batch[j].TS {
+			return batch[i].TS < batch[j].TS
+		}
+		return batch[i].ID < batch[j].ID
+	})
+	onRebuild := func() {
+		fmt.Fprintln(os.Stderr, "out-of-order batch — rebuilding projections")
+	}
+	_, err := en.PerceiveBatch(batch, beforeCurrent, onRebuild)
+	return err
+}
+
 // perceiveBestEffort mirrors cmdPerceive but never fails the run: if Ollama is
 // down the session stays pending (Deferred Perception, ADR-0006 Decision 5).
 // It returns any re-perception candidates (ADR-0019 Decision 4) for the
@@ -1419,14 +1451,6 @@ func perceiveBestEffort(s *store.Store, out io.Writer, extractor perceive.Extrac
 	if len(exps) == 0 {
 		return nil
 	}
-	// Apply in the (ts, id) order the store replays on rebuild, so the live
-	// projection matches the canonical rebuilt one.
-	sort.Slice(exps, func(i, j int) bool {
-		if exps[i].TS != exps[j].TS {
-			return exps[i].TS < exps[j].TS
-		}
-		return exps[i].ID < exps[j].ID
-	})
 
 	now := time.Now().UnixMilli()
 	before, err := s.AllConnections()
@@ -1441,20 +1465,14 @@ func perceiveBestEffort(s *store.Store, out io.Writer, extractor perceive.Extrac
 	}
 
 	en := &core.Engine{Repo: s}
-	expIDs := make([]string, 0, len(exps))
-	for _, e := range exps {
-		if err := en.Apply(e); err != nil {
-			fmt.Fprintf(out, "perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
-			return nil
-		}
-		expIDs = append(expIDs, e.ID)
-	}
-	// One reconciliation sweep at this batch's boundary (ADR-0037 Decision
-	// 2): gives merge judgment reach into children this batch's Apply calls
-	// never touched, the same reach Rebuild's closing sweep already has.
-	if err := en.ReconcileMerges(exps[len(exps)-1].TS); err != nil {
+	// curErr is nil here — already checked and returned on above.
+	if err := perceiveLive(en, exps, beforeCurrent, nil); err != nil {
 		fmt.Fprintf(out, "perceived but projection is stale — run `tomobit rebuild`: %v\n", err)
 		return nil
+	}
+	expIDs := make([]string, 0, len(exps))
+	for _, e := range exps {
+		expIDs = append(expIDs, e.ID)
 	}
 
 	after, err := s.AllConnections()
@@ -1510,15 +1528,6 @@ func cmdPerceive(args []string) error {
 	exps, err := p.Run()
 	var extras []reflection.Candidate
 	if len(exps) > 0 {
-		// Apply in the same (ts, id) order the store replays on rebuild, so
-		// the live projection matches the canonical rebuilt one.
-		sort.Slice(exps, func(i, j int) bool {
-			if exps[i].TS != exps[j].TS {
-				return exps[i].TS < exps[j].TS
-			}
-			return exps[i].ID < exps[j].ID
-		})
-
 		now := time.Now().UnixMilli()
 		before, snapErr := s.AllConnections()
 		if snapErr != nil {
@@ -1530,21 +1539,14 @@ func cmdPerceive(args []string) error {
 		}
 
 		en := &core.Engine{Repo: s}
+		if liveErr := perceiveLive(en, exps, beforeCurrent, curErr); liveErr != nil {
+			return fmt.Errorf("%w (experiences are saved; the projection is stale — run `tomobit rebuild` to repair)", liveErr)
+		}
 		expIDs := make([]string, 0, len(exps))
 		for _, e := range exps {
-			if applyErr := en.Apply(e); applyErr != nil {
-				return fmt.Errorf("apply %s: %w (experiences are saved; the projection is stale — run `tomobit rebuild` to repair)", e.ID, applyErr)
-			}
 			fmt.Printf("perceived %s: %s %s → %s\n",
 				e.SessionID, e.Kind, core.NewScope(e.Tokens()...).Key(), e.Target())
 			expIDs = append(expIDs, e.ID)
-		}
-		// One reconciliation sweep at this batch's boundary (ADR-0037
-		// Decision 2): gives merge judgment reach into children this batch's
-		// Apply calls never touched, the same reach Rebuild's closing sweep
-		// already has.
-		if err := en.ReconcileMerges(exps[len(exps)-1].TS); err != nil {
-			return fmt.Errorf("reconcile merges: %w (experiences are saved; the projection is stale — run `tomobit rebuild` to repair)", err)
 		}
 
 		after, snapErr := s.AllConnections()

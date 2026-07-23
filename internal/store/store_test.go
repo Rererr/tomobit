@@ -188,6 +188,33 @@ func TestLastEventTSNotFoundWhenTypeAbsent(t *testing.T) {
 	}
 }
 
+// TestNewIDTSPrefixIsFixedWidthHex pins a format detail internal/core.Engine
+// relies on implicitly: its (ts, id) ordering compares id as a plain Go
+// string, and that only agrees with numeric ts order if every id's ts
+// prefix is padded to the same width — an unpadded %x would let ts=1
+// ("1-...") sort after ts=16 ("10-...") lexicographically despite being
+// numerically smaller.
+func TestNewIDTSPrefixIsFixedWidthHex(t *testing.T) {
+	prefix, _, ok := strings.Cut(NewID(42), "-")
+	if !ok {
+		t.Fatalf("NewID must contain a '-' separating the ts prefix from the random suffix, got %q", NewID(42))
+	}
+	if len(prefix) != 13 {
+		t.Errorf("ts prefix must be zero-padded to a fixed 13 hex digits (room for ts up to 2^52ms, far past the store's lifetime), got %q (%d chars) for ts=42", prefix, len(prefix))
+	}
+}
+
+// TestNewIDLexicographicOrderMatchesNumericTSOrder pins the guarantee the
+// fixed-width prefix exists for: engine.go's (ts, id) comparisons and SQL's
+// `ORDER BY ts, id` both assume Go/SQLite string order agrees with numeric
+// ts order.
+func TestNewIDLexicographicOrderMatchesNumericTSOrder(t *testing.T) {
+	earlier, later := NewID(1), NewID(1_700_000_000_000)
+	if !(earlier < later) {
+		t.Errorf("string order must agree with numeric ts order: NewID(1)=%q should sort before NewID(1_700_000_000_000)=%q", earlier, later)
+	}
+}
+
 func TestExperiencesRejectUpdateAndDelete(t *testing.T) {
 	s := openTest(t)
 	insertExp(t, s, "e1", "sess", core.KindExecution, 1)

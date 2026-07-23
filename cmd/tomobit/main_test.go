@@ -261,6 +261,15 @@ func openTestStore(t *testing.T) *store.Store {
 
 func appendFinishedSession(t *testing.T, s *store.Store, sid string) {
 	t.Helper()
+	appendFinishedSessionAt(t, s, sid, 1000)
+}
+
+// appendFinishedSessionAt is appendFinishedSession with a configurable base
+// ts, so tests can place two sessions at deliberately different points in
+// time (e.g. ADR-0041's out-of-order perceive scenario, where a session
+// perceived later must still carry an earlier ts).
+func appendFinishedSessionAt(t *testing.T, s *store.Store, sid string, baseTS int64) {
+	t.Helper()
 	steps := []struct {
 		typ     string
 		payload map[string]any
@@ -271,7 +280,7 @@ func appendFinishedSession(t *testing.T, s *store.Store, sid string) {
 		{"task.finished", map[string]any{"adopted": "as-is", "reverted": false}},
 	}
 	for i, step := range steps {
-		if err := s.AppendEvent(sid, step.typ, int64(1000+i), step.payload); err != nil {
+		if err := s.AppendEvent(sid, step.typ, baseTS+int64(i), step.payload); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -322,6 +331,58 @@ func TestPerceiveBestEffortLeavesSessionPendingOnExtractorFailure(t *testing.T) 
 	}
 	if len(pending) != 1 || pending[0] != "sess" {
 		t.Errorf("session should stay pending after an extractor failure, got %v", pending)
+	}
+}
+
+// TestPerceiveBestEffortLogsOnOutOfOrderBatch pins the do/chat tail's
+// perception path (finishTask → perceiveBestEffort) to ADR-0041's guard, not
+// just cmdPerceive's: a session perceived after a chronologically later one
+// already went live must log the one honest rebuild line, not diverge
+// silently.
+func TestPerceiveBestEffortLogsOnOutOfOrderBatch(t *testing.T) {
+	s := openTestStore(t)
+	appendFinishedSessionAt(t, s, "recent", 5_000_000)
+	perceiveBestEffort(s, io.Discard, &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}})
+
+	appendFinishedSessionAt(t, s, "late", 1_000_000)
+	_, stderr := captureStdoutStderr(t, func() {
+		perceiveBestEffort(s, io.Discard, &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}})
+	})
+
+	if !strings.Contains(stderr, "out-of-order batch — rebuilding projections") {
+		t.Errorf("expected the out-of-order rebuild line on stderr, got %q", stderr)
+	}
+}
+
+// TestPerceiveLiveFailsFastWhenCurrentExperiencesErrored pins the fix for a
+// bug review caught in cmdPerceive: it used to ignore the error from the
+// CurrentExperiences() call that produces `known` and hand PerceiveBatch a
+// nil/incomplete slice anyway, silently disabling both of ADR-0041's guards.
+// perceiveLive is the one shared path cmdPerceive and perceiveBestEffort now
+// both route through, so pinning it here covers both call sites at once.
+func TestPerceiveLiveFailsFastWhenCurrentExperiencesErrored(t *testing.T) {
+	s := openTestStore(t)
+	en := &core.Engine{Repo: s}
+	batch := []*core.Experience{{
+		ID: "e1", SessionID: "sess", TS: 1000, Kind: core.KindExecution,
+		ExtractorVer: extractorVer, ExtractorModel: "none",
+		Context: map[string]string{"cap": "impl"}, Provider: "claude-code",
+		Outcome: core.Outcome{Adopted: "as-is"}, Source: "production",
+	}}
+	if err := s.InsertExperiences(batch); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := perceiveLive(en, batch, nil, fmt.Errorf("db unavailable")); err == nil {
+		t.Fatal("perceiveLive must fail when the CurrentExperiences fetch behind `known` errored")
+	}
+
+	conns, err := s.AllConnections()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conns) != 0 {
+		t.Errorf("must not fold the batch into the live projection when the order-check's `known` was unavailable, got %v", conns)
 	}
 }
 

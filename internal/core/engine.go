@@ -47,6 +47,21 @@ type Engine struct {
 	// epoch: nothing else touches the experience log during its replay, so
 	// it resets once and drives the unexported apply/reconcileMerges core
 	// directly — the reuse that makes the O(n²) reload tractable.
+	//
+	// PerceiveBatch (ADR-0041) is the one caller that cannot trust ordering
+	// going in: a perceive run's batch is sorted within itself but never
+	// checked against what an earlier perceive already folded in, so a
+	// session perceived late (deferred perception, ADR-0029) can carry a ts
+	// older than the live projection's current anchor, or can re-perceive a
+	// session already folded in (a bumped extractor_ver) whose new
+	// experience shares its old one's ts with no meaningful id order between
+	// them. Every other Apply call site (duel, curiosity, reflection)
+	// sidesteps both risks structurally, not by checking for them: each
+	// dates its one experience at the current wall clock and never revisits
+	// a session, so it can never be older than or a re-perception of
+	// anything already perceived — an assumption resting on the wall clock
+	// staying monotonic (ADR-0041 前提と残す露出), which this package does
+	// not otherwise guard.
 	exps       []*Experience
 	expsLoaded bool
 	matches    map[matchKey][]*Experience
@@ -511,4 +526,95 @@ func (en *Engine) Rebuild() error {
 	// (TestRebuildIsIdempotentAndWallClockIndependent), and the moment
 	// `tomobit rebuild` happens to run must not leak into the projection.
 	return en.reconcileMerges(exps[len(exps)-1].TS)
+}
+
+// batchOutOfOrder reports whether batch — already sorted by (ts, id), as
+// every perceive call site sorts a Perceiver.Run() result before applying
+// it — carries evidence older than everything already perceived (ADR-0041
+// 決定1: 順序外). known is experiences_current as of just before batch was
+// inserted, itself ordered by (ts, id) (CurrentExperiences's contract), so
+// its last element already is the running max: the one comparison this
+// condition needs, no extra query.
+func batchOutOfOrder(batch, known []*Experience) bool {
+	if len(batch) == 0 || len(known) == 0 {
+		return false
+	}
+	first, last := batch[0], known[len(known)-1]
+	if first.TS != last.TS {
+		return first.TS < last.TS
+	}
+	return first.ID < last.ID
+}
+
+// batchSupersedesKnown reports whether batch carries a re-perceived
+// generation of something already known: an experience whose (SessionID,
+// Kind) already appears in known (ADR-0041 決定2: 世代交代 — a bumped
+// extractor_ver re-running Perceiver over an already-perceived session).
+// Re-perception always reproduces the session's original ts (an
+// experience's ts is its session's last event, unchanged across
+// extractor_ver bumps) with only a fresh random experience_id, so
+// batchOutOfOrder's (ts, id) test degenerates to a coin flip here — and
+// whichever way it falls, live Apply has no way to retract the superseded
+// generation's contribution already folded into the projection, so this
+// condition cannot be reduced to the ordering test above; it needs its own.
+func batchSupersedesKnown(batch, known []*Experience) bool {
+	if len(batch) == 0 || len(known) == 0 {
+		return false
+	}
+	seen := make(map[string]bool, len(known))
+	for _, e := range known {
+		seen[e.SessionID+"\x00"+e.Kind] = true
+	}
+	for _, e := range batch {
+		if seen[e.SessionID+"\x00"+e.Kind] {
+			return true
+		}
+	}
+	return false
+}
+
+// PerceiveBatch folds one perceive run's batch into the projections: live
+// Apply + ReconcileMerges when the batch stays in (ts, id) order with
+// everything already perceived and introduces no re-perceived generation, or
+// a full Rebuild otherwise (ADR-0041 決定1・2) — Apply's convergence to
+// Rebuild is only proved for that in-order, single-generation case, so a
+// batch that violates either must re-derive the canonical state rather than
+// silently drift from it. batch must already be sorted by (ts, id) — every
+// call site sorts its Perceiver.Run() result before handing it here, and
+// PerceiveBatch trusts that instead of re-sorting a slice its two callers
+// already sort identically. known is experiences_current as of just before
+// batch was inserted; every caller already has it fetched for its own
+// reasons (e.g. re-perception candidates), so this asks nothing extra of
+// them.
+//
+// onRebuild, if non-nil, runs immediately before Rebuild starts — not after
+// it returns — because Rebuild is not one transaction (ADR-0041 前提と残す
+// 露出): a crash partway through must not leave the operator without so much
+// as the one honest line explaining why. The returned bool reports whether
+// Rebuild ran to completion, never whether it merely started — "attempted"
+// and "succeeded" are not the same claim, and a caller deciding whether the
+// live projection can be trusted needs the latter. PerceiveBatch itself does
+// no I/O beyond that callback, matching the rest of this package.
+func (en *Engine) PerceiveBatch(batch, known []*Experience, onRebuild func()) (rebuilt bool, err error) {
+	if len(batch) == 0 {
+		return false, nil
+	}
+	if batchOutOfOrder(batch, known) || batchSupersedesKnown(batch, known) {
+		if onRebuild != nil {
+			onRebuild()
+		}
+		if err := en.Rebuild(); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	for _, e := range batch {
+		if err := en.Apply(e); err != nil {
+			return false, fmt.Errorf("apply %s: %w", e.ID, err)
+		}
+	}
+	if err := en.ReconcileMerges(batch[len(batch)-1].TS); err != nil {
+		return false, fmt.Errorf("reconcile merges: %w", err)
+	}
+	return false, nil
 }
