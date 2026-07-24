@@ -108,9 +108,19 @@ func TestProviderErrorPayloadNoneOnCleanExit(t *testing.T) {
 }
 
 func TestProviderErrorPayloadRecordsExecutorFailureNotSeenByAdapter(t *testing.T) {
-	payload, need := providerErrorPayload(fmt.Errorf("timed out"), executor.Result{})
+	payload, need := providerErrorPayload(fmt.Errorf("timed out"), executor.Result{Started: true})
 	if !need || payload["message"] != "timed out" {
 		t.Errorf("got need=%v payload=%v", need, payload)
+	}
+}
+
+// ADR-0043 Decision 3: a run that never launched (Started=false + error) is
+// not the provider's failure — recording it as provider.error would perceive
+// into outcome.Failed and sink a capability the provider never got to show.
+func TestProviderErrorPayloadSkipsARunThatNeverStarted(t *testing.T) {
+	_, need := providerErrorPayload(fmt.Errorf("claude: start: executable file not found"), executor.Result{})
+	if need {
+		t.Error("a run that never started must not be recorded as the provider's error")
 	}
 }
 
@@ -247,6 +257,19 @@ func countEventsOfType(t *testing.T, s *store.Store, typ string) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// knowHuman plants a human capability connection at scopeKey — the ADR-0043
+// Decision 4 precondition for human to enter auto's candidate set at all.
+func knowHuman(t *testing.T, s *store.Store, scopeKey string) {
+	t.Helper()
+	now := time.Now().UnixMilli()
+	if err := s.UpsertConnection(&core.Connection{
+		Kind: core.ConnCapability, ScopeKey: scopeKey, Target: "human",
+		Alpha: 2, Beta: 1, LastUpdate: now, BornTS: now, PriorA: 1, PriorB: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func openTestStore(t *testing.T) *store.Store {
@@ -512,9 +535,10 @@ func TestAutoDecideRecordsReplayableSeed(t *testing.T) {
 	if decided["provider"] != dec.Provider {
 		t.Errorf("payload provider %v != decision %q", decided["provider"], dec.Provider)
 	}
-	// Every registered adapter plus human (ADR-0018 Decision 2) is audited.
-	if cands, ok := decided["candidates"].([]any); !ok || len(cands) != len(providers)+1 {
-		t.Errorf("payload should audit every candidate, got %v", decided["candidates"])
+	// Every launchable adapter is audited (ADR-0043 Decision 2); human is
+	// absent — a blank ledger knows no human here (ADR-0043 Decision 4).
+	if cands, ok := decided["candidates"].([]any); !ok || len(cands) != len(availableProviderNames()) {
+		t.Errorf("payload should audit every launchable candidate, got %v", decided["candidates"])
 	}
 }
 

@@ -220,6 +220,88 @@ func TestStatusJSONDoesNotRecordTheReturnGreeting(t *testing.T) {
 	}
 }
 
+// TestStatusJSONProvidersMatchesTheAggregationFunction guards this feature's
+// Decision 3: `status --view json` must carry the same providers rows
+// providerUsageSummary itself produces over experiences_current — no second,
+// hand-rolled reduction for the machine view to drift from.
+func TestStatusJSONProvidersMatchesTheAggregationFunction(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	now := time.Now().UnixMilli()
+	statusJSONFixture(t, dbPath, now)
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustInsert(t, s, &core.Experience{
+		ID: "e1", SessionID: "s1", TS: now, Kind: core.KindExecution,
+		Provider: "claude-code", Source: "production", Outcome: core.Outcome{Verdict: "up"},
+	})
+	mustInsert(t, s, &core.Experience{
+		ID: "e2", SessionID: "s2", TS: now, Kind: core.KindExecution,
+		Provider: "", Source: "production", Outcome: core.Outcome{Cancelled: true}, // duel no-signal row
+	})
+	s.Close()
+
+	out, _ := captureStdoutStderr(t, func() {
+		if err := cmdStatus([]string{"--db", dbPath, "--view", "json"}); err != nil {
+			t.Fatalf("cmdStatus: %v", err)
+		}
+	})
+	got := decodeStatusJSON(t, out)
+
+	providers, ok := got["providers"].([]any)
+	if !ok || len(providers) != 1 {
+		t.Fatalf("providers = %v, want exactly one row (provider=\"\" excluded)", got["providers"])
+	}
+	row, ok := providers[0].(map[string]any)
+	if !ok {
+		t.Fatalf("providers[0] is not an object: %v", providers[0])
+	}
+	if row["provider"] != "claude-code" || row["runs"] != float64(1) {
+		t.Errorf("providers[0] = %v, want provider=claude-code runs=1", row)
+	}
+	if row["success"] != float64(1) || row["scored"] != float64(1) {
+		t.Errorf("providers[0] = %v, want success=1 scored=1 (a verdict=up run)", row)
+	}
+}
+
+// TestStatusJSONOmitsProvidersWhenNoUsageExists guards the field's
+// omitempty contract: a ledger with connections but no execution experience
+// yet must not carry an empty providers array.
+func TestStatusJSONOmitsProvidersWhenNoUsageExists(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	now := time.Now().UnixMilli()
+	statusJSONFixture(t, dbPath, now)
+
+	out, _ := captureStdoutStderr(t, func() {
+		if err := cmdStatus([]string{"--db", dbPath, "--view", "json"}); err != nil {
+			t.Fatalf("cmdStatus: %v", err)
+		}
+	})
+	got := decodeStatusJSON(t, out)
+	if _, hasProviders := got["providers"]; hasProviders {
+		t.Errorf("providers = %v, want the key entirely absent", got["providers"])
+	}
+}
+
+// TestStatusJSONNoLedgerOmitsProviders guards the absent-ledger contract
+// (exists:false carries no other fields, providers included).
+func TestStatusJSONNoLedgerOmitsProviders(t *testing.T) {
+	dbDir := filepath.Join(t.TempDir(), "nonexistent")
+	dbPath := filepath.Join(dbDir, "t.db")
+
+	out, _ := captureStdoutStderr(t, func() {
+		if err := cmdStatus([]string{"--db", dbPath, "--view", "json"}); err != nil {
+			t.Fatalf("cmdStatus: %v", err)
+		}
+	})
+	got := decodeStatusJSON(t, out)
+	if _, hasProviders := got["providers"]; hasProviders {
+		t.Errorf("providers = %v, want absent when exists:false", got["providers"])
+	}
+}
+
 // TestStatusJSONRejectsUnknownView guards the flag's closed vocabulary
 // (ADR-0039 Decision 1: human default, json the only machine view).
 func TestStatusJSONRejectsUnknownView(t *testing.T) {

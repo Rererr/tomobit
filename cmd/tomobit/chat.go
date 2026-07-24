@@ -154,7 +154,7 @@ func cmdChat(args []string) error {
 	capability := fs.String("cap", "implement", "capability of the task")
 	timeout := fs.Duration("timeout", 0, "max run time per turn, 0 = no limit")
 	permMode := fs.String("permission-mode", "", "permission mode passthrough (claude --permission-mode / codex --sandbox)")
-	providerName := fs.String("provider", "claude-code", "adapter to run: claude-code|codex|human|auto")
+	providerName := providerFlag(fs)
 	size := fs.String("size", "", "task size for decision stakes: small|medium|large (--provider auto)")
 	backend := fs.String("backend", "", "perception backend for best-effort perception: ollama|mlx-lm (default: resolved from config)")
 	model := fs.String("model", "", "perception model for best-effort perception (default depends on --backend)")

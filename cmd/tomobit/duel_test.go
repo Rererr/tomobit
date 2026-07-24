@@ -72,6 +72,37 @@ func TestPickDuelGap(t *testing.T) {
 	}
 }
 
+// TestPickDuelGapSkipsProviderWhoseExecutableIsMissing: a duel is a real run,
+// so its pair must be launchable (registry ∩ PATH) — the same ADR-0043
+// Decision 2 predicate auto uses. A ledger may know a provider this machine
+// no longer has installed (the registry is static by design); offering it as
+// a duel side could only end in a forfeit. Real PATH on purpose, like
+// TestAutoDecideCandidatesAreOnlyLaunchableProviders: sh exists everywhere,
+// the fake binary nowhere.
+func TestPickDuelGapSkipsProviderWhoseExecutableIsMissing(t *testing.T) {
+	registerFakeProvider(t, "p-a", &fakeSplitAdapter{name: "p-a"})
+	registerFakeProvider(t, "p-b", &fakeSplitAdapter{name: "p-b"})
+	registerFakeProvider(t, "p-gone", missingExeAdapter{name: "p-gone"})
+	tokens := []string{core.CanonToken("cap", "implement")}
+
+	notInstalled := curiosity.Gap{ // highest VoI, but one side cannot launch
+		A: "p-a", B: "p-gone", VoI: 9,
+		Scope: core.NewScope("cap=implement"),
+	}
+	launchable := curiosity.Gap{
+		A: "p-a", B: "p-b", VoI: 1,
+		Scope: core.NewScope("cap=implement"),
+	}
+
+	got, ok := pickDuelGap([]curiosity.Gap{notInstalled, launchable}, tokens)
+	if !ok || got.B != "p-b" {
+		t.Errorf("picked %+v (ok=%v), want the fully launchable gap — a registered provider whose executable is missing must not be a duel side", got, ok)
+	}
+	if _, ok := pickDuelGap([]curiosity.Gap{notInstalled}, tokens); ok {
+		t.Error("a gap whose side cannot launch must not be offered at all")
+	}
+}
+
 // TestDuelBudgetSharedWithQuestion: an offer may not fire within a budget
 // window of either a question or a previous offer (ADR-0026 Decision 2).
 func TestDuelBudgetSharedWithQuestion(t *testing.T) {
@@ -249,6 +280,110 @@ func TestRunDuelSkipsPreferenceWhenOneSideFails(t *testing.T) {
 	}
 	if n := countEventsOfType(t, s, "user.preference"); n != 0 {
 		t.Errorf("a duel with a failed side must record no preference, got %d", n)
+	}
+}
+
+// TestRunDuelUnstartedSideIsNoEvidenceNoBoundaryNoForfeit holds the duel to
+// the same standard cmdDo's never-started path already meets (ADR-0043
+// Decision 3): a side whose process never launched leaves task.started as the
+// only fact — no provider.error, no task.finished, no task.cancelled, never
+// enters the perception queue — and, above all, the verdict is skipped so no
+// preference is recorded by walkover. The started sibling still closes
+// normally: its own run is real evidence.
+func TestRunDuelUnstartedSideIsNoEvidenceNoBoundaryNoForfeit(t *testing.T) {
+	registerFakeProvider(t, "prov-a", &fakeSplitAdapter{name: "prov-a", line: "A", exitCode: 0})
+	registerFakeProvider(t, "prov-gone", missingExeAdapter{name: "prov-gone"})
+	s := openTestStore(t)
+
+	gap := curiosity.Gap{A: "prov-a", B: "prov-gone", Scope: core.NewScope("cap=implement")}
+	// A "1" here must be ignored: an unstarted side means no verdict question.
+	verdict := bufio.NewReader(strings.NewReader("1\n"))
+	if err := runDuel(context.Background(), s, gap, "do the thing", "implement", "", "", 0, verdict, io.Discard, nil); err != nil {
+		t.Fatalf("runDuel: %v", err)
+	}
+
+	if n := countEventsOfType(t, s, "user.preference"); n != 0 {
+		t.Errorf("an unstarted side must never yield a preference by forfeit, got %d user.preference", n)
+	}
+	var prefs int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM experiences WHERE kind = 'preference'`).Scan(&prefs); err != nil {
+		t.Fatal(err)
+	}
+	if prefs != 0 {
+		t.Errorf("preference experiences = %d, want 0", prefs)
+	}
+
+	parents := sessionsWithEvent(t, s, "task.duel")
+	if len(parents) != 1 {
+		t.Fatalf("want one duel parent, got %d", len(parents))
+	}
+	children := subtaskSessionIDs(t, s, parents[0])
+	if len(children) != 2 {
+		t.Fatalf("want two children, got %d", len(children))
+	}
+	var started, unstarted string
+	for _, c := range children {
+		if countEventsOfTypeInSession(t, s, c, "provider.output") > 0 {
+			started = c
+		} else {
+			unstarted = c
+		}
+	}
+	if started == "" || unstarted == "" {
+		t.Fatalf("want one started and one unstarted child, got started=%q unstarted=%q", started, unstarted)
+	}
+
+	if n := countEventsOfTypeInSession(t, s, unstarted, "task.started"); n != 1 {
+		t.Errorf("the ask itself is a fact and stays recorded, got task.started=%d", n)
+	}
+	for _, typ := range []string{"provider.error", "task.finished", "task.cancelled"} {
+		if n := countEventsOfTypeInSession(t, s, unstarted, typ); n != 0 {
+			t.Errorf("unstarted child %s = %d, want 0 — a launch that never happened is not evidence and not a boundary", typ, n)
+		}
+	}
+	if n := countEventsOfTypeInSession(t, s, started, "task.finished"); n != 1 {
+		t.Errorf("the started sibling still finishes normally, got task.finished=%d", n)
+	}
+
+	pending, err := s.PendingSessions(extractorVer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sid := range pending {
+		if sid == unstarted {
+			t.Error("the unstarted child must never enter the perception queue")
+		}
+	}
+}
+
+// TestRunDuelCancelledBeforeLaunchLeavesChildrenBoundaryless: a SIGINT that
+// lands before either side launches cancels the parent only — an unlaunched
+// child has nothing for perception to read, so it gets no task.cancelled
+// boundary either (the same ADR-0043 Decision 3 shape as the unstarted path).
+func TestRunDuelCancelledBeforeLaunchLeavesChildrenBoundaryless(t *testing.T) {
+	registerFakeProvider(t, "prov-a", &fakeSplitAdapter{name: "prov-a", line: "A", exitCode: 0})
+	registerFakeProvider(t, "prov-b", &fakeSplitAdapter{name: "prov-b", line: "B", exitCode: 0})
+	s := openTestStore(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before runDuel ever launches a child
+	gap := curiosity.Gap{A: "prov-a", B: "prov-b", Scope: core.NewScope("cap=implement")}
+	noInput := bufio.NewReader(strings.NewReader(""))
+	if err := runDuel(ctx, s, gap, "do the thing", "implement", "", "", 0, noInput, io.Discard, nil); err != nil {
+		t.Fatalf("runDuel: %v", err)
+	}
+
+	parents := sessionsWithEvent(t, s, "task.duel")
+	if len(parents) != 1 {
+		t.Fatalf("want one duel parent, got %d", len(parents))
+	}
+	if n := countEventsOfTypeInSession(t, s, parents[0], "task.cancelled"); n != 1 {
+		t.Errorf("parent task.cancelled = %d, want 1", n)
+	}
+	for _, c := range subtaskSessionIDs(t, s, parents[0]) {
+		if n := countEventsOfTypeInSession(t, s, c, "task.cancelled"); n != 0 {
+			t.Errorf("child %s task.cancelled = %d, want 0 — never launched, nothing to perceive", c, n)
+		}
 	}
 }
 

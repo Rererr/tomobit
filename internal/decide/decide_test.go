@@ -521,3 +521,26 @@ func TestGateNeverBecomesStricterForAHighMeanParent(t *testing.T) {
 		t.Fatalf("this test only says something while the family's bar (%v) is above the uniform one", bare)
 	}
 }
+
+// ADR-0043 Decision 4: "knowing a target in this context" must be the same
+// question Choose's own reader answers — a capability row whose scope is a
+// subset of the tokens. A broader row is knowledge (the decision would read
+// it); a row for another context is not; preference rows are not capability.
+func TestKnowsCapabilityMatchesChoosesOwnSubsetRule(t *testing.T) {
+	conns := []*core.Connection{
+		conn(core.ConnCapability, "cap=implement", "human", 2, 1),
+		conn(core.ConnPreference, "cap=review", "claude-code~human", 3, 1),
+	}
+	if !KnowsCapability(conns, "human", []string{"cap=implement"}) {
+		t.Error("an exact-scope capability row is knowledge")
+	}
+	if !KnowsCapability(conns, "human", []string{"cap=implement", "lang=go"}) {
+		t.Error("a broader row readable under finer tokens is knowledge — the decision would read it")
+	}
+	if KnowsCapability(conns, "human", []string{"cap=review"}) {
+		t.Error("a row for another context is not knowledge here; the preference row must not count as capability")
+	}
+	if KnowsCapability(nil, "human", []string{"cap=implement"}) {
+		t.Error("a blank ledger knows nothing")
+	}
+}

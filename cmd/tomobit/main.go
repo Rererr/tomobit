@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -177,6 +178,73 @@ func providerNames() []string {
 	return names
 }
 
+// providerFlag registers --provider with the one default do and chat share
+// (ADR-0043 Decision 1): unset means auto — the Decision Engine, not a fixed
+// name, chooses. One definition, not two string literals, so the commands can
+// never drift on who decides when the user says nothing.
+func providerFlag(fs *flag.FlagSet) *string {
+	return fs.String("provider", "auto",
+		"adapter to run: claude-code|codex|human|auto (auto: the ledger decides — ADR-0043)")
+}
+
+// onPathCache memoizes executableOnPath's verdicts for the process lifetime:
+// PATH is inherited once at startup and never changes mid-run, so the first
+// LookPath answers for every later decision (a long chat decides once per
+// task). The memo is per executable, deliberately not a snapshot of the
+// candidate list — the providers map is mutable (tests register fakes), and a
+// frozen list would go stale under it.
+var onPathCache sync.Map // executable name → bool
+
+func executableOnPath(name string) bool {
+	if v, ok := onPathCache.Load(name); ok {
+		return v.(bool)
+	}
+	_, err := exec.LookPath(name)
+	found := err == nil
+	onPathCache.Store(name, found)
+	return found
+}
+
+// availableProviderNames narrows providerNames() to the adapters whose CLI can
+// actually launch (ADR-0043 Decision 2): auto must never draw a lot on a
+// binary that is not there — that failure says nothing about the provider,
+// only about this machine, and recording it would sink a capability the
+// provider never got to show. The registry itself stays static:
+// resolveProvider keeps answering `--provider codex` with the honest "codex
+// won't start", never "no such provider".
+func availableProviderNames() []string {
+	return runnableNames(providerNames(), executableOnPath)
+}
+
+// runnableNames is availableProviderNames' testable core — onPath is injected
+// so the filter pins against a fake PATH instead of whatever this machine has
+// installed.
+func runnableNames(names []string, onPath func(string) bool) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if launchableProvider(n, onPath) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// launchableProvider is the one "this provider can actually run" predicate
+// (ADR-0043 Decision 2): registered adapter AND its executable on PATH. Every
+// path that will really launch a provider — auto's candidate list above, the
+// duel's pair (pickDuelGap) — must share it, or a machine without the binary
+// gets offered a run that can only fail. Registration alone answers a
+// different question: resolveProvider keeps telling an explicit
+// `--provider codex` the honest "codex won't start", never "no such provider".
+func launchableProvider(name string, onPath func(string) bool) bool {
+	a, ok := providers[name]
+	if !ok {
+		return false
+	}
+	exe, _, _ := a.Command(executor.Request{})
+	return onPath(exe)
+}
+
 // resolveProvider looks up a registered Adapter by name, or reports the
 // available names so an unknown --provider fails with something actionable.
 func resolveProvider(name string) (executor.Adapter, error) {
@@ -268,8 +336,9 @@ usage:
                    [--provider claude-code|codex|human|auto]
                    [--plan auto|full|direct|quick|<steps>] [--size small|medium|large]
                    [--backend ollama|mlx-lm] [--model <name>] [--url <addr>] "<prompt>"
-                   --provider auto: 決定エンジン(ADR-0012)が能力ゲート+TSで選ぶ
-                   （humanも候補 — ADR-0018）。--provider human: 自分でやって
+                   --provider の既定は auto: 決定エンジン(ADR-0012)が能力ゲート+TSで
+                   選ぶ。候補は起動できるProviderのみ・humanは文脈を知っている時
+                   だけ候補 (ADR-0043)。--provider human: 自分でやって
                    同じ台帳に乗せる。--plan auto: 手順も台帳が選ぶ(ADR-0014、
                    例 analyze>implement>test)。--size は判断の温度 n(stakes)。
                    --backend/--model/--url は知覚(best-effort)の配線 — 既定は
@@ -293,8 +362,8 @@ usage:
                    全置換。key閉集合・provider登録名+humanに限定。自動rebuild
   tomobit status   [--view human|json] same as no args
                    --view json は顔窓を起動せず、TTY装飾も挨拶記帳もせず
-                   {type,exists,stage,stage_name,mood,speak} を1行書いて終わる
-                   (ADR-0039、GUIヘッダ向けオプトイン)
+                   {type,exists,stage,stage_name,mood,speak,providers} を1行書いて終わる
+                   (ADR-0039、GUIヘッダ向けオプトイン。providersはProvider別の利用実績)
   tomobit setup    対話式でこの機械の配線を決める(claude profile / 知覚バックエンド / 顔窓)。
                    再実行すれば診断を兼ねる。書き先は ~/.tomobit/config.json
 
@@ -426,7 +495,7 @@ func cmdDo(args []string) error {
 	capability := fs.String("cap", "implement", "capability of the task")
 	timeout := fs.Duration("timeout", 0, "max run time, 0 = no limit")
 	permMode := fs.String("permission-mode", "", "permission mode passthrough (claude --permission-mode / codex --sandbox)")
-	providerName := fs.String("provider", "claude-code", "adapter to run: claude-code|codex|auto")
+	providerName := providerFlag(fs)
 	planArg := fs.String("plan", "", "plan: auto, a label (full|direct|quick), or steps like analyze>implement>test")
 	size := fs.String("size", "", "task size for decision stakes: small|medium|large (--provider auto)")
 	backend := fs.String("backend", "", "perception backend for best-effort perception: ollama|mlx-lm (default: resolved from config)")
@@ -575,6 +644,18 @@ func cmdDo(args []string) error {
 	// `tomobit perceive` can still learn from it later.
 	if ctx.Err() != nil {
 		return s.AppendEvent(sid, "task.cancelled", time.Now().UnixMilli(), nil)
+	}
+
+	// The provider never started (missing binary, spawn failure): fail the
+	// command itself instead of closing the task as if work had happened
+	// (ADR-0043 Decision 3 — the old path recorded provider.error and returned
+	// nil, so the user saw a clean exit and the ledger saw a provider failure
+	// that was really this machine's). No task.finished either — and not
+	// task.cancelled: a cancelled boundary still enters PendingSessions and is
+	// perceived into an experience row, while a launch that never happened has
+	// nothing for perception to read. The unclosed session is the honest shape.
+	if runErr != nil && !result.Started {
+		return fmt.Errorf("do: provider never started: %w", runErr)
 	}
 
 	if payload, need := providerErrorPayload(runErr, result); need {
@@ -1242,9 +1323,22 @@ func autoDecide(s *store.Store, out io.Writer, sid, capability, size string, tp 
 		semantic = tp.semanticTokens(out)
 	}
 	tokens := perceptionTokens(capability, size, semantic)
-	// human competes on the same ledger with the same gate (ADR-0018
-	// Decision 2) — the engine may honestly route the task to the user.
-	candidates := append(providerNames(), "human")
+	// Candidates are the adapters that can actually launch (ADR-0043 Decision
+	// 2). human still competes on the same ledger with the same gate
+	// (ADR-0018 Decision 2) — but only when this context already knows human
+	// (ADR-0043 Decision 4): an ignorant lottery would hand the task back to
+	// the user as "exploration" whose cost is the user working, and human
+	// needs no lottery to bootstrap — `--provider human` writes its evidence
+	// directly.
+	candidates := availableProviderNames()
+	if decide.KnowsCapability(conns, "human", tokens) {
+		candidates = append(candidates, "human")
+	}
+	if len(candidates) == 0 {
+		return decide.Decision{}, fmt.Errorf(
+			"auto: no runnable provider on this machine (registered: %s) — install one, or pin --provider human",
+			strings.Join(providerNames(), ", "))
+	}
 	dec := decide.Choose(conns, candidates, tokens, size, now.UnixNano(), now.UnixMilli())
 
 	cands := make([]map[string]any, len(dec.Candidates))
@@ -1355,6 +1449,17 @@ func providerErrorPayload(runErr error, result executor.Result) (payload map[str
 		return nil, false
 	}
 	if result.ErrorReported {
+		return nil, false
+	}
+	// A run that never launched is not evidence about the provider (ADR-0043
+	// Decision 3): "couldn't be started" and "ran and failed" are different
+	// facts, and recording the first as provider.error would let a missing
+	// binary sink a capability (perceive maps provider.error to
+	// outcome.Failed). Every caller still surfaces the error itself — do exits
+	// non-zero, chat prints it, split fail-stops, duel prints the side's launch
+	// failure and skips the verdict — so nothing is swallowed, just never
+	// ledgered as the provider's failure.
+	if !result.Started && runErr != nil {
 		return nil, false
 	}
 	msg := fmt.Sprintf("provider exited with code %d", result.ExitCode)
@@ -1639,12 +1744,13 @@ func cmdStatus(args []string) error {
 // still serializes as "stage":0 rather than vanishing under omitempty —
 // only the absent-ledger case leaves it nil.
 type statusPayload struct {
-	Type      string      `json:"type"`
-	Exists    bool        `json:"exists"`
-	Stage     *int        `json:"stage,omitempty"`
-	StageName string      `json:"stage_name,omitempty"`
-	Mood      *statusMood `json:"mood,omitempty"`
-	Speak     string      `json:"speak,omitempty"`
+	Type      string          `json:"type"`
+	Exists    bool            `json:"exists"`
+	Stage     *int            `json:"stage,omitempty"`
+	StageName string          `json:"stage_name,omitempty"`
+	Mood      *statusMood     `json:"mood,omitempty"`
+	Speak     string          `json:"speak,omitempty"`
+	Providers []providerUsage `json:"providers,omitempty"`
 }
 
 type statusMood struct {
@@ -1722,6 +1828,13 @@ func statusJSON(w io.Writer, dbPath string) error {
 	if text, ok := voice.Suggest(cands, now); ok {
 		payload.Speak = text
 	}
+	exps, err := s.CurrentExperiences()
+	if err != nil {
+		return err
+	}
+	if usage := providerUsageSummary(exps); len(usage) > 0 {
+		payload.Providers = usage
+	}
 	return json.NewEncoder(w).Encode(payload)
 }
 
@@ -1751,11 +1864,26 @@ func showStatus(w io.Writer, s *store.Store) error {
 	if tty {
 		greetIfReturned(out, s, conns, now)
 	}
+
+	// Providers is independent of whether any capability Connection has been
+	// born yet (a Provider's usage and the projection it feeds decay at
+	// different rates), so it is read once here and rendered in both branches
+	// below rather than only the len(conns) > 0 path.
+	exps, err := s.CurrentExperiences()
+	if err != nil {
+		return err
+	}
+	usage := providerUsageSummary(exps)
+
 	if len(conns) == 0 {
 		if tty {
 			fmt.Fprintf(out, "Tomo %s\n\n", voice.FirstMeeting())
 		}
 		fmt.Fprintln(out, "no connections yet — record a session and run `tomobit perceive`")
+		if len(usage) > 0 {
+			fmt.Fprintln(out)
+			return printProviderUsage(out, usage, now)
+		}
 		return nil
 	}
 
@@ -1775,6 +1903,14 @@ func showStatus(w io.Writer, s *store.Store) error {
 			fmt.Fprintf(out, "Tomo\n\n")
 		}
 	}
+
+	if len(usage) > 0 {
+		if err := printProviderUsage(out, usage, now); err != nil {
+			return err
+		}
+		fmt.Fprintln(out)
+	}
+
 	return printConnections(out, cands, now, tty)
 }
 

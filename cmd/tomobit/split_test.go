@@ -286,12 +286,15 @@ func TestRunSplitParallelGroupWiderThanCapCompletesEveryMember(t *testing.T) {
 
 // W3b: when --provider auto routes a wide group's members to the human executor,
 // they run off the goroutine path — a human has no stream — and still complete
-// (ADR-0028 Decision 4). An empty providers map makes "human" the only candidate,
-// so the routing is deterministic; the all-human group exercises exactly the
-// human branch of runGroupParallel (the mixed provider+human case cannot be
-// pinned deterministically, since auto's per-member lottery is nondeterministic).
+// (ADR-0028 Decision 4). An empty providers map plus a known human (ADR-0043
+// Decision 4: human is a candidate only in a context that already holds a
+// human capability connection) makes "human" the only candidate, so the
+// routing is deterministic; the all-human group exercises exactly the human
+// branch of runGroupParallel (the mixed provider+human case cannot be pinned
+// deterministically, since auto's per-member lottery is nondeterministic).
 func TestRunGroupParallelRunsAutoRoutedHumanMembers(t *testing.T) {
 	s := openTestStore(t)
+	knowHuman(t, s, "cap=implement")
 	saved := providers
 	providers = map[string]executor.Adapter{} // no adapters → auto can only route to human
 	t.Cleanup(func() { providers = saved })
@@ -336,6 +339,7 @@ func TestRunGroupParallelRunsAutoRoutedHumanMembers(t *testing.T) {
 // several subtasks needs.
 func TestExecuteSplitViewEmitsOneDecidedPerSubtaskWithItsOwnSID(t *testing.T) {
 	s := openTestStore(t)
+	knowHuman(t, s, "cap=implement") // ADR-0043 Decision 4: a blank human is no candidate
 	saved := providers
 	providers = map[string]executor.Adapter{} // auto's only candidate is human — deterministic
 	t.Cleanup(func() { providers = saved })

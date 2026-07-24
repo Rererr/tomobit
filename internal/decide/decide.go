@@ -286,6 +286,18 @@ func gateAll(conns []*core.Connection, kind, provider string, tokens []string, n
 	return cand
 }
 
+// KnowsCapability reports whether the ledger holds any capability connection
+// for target readable under tokens — i.e. whether Choose's gate would read a
+// real row rather than the Beta(1,1) blank slate. It answers by the same
+// finest-match subset rule the decision itself reads with (ADR-0013 Decision
+// 2), so "knowing a target in this context" and "deciding in this context"
+// can never diverge on what the context is. ADR-0043 Decision 4 gates human's
+// candidacy on this: ignorance is full exploration for a provider, but for
+// human it would be handing the task back to the user.
+func KnowsCapability(conns []*core.Connection, target string, tokens []string) bool {
+	return finestMatch(conns, core.ConnCapability, target, tokens) != nil
+}
+
 // finestMatch returns the finest-scoped connection of the kind/target whose
 // scope is contained in tokens — the ONE connection the Decision Engine
 // reads (ADR-0013 Decision 2: 判断は最細一致のみを読む). Ties on granularity

@@ -40,26 +40,25 @@ func duelEligible(providerExplicit bool, providerName string) bool {
 	return !providerExplicit || providerName == "auto"
 }
 
-// runnableProvider reports whether a gap's side names a registered adapter.
-// A gap may pair a provider with "human" (ADR-0018 — human runs on the same
-// ledger), but a human has no stream to run in a goroutine, so such a gap is
-// not a duel.
-func runnableProvider(name string) bool {
-	_, ok := providers[name]
-	return ok
-}
-
 // pickDuelGap returns the highest-VoI open gap whose scope is knowable before
 // the task runs (a subset of the pre-run tokens — realistically the capability
 // alone, since lang/framework are only perceived after the work) and whose
-// pair is two runnable providers. gaps arrive VoI-sorted (curiosity.Gaps), so
-// the first match is the one most worth settling by experiment.
+// pair is two launchable providers — registry ∩ PATH, the same ADR-0043
+// Decision 2 predicate auto's candidate list uses, because a duel is a real
+// run: a side whose binary is missing can only "lose" by never starting, and
+// a forfeit must never become a preference. The registry-only check would
+// re-admit that on any machine whose ledger knows a provider it no longer
+// has installed (the registry stays static by design). A gap may also pair a
+// provider with "human" (ADR-0018 — human runs on the same ledger), but a
+// human has no stream to run in a goroutine; human is never registered, so
+// the same predicate excludes it. Gaps arrive VoI-sorted (curiosity.Gaps),
+// so the first match is the one most worth settling by experiment.
 func pickDuelGap(gaps []curiosity.Gap, tokens []string) (curiosity.Gap, bool) {
 	for _, g := range gaps {
 		if !g.Scope.SubsetOf(tokens) {
 			continue
 		}
-		if runnableProvider(g.A) && runnableProvider(g.B) {
+		if launchableProvider(g.A, executableOnPath) && launchableProvider(g.B, executableOnPath) {
 			return g, true
 		}
 	}
@@ -215,10 +214,17 @@ func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, cap
 	}
 	wg.Wait()
 
-	// SIGINT hit both children; record the cancellation on each and the parent,
-	// and skip the (future) judgment — there is nothing to compare.
+	// SIGINT hit both children; record the cancellation on each started child
+	// and the parent, and skip the (future) judgment — there is nothing to
+	// compare. A side that never launched gets no task.cancelled either: a
+	// cancelled boundary still enters PendingSessions and would be perceived
+	// into an experience, while a launch that never happened has nothing for
+	// perception to read (ADR-0043 Decision 3).
 	if ctx.Err() != nil {
-		for _, sid := range childSID {
+		for i, sid := range childSID {
+			if !result[i].Started {
+				continue
+			}
 			if err := s.AppendEvent(sid, "task.cancelled", time.Now().UnixMilli(), nil); err != nil {
 				return err
 			}
@@ -226,8 +232,19 @@ func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, cap
 		return s.AppendEvent(parentSID, "task.cancelled", time.Now().UnixMilli(), nil)
 	}
 
-	bothProduced := true
+	bothStarted, bothProduced := true, true
 	for i, sid := range childSID {
+		// A side that never launched (missing binary, spawn failure) leaves no
+		// provider.error and no task boundary — the same non-evidence shape
+		// cmdDo gives a never-started run (ADR-0043 Decision 3). pickDuelGap
+		// should have kept such a side out; this catches the launch that fails
+		// anyway (PATH raced, spawn error), so the guarantee below — never by
+		// forfeit — holds even then. The failure is printed, not swallowed.
+		if !result[i].Started {
+			bothStarted, bothProduced = false, false
+			fmt.Fprintf(out, "duel: %s は起動できなかった（この側は経験に残さない）: %v\n", pair[i], runErr[i])
+			continue
+		}
 		if payload, need := providerErrorPayload(runErr[i], result[i]); need {
 			bothProduced = false
 			if err := s.AppendEvent(sid, "provider.error", time.Now().UnixMilli(), payload); err != nil {
@@ -248,7 +265,9 @@ func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, cap
 	// only when both sides produced something to compare: a failed side is
 	// judged by its own execution experience (its capability drops), never by
 	// forfeit. A draw (Enter) records nothing.
-	if !bothProduced {
+	if !bothStarted {
+		fmt.Fprintln(out, "duel: 片方が起動できなかったので好みは記録しない（不戦勝は好みにならない）")
+	} else if !bothProduced {
 		fmt.Fprintln(out, "duel: 片方が完走しなかったので好みは記録しない（両者は経験に残る）")
 	} else if in != nil {
 		if preferred, over, judged := duelVerdict(in, out, gap); judged {
