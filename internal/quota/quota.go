@@ -6,9 +6,11 @@
 // Decision 5). Both seams (HTTP, credentials) are injectable so every test
 // runs against fakes — no test touches real credentials or the network.
 //
-// The endpoints are unofficial and, as of 2026-07-24, unverified against the
-// live services (owner approval pending — ADR-0044 Context). The parsers
-// therefore treat a schema mismatch as an error worth reading, never as "0%".
+// The endpoints are unofficial but live-verified: on 2026-07-24, with the
+// owner's explicit approval, both returned HTTP 200 and the fixtures here pin
+// the measured schema (structure only — no real values; ADR-0044 Context).
+// Unofficial means unwarranted, so the parsers still treat a schema mismatch
+// as an error worth reading, never as "0%".
 package quota
 
 import (
@@ -98,6 +100,12 @@ func getJSON(ctx context.Context, doer Doer, url, bearer string, extra http.Head
 		// The fix is the user's, not tomobit's: tomobit reads credentials but
 		// never refreshes them (ADR-0044 Decision 1), so point at the CLI.
 		return nil, fmt.Errorf("GET %s: HTTP %d: token rejected — run the provider CLI once to re-login or refresh", url, resp.StatusCode)
+	case resp.StatusCode == http.StatusTooManyRequests:
+		// Measured 2026-07-24: a token from a DIFFERENT profile also comes
+		// back as 429 rate_limit_error, not 401, so this message must not
+		// assert which of the two happened — claiming "rate-limited" alone
+		// would be the quiet lie ADR-0044 Decision 5 forbids.
+		return nil, fmt.Errorf("GET %s: HTTP 429: rate-limited — or the token belongs to a different profile (a mixed-up profile surfaces as 429, not 401): %s", url, bodySnippet(body))
 	case resp.StatusCode != http.StatusOK:
 		return nil, fmt.Errorf("GET %s: HTTP %d: %s", url, resp.StatusCode, bodySnippet(body))
 	}

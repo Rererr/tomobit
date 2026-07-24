@@ -41,8 +41,8 @@ type CodexFileToken struct {
 	Now  func() time.Time // nil = time.Now; injected so staleness is testable
 }
 
-// codexAuth is the CodexBar-derived shape of auth.json. Unverified against a
-// live file in this repo (ADR-0044 Context).
+// codexAuth is the auth.json shape (live-verified 2026-07-24: tokens with
+// access_token under auth_mode "chatgpt", last_refresh in RFC3339).
 type codexAuth struct {
 	Tokens struct {
 		AccessToken string `json:"access_token"`
@@ -64,7 +64,7 @@ func (s CodexFileToken) Token() (string, error) {
 	}
 	if a.LastRefresh != "" {
 		// An unparseable last_refresh falls through to the request: the
-		// endpoint, not this guess at the file schema, is the authority on
+		// endpoint, not this reading of the file, is the authority on
 		// whether the token still works.
 		if t, err := time.Parse(time.RFC3339, a.LastRefresh); err == nil {
 			if nowOf(s.Now).Sub(t) > codexAuthStaleAfter {
@@ -81,17 +81,23 @@ type CodexFetcher struct {
 	Tokens TokenSource
 	HTTP   Doer
 	Now    func() time.Time
+	// CredentialOrigin names the auth file Tokens reads, for the same
+	// honesty as ClaudeFetcher's: a fetch error must say whose credentials
+	// failed, especially with $CODEX_HOME able to point elsewhere.
+	CredentialOrigin string
 }
 
-// NewCodexFetcher wires the default seams, mirroring NewClaudeFetcher.
+// NewCodexFetcher wires the default seams: the CLI's own auth file and an
+// HTTP client that times out instead of hanging a status view.
 func NewCodexFetcher() (*CodexFetcher, error) {
 	p, err := CodexAuthPath()
 	if err != nil {
 		return nil, err
 	}
 	return &CodexFetcher{
-		Tokens: CodexFileToken{Path: p},
-		HTTP:   &http.Client{Timeout: fetchTimeout},
+		Tokens:           CodexFileToken{Path: p},
+		HTTP:             &http.Client{Timeout: fetchTimeout},
+		CredentialOrigin: p,
 	}, nil
 }
 
@@ -100,61 +106,78 @@ func (f *CodexFetcher) Provider() string { return codexProvider }
 func (f *CodexFetcher) Fetch(ctx context.Context) (Snapshot, error) {
 	tok, err := f.Tokens.Token()
 	if err != nil {
-		return Snapshot{}, fmt.Errorf("%s quota: %w", codexProvider, err)
+		return Snapshot{}, f.fetchError(err)
 	}
 	body, err := getJSON(ctx, f.HTTP, codexUsageURL, tok, nil)
 	if err != nil {
-		return Snapshot{}, fmt.Errorf("%s quota: %w", codexProvider, err)
+		return Snapshot{}, f.fetchError(err)
 	}
 	now := nowOf(f.Now)
 	windows, err := parseCodexUsage(body, now)
 	if err != nil {
-		return Snapshot{}, fmt.Errorf("%s quota: %w", codexProvider, err)
+		return Snapshot{}, f.fetchError(err)
 	}
 	return Snapshot{Provider: codexProvider, Windows: windows, ObservedAt: now}, nil
 }
 
-// codexRateWindow is the CodexBar-derived shape of one window: the same
-// triple the codex CLI streams internally (used_percent / window_minutes /
-// resets_in_seconds).
-type codexRateWindow struct {
-	UsedPercent     float64 `json:"used_percent"`
-	WindowMinutes   int64   `json:"window_minutes"`
-	ResetsInSeconds int64   `json:"resets_in_seconds"`
+func (f *CodexFetcher) fetchError(err error) error {
+	if f.CredentialOrigin != "" {
+		return fmt.Errorf("%s quota (credentials: %s): %w", codexProvider, f.CredentialOrigin, err)
+	}
+	return fmt.Errorf("%s quota: %w", codexProvider, err)
 }
 
-// parseCodexUsage reads the primary (5h) and secondary (weekly) windows.
-// Absent both is a schema mismatch worth a loud error, for the same reason as
-// parseClaudeUsage: an empty snapshot would read as "no limits".
+// codexWindow is one rate-limit window as measured 2026-07-24 (HTTP 200):
+// used_percent 0–100, spans in seconds, reset_at in unix epoch seconds —
+// unlike Claude's RFC3339 string. parseCodexUsage normalizes both dialects
+// into Window.ResetsAt so no caller ever tells the vendors' clocks apart.
+type codexWindow struct {
+	UsedPercent        float64 `json:"used_percent"`
+	LimitWindowSeconds int64   `json:"limit_window_seconds"`
+	ResetAfterSeconds  int64   `json:"reset_after_seconds"`
+	ResetAt            int64   `json:"reset_at"`
+}
+
+// parseCodexUsage reads the primary (5h) and secondary (weekly) windows from
+// rate_limit; either may be null. The same response carries user_id /
+// account_id / email / plan_type — deliberately not decoded: email is
+// personal data with no seat in a Snapshot, and a field never decoded cannot
+// leak into an error or a view. additional_rate_limits (per-model windows)
+// and credits are likewise left undecoded until a view needs them. Zero
+// readable windows is a schema mismatch worth a loud error, because silently
+// showing nothing would read as "no limits".
 func parseCodexUsage(body []byte, now time.Time) ([]Window, error) {
 	var raw struct {
-		RateLimits struct {
-			Primary   *codexRateWindow `json:"primary"`
-			Secondary *codexRateWindow `json:"secondary"`
-		} `json:"rate_limits"`
+		RateLimit struct {
+			Primary   *codexWindow `json:"primary_window"`
+			Secondary *codexWindow `json:"secondary_window"`
+		} `json:"rate_limit"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("parse usage response: %w", err)
 	}
 	var windows []Window
-	appendWindow := func(w *codexRateWindow, fallbackLabel string) {
+	appendWindow := func(w *codexWindow, fallbackLabel string) {
 		if w == nil {
 			return
 		}
 		var resetsAt time.Time
-		if w.ResetsInSeconds > 0 {
-			resetsAt = now.Add(time.Duration(w.ResetsInSeconds) * time.Second)
+		switch {
+		case w.ResetAt > 0:
+			resetsAt = time.Unix(w.ResetAt, 0)
+		case w.ResetAfterSeconds > 0:
+			resetsAt = now.Add(time.Duration(w.ResetAfterSeconds) * time.Second)
 		}
 		windows = append(windows, Window{
-			Label:       codexWindowLabel(w.WindowMinutes, fallbackLabel),
+			Label:       codexWindowLabel(w.LimitWindowSeconds, fallbackLabel),
 			UsedPercent: w.UsedPercent,
 			ResetsAt:    resetsAt,
 		})
 	}
-	appendWindow(raw.RateLimits.Primary, "primary")
-	appendWindow(raw.RateLimits.Secondary, "secondary")
+	appendWindow(raw.RateLimit.Primary, "primary")
+	appendWindow(raw.RateLimit.Secondary, "secondary")
 	if len(windows) == 0 {
-		return nil, errors.New("no rate_limits windows in the response — the live schema differs from the CodexBar-derived expectation; pin it against the real endpoint (ADR-0044 Consequences)")
+		return nil, errors.New("no rate_limit windows in the response — the schema drifted from the one measured 2026-07-24; re-pin it against the live endpoint (ADR-0044 Consequences)")
 	}
 	return windows, nil
 }
@@ -163,16 +186,21 @@ func parseCodexUsage(body []byte, now time.Time) ([]Window, error) {
 // keys carry no meaning to a human (primary/secondary). Falls back to the key
 // when the span is absent, so a schema drift degrades to a vaguer label, not
 // a wrong one.
-func codexWindowLabel(minutes int64, fallback string) string {
-	const minutesPerDay = 24 * 60
+func codexWindowLabel(seconds int64, fallback string) string {
+	const (
+		secondsPerHour = 60 * 60
+		secondsPerDay  = 24 * secondsPerHour
+	)
 	switch {
-	case minutes <= 0:
+	case seconds <= 0:
 		return fallback
-	case minutes%minutesPerDay == 0:
-		return fmt.Sprintf("%dd", minutes/minutesPerDay)
-	case minutes%60 == 0:
-		return fmt.Sprintf("%dh", minutes/60)
+	case seconds%secondsPerDay == 0:
+		return fmt.Sprintf("%dd", seconds/secondsPerDay)
+	case seconds%secondsPerHour == 0:
+		return fmt.Sprintf("%dh", seconds/secondsPerHour)
+	case seconds%60 == 0:
+		return fmt.Sprintf("%dm", seconds/60)
 	default:
-		return fmt.Sprintf("%dm", minutes)
+		return fmt.Sprintf("%ds", seconds)
 	}
 }

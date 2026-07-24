@@ -11,14 +11,24 @@ import (
 	"time"
 )
 
-// claudeUsageFixture is built from the structure the CodexBar implementation
-// survey reported (ADR-0044 Context) — hand-written, no real data.
+// claudeUsageFixture mirrors the schema measured live on 2026-07-24 (HTTP
+// 200) — structure from the real response, every value a hand-written dummy:
+// utilization is 0–100, resets_at is RFC3339 with microseconds and a numeric
+// offset, the model/kind keys can be null, and limits/spend/extra_usage/
+// member_dashboard_available are not utilization windows.
 const claudeUsageFixture = `{
-	"five_hour":      {"utilization": 34.5, "resets_at": "2026-07-24T12:00:00Z"},
-	"seven_day":      {"utilization": 61.0, "resets_at": "2026-07-28T00:00:00Z"},
-	"seven_day_opus": {"utilization": 12.0, "resets_at": "2026-07-28T00:00:00Z"},
-	"extra_usage":    {"utilization": 0.0},
-	"account":        {"email_hash": "irrelevant"}
+	"five_hour": {"utilization": 34.5, "resets_at": "2026-07-24T12:00:00.123456+00:00", "limit_dollars": null, "used_dollars": null, "remaining_dollars": null},
+	"seven_day": {"utilization": 61.0, "resets_at": "2026-07-28T00:00:00+00:00", "limit_dollars": null, "used_dollars": null, "remaining_dollars": null},
+	"seven_day_opus": null,
+	"seven_day_sonnet": null,
+	"seven_day_oauth_apps": null,
+	"limits": [
+		{"kind": "session", "group": "default", "percent": 35, "severity": "none", "resets_at": "2026-07-24T12:00:00+00:00", "scope": null, "is_active": false},
+		{"kind": "weekly_scoped", "group": "default", "percent": 3, "severity": "none", "resets_at": "2026-07-28T00:00:00+00:00", "scope": {"model": {"id": null, "display_name": "Opus"}, "surface": null}, "is_active": false}
+	],
+	"extra_usage": {"is_enabled": false, "monthly_limit": null, "used_credits": null, "utilization": null},
+	"spend": {"used": {"amount_minor": 0, "currency": "USD", "exponent": 2}, "limit": null, "percent": 0},
+	"member_dashboard_available": true
 }`
 
 func TestClaudeFetchSendsBearerAndOAuthBetaToTheVendorEndpointOnly(t *testing.T) {
@@ -40,7 +50,7 @@ func TestClaudeFetchSendsBearerAndOAuthBetaToTheVendorEndpointOnly(t *testing.T)
 	}
 }
 
-func TestClaudeFetchParsesEveryUtilizationWindowAndSkipsNonWindowKeys(t *testing.T) {
+func TestClaudeFetchReadsTheMeasuredSchemaNullKeysAndNonWindowsSkipped(t *testing.T) {
 	f := &ClaudeFetcher{
 		Tokens: staticToken("tok"),
 		HTTP:   &fakeDoer{resp: jsonResponse(200, claudeUsageFixture)},
@@ -60,24 +70,53 @@ func TestClaudeFetchParsesEveryUtilizationWindowAndSkipsNonWindowKeys(t *testing
 	for _, w := range snap.Windows {
 		labels = append(labels, w.Label)
 	}
-	// five_hour/seven_day lead, the rest lexical; "account" is not a window.
-	want := []string{"five_hour", "seven_day", "extra_usage", "seven_day_opus"}
+	// Null model keys and limits/spend/extra_usage(null utilization) are not
+	// windows; only the two populated ones remain.
+	want := []string{"five_hour", "seven_day"}
 	if fmt.Sprint(labels) != fmt.Sprint(want) {
 		t.Fatalf("windows = %v, want %v", labels, want)
 	}
 	if snap.Windows[0].UsedPercent != 34.5 {
-		t.Errorf("five_hour utilization = %v", snap.Windows[0].UsedPercent)
+		t.Errorf("utilization is a 0-100 percent taken as-is, got %v", snap.Windows[0].UsedPercent)
 	}
-	if want := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC); !snap.Windows[0].ResetsAt.Equal(want) {
-		t.Errorf("five_hour resets_at = %v, want %v", snap.Windows[0].ResetsAt, want)
+	// The measured resets_at form: microseconds plus a numeric offset.
+	wantReset := time.Date(2026, 7, 24, 12, 0, 0, 123456000, time.UTC)
+	if !snap.Windows[0].ResetsAt.Equal(wantReset) {
+		t.Errorf("five_hour resets_at = %v, want %v", snap.Windows[0].ResetsAt, wantReset)
 	}
-	if !snap.Windows[2].ResetsAt.IsZero() {
-		t.Errorf("a window without resets_at must stay zero (the vendor didn't say), got %v", snap.Windows[2].ResetsAt)
+}
+
+func TestClaudeParsePopulatedModelWeekliesJoinAfterTheSharedWindows(t *testing.T) {
+	windows, err := parseClaudeUsage([]byte(`{
+		"seven_day_opus": {"utilization": 12.0, "resets_at": "2026-07-28T00:00:00+00:00"},
+		"seven_day":      {"utilization": 61.0, "resets_at": "2026-07-28T00:00:00+00:00"},
+		"five_hour":      {"utilization": 34.5, "resets_at": "2026-07-24T12:00:00+00:00"}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var labels []string
+	for _, w := range windows {
+		labels = append(labels, w.Label)
+	}
+	want := []string{"five_hour", "seven_day", "seven_day_opus"}
+	if fmt.Sprint(labels) != fmt.Sprint(want) {
+		t.Fatalf("windows = %v, want %v", labels, want)
+	}
+}
+
+func TestClaudeParseWindowWithoutResetsAtStaysZeroNotInvented(t *testing.T) {
+	windows, err := parseClaudeUsage([]byte(`{"five_hour": {"utilization": 5.0}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !windows[0].ResetsAt.IsZero() {
+		t.Errorf("a missing resets_at means 'the vendor didn't say', got %v", windows[0].ResetsAt)
 	}
 }
 
 func TestClaudeFetchWithoutAnyUtilizationWindowIsASchemaErrorNotAnEmptySnapshot(t *testing.T) {
-	f := &ClaudeFetcher{Tokens: staticToken("tok"), HTTP: &fakeDoer{resp: jsonResponse(200, `{"account": {}}`)}}
+	f := &ClaudeFetcher{Tokens: staticToken("tok"), HTTP: &fakeDoer{resp: jsonResponse(200, `{"member_dashboard_available": true}`)}}
 	_, err := f.Fetch(context.Background())
 	if err == nil {
 		t.Fatal("an empty snapshot would read as 'no limits' — must error instead")
@@ -101,6 +140,28 @@ func TestClaudeFetchRejectedTokenNamesTheUsersFixWithoutEchoingTheToken(t *testi
 	}
 }
 
+func TestClaudeFetch429NamesTheCredentialOriginAndBothPossibleCauses(t *testing.T) {
+	// Measured 2026-07-24: a token from a different profile surfaces as HTTP
+	// 429 rate_limit_error, not 401 — so the error must carry which
+	// credentials were read and must not claim "rate-limited" as the sole
+	// cause.
+	f := &ClaudeFetcher{
+		Tokens:           staticToken("tok"),
+		HTTP:             &fakeDoer{resp: jsonResponse(429, `{"type":"error","error":{"type":"rate_limit_error"}}`)},
+		CredentialOrigin: `keychain "Claude Code-credentials-5034c31c"`,
+	}
+	_, err := f.Fetch(context.Background())
+	if err == nil {
+		t.Fatal("429 must be an error")
+	}
+	if !strings.Contains(err.Error(), `keychain "Claude Code-credentials-5034c31c"`) {
+		t.Errorf("the error must say which profile's credentials were read: %v", err)
+	}
+	if !strings.Contains(err.Error(), "different profile") {
+		t.Errorf("the error must admit the wrong-profile cause, not just 'rate-limited': %v", err)
+	}
+}
+
 func TestClaudeFetchNon200IsAnErrorCarryingTheStatus(t *testing.T) {
 	f := &ClaudeFetcher{Tokens: staticToken("tok"), HTTP: &fakeDoer{resp: jsonResponse(503, "overloaded")}}
 	_, err := f.Fetch(context.Background())
@@ -116,6 +177,59 @@ func TestClaudeFetchMakesNoRequestWhenTheTokenIsUnavailable(t *testing.T) {
 	}
 	if _, err := f.Fetch(context.Background()); err == nil || !strings.Contains(err.Error(), "not logged in") {
 		t.Fatalf("the credential failure must surface as-is, got %v", err)
+	}
+}
+
+func TestClaudeKeychainServiceNameDefaultProfileIsTheBareName(t *testing.T) {
+	if got := ClaudeKeychainServiceName(""); got != "Claude Code-credentials" {
+		t.Errorf("service = %q", got)
+	}
+}
+
+func TestClaudeKeychainServiceNameDerivesTheMeasuredSuffixFromConfigDir(t *testing.T) {
+	// Pinned against the real machine (2026-07-24): the derived name matched
+	// the existing Keychain item for this profile.
+	if got := ClaudeKeychainServiceName("/Users/example/.claude-personal"); got != "Claude Code-credentials-5034c31c" {
+		t.Errorf("service = %q, want Claude Code-credentials-5034c31c", got)
+	}
+}
+
+func TestClaudeKeychainTokenReadsViaTheInjectedReaderOnly(t *testing.T) {
+	var askedService string
+	src := ClaudeKeychainToken{
+		Service: "Claude Code-credentials-5034c31c",
+		Read: func(service string) ([]byte, error) {
+			askedService = service
+			return []byte(`{"claudeAiOauth":{"accessToken":"tok-kc","expiresAt":0}}`), nil
+		},
+	}
+	tok, err := src.Token()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "tok-kc" {
+		t.Errorf("token = %q", tok)
+	}
+	if askedService != "Claude Code-credentials-5034c31c" {
+		t.Errorf("must ask the Keychain for exactly the derived service, got %q", askedService)
+	}
+}
+
+func TestClaudeKeychainTokenErrorsNameTheServiceSoTheProfileIsDiagnosable(t *testing.T) {
+	src := ClaudeKeychainToken{
+		Service: "Claude Code-credentials-5034c31c",
+		Read:    func(string) ([]byte, error) { return nil, errors.New("item not found") },
+	}
+	_, err := src.Token()
+	if err == nil || !strings.Contains(err.Error(), "Claude Code-credentials-5034c31c") {
+		t.Fatalf("the error must say which Keychain item was read, got %v", err)
+	}
+}
+
+func TestClaudeKeychainTokenWithoutAReaderIsAnErrorNotAKeychainAccess(t *testing.T) {
+	_, err := ClaudeKeychainToken{Service: "Claude Code-credentials"}.Token()
+	if err == nil || !strings.Contains(err.Error(), "no keychain reader wired") {
+		t.Fatalf("an unwired reader must fail loudly, got %v", err)
 	}
 }
 

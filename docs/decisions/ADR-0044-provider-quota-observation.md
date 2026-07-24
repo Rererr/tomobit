@@ -1,7 +1,8 @@
 # ADR-0044: Provider の残量観測 — 公式手段は無いが、自分の鍵で自分の残量を聞く経路は実在する
 
 - Status: **Proposed**（2026-07-24 起草。初稿は「取得不可・推定しない」を結論としたが、
-  同日の CodexBar 実装調査で前提が変わり全面改稿。経路ごとの採否は所有者裁定待ち）
+  同日の CodexBar 実装調査で前提が変わり全面改稿。さらに同日、所有者の明示許可の下で
+  実エンドポイントを実測しスキーマを確定（下記 Context）。経路ごとの採否は所有者裁定待ち）
 - Date: 2026-07-24
 - 着想元: [CodexBar](https://github.com/steipete/CodexBar)（MIT, Peter Steinberger）。
   **もらったのは経路の存在と仕組みだけ**で、コードは独立実装（`internal/quota/`）
@@ -43,14 +44,12 @@ CodexBar（MIT・macOSメニューバー常駐）は、**使用者自身の OAut
 
 | # | 経路 | 仕組み | 脆弱性 | 侵襲度 |
 |---|---|---|---|---|
-| A | **OAuthトークン → ベンダーのusage端点** | claude: `~/.claude/.credentials.json` の `claudeAiOauth.accessToken` で `GET api.anthropic.com/api/oauth/usage`（`anthropic-beta: oauth-2025-04-20`、`user:profile` スコープ）。codex: `~/.codex/auth.json`（`$CODEX_HOME` 優先）の `access_token` で `GET chatgpt.com/backend-api/wham/usage` | 非公式API。消えたら**エラーになる**（誤読はしない） | 自分の鍵で、鍵の発行元に、自分のデータを聞く |
+| A | **OAuthトークン → ベンダーのusage端点** | claude: `claudeAiOauth.accessToken`（macOSでは Keychain、後述の実測3。ファイル型インストールでは `~/.claude/.credentials.json`）で `GET api.anthropic.com/api/oauth/usage`（`anthropic-beta: oauth-2025-04-20`、`user:profile` スコープ）。codex: `~/.codex/auth.json`（`$CODEX_HOME` 優先）の `tokens.access_token` で `GET chatgpt.com/backend-api/wham/usage` | 非公式API。消えたら**エラーになる**（誤読はしない） | 自分の鍵で、鍵の発行元に、自分のデータを聞く |
 | B | PTYで対話TUIを駆動し `/usage`・`/status` をスクレイプ | 擬似端末で子プロセスを飼い、画面文字列を正規表現で拾う | 表示文言の変更で壊れ、**壊れ方が「誤読」になりうる** | 自分のCLIだが、内部UIへの寄生 |
 | C | ブラウザの cookie DB を読んで Web ダッシュボードを叩く | Safari/Chrome の cookie 格納庫から セッションを取り出す | ブラウザの暗号化・TCCと恒常的に戦う | **他アプリの資格情報格納庫に手を伸ばす** |
 | D | `codexbar --format json` へ shell out | 外部CLIの出力をパースする | 他人の出力形式への依存（Bと同型の脆さ） | 間接的にA〜Cを実行させる。macOS専用依存 |
 
-経路Aが返す値は**ベンダー自身が集計した利用率**（claude: `five_hour` /
-`seven_day` / モデル別週次 / `extra_usage` の%とリセット時刻。codex:
-5時間枠・週次枠の%とリセット）である。
+経路Aが返す値は**ベンダー自身が集計した利用率**である（実スキーマは後述の実測1・2）。
 
 ここで初稿の核心的な論拠を再検討する必要が生じた。初稿 Decision 1 は
 「tomobit が観測できるのは tomobit 経由の消費だけ → 上限−消費で作った残量は
@@ -60,13 +59,65 @@ CodexBar（MIT・macOSメニューバー常駐）は、**使用者自身の OAut
 ベンダー側の観測値**である。初稿の表題「残量は観測できない」は、正しくは
 「**tomobit 単独では**観測できない。ベンダーに聞けば観測できる（非公式だが）」だった。
 
-### 未実証の明記
+### 実測（2026-07-24、所有者の明示許可の下で実施）
 
-**実エンドポイントへのリクエストは未実施**（所有者の許可待ち）。上の経路と
-レスポンス構造は CodexBar の実装調査から判明した形であり、実スキーマ・
-utilization の単位（0〜100 か 0〜1 か）・エラー系の挙動は実証で確定していない。
-`internal/quota/` のプロトタイプは注入したフェイクHTTP・フェイク資格情報のみで
-テストしており、実資格情報・実ネットワークには一切触れていない。
+所有者の実資格情報で両エンドポイントを叩き、**両方 HTTP 200 で取得できた**。
+以下はその実測。値は所有者の実データなので記さない（構造・単位のみ）。
+トークン値・email・user_id は本ADRにも台帳にも書かない。
+
+**実測1: claude（`GET api.anthropic.com/api/oauth/usage`、Bearer + `anthropic-beta: oauth-2025-04-20`、Max プラン、scopes に `user:profile` あり）**
+
+- `five_hour` / `seven_day`: `{utilization, resets_at, limit_dollars: null, used_dollars: null, remaining_dollars: null}`
+  - **`utilization` は 0–100 のパーセント**（0–1 ではない）
+  - **`resets_at` は RFC3339 文字列**（マイクロ秒＋数値オフセット付き。形の例: `…T05:09:59.817927+00:00`）
+- `seven_day_opus` / `seven_day_sonnet` / `seven_day_oauth_apps` 等のモデル別・種別キーは
+  **null で返りうる**（今回は全て null）。未知キー・null キーを必須扱いしてはならない
+- `limits`: 配列。各要素 `{kind, group, percent(整数), severity, resets_at, scope, is_active}`。
+  観測された `kind` は `session` / `weekly_all` / `weekly_scoped`、`scope` は
+  `{model: {id: null, display_name}, surface: null}` の形を取りうる
+- `extra_usage`: `{is_enabled, monthly_limit: null, used_credits: null, utilization: null, …}`
+- `spend`: `{used: {amount_minor: int, currency, exponent}, limit: null, percent}` —
+  **金額は minor unit + exponent**。浮動小数で受けてはならない
+- `member_dashboard_available: bool`
+
+**実測2: codex（`GET chatgpt.com/backend-api/wham/usage`、Bearer は `~/.codex/auth.json` の `tokens.access_token`、`auth_mode: "chatgpt"`、`last_refresh` は RFC3339）**
+
+- トップレベルに `user_id` / `account_id` / **`email`** / `plan_type` —
+  **email は個人情報。Snapshot に持ち込まない・ログに出さない**（取得器は最初から decode しない）
+- `rate_limit`: `{allowed, limit_reached, primary_window: {…}|null, secondary_window: {…}|null}`。
+  window は `{used_percent(0–100), limit_window_seconds, reset_after_seconds, reset_at}`
+  - **`reset_at` は unix epoch 秒（整数）** — claude の RFC3339 文字列と方言が違う。
+    取得器の `Window` 型が時刻に正規化して吸収する
+- `additional_rate_limits`: 配列 `[{limit_name, metered_feature, rate_limit: {同上}}]`（モデル別枠）
+- `credits`: `{has_credits, unlimited, overage_limit_reached, balance(文字列), approx_local_messages, approx_cloud_messages}`
+- `rate_limit_reset_credits`: `{available_count, applicable_available_count}`。
+  別端点 `…/wham/rate-limit-reset-credits` も 200 で返る
+
+**実測3【設計に影響】: claude の資格情報の在処はプロファイル依存**
+
+`~/.claude/.credentials.json` も `~/.claude-personal/.credentials.json` も
+**存在しなかった**。実体は macOS Keychain にあり、サービス名が
+`CLAUDE_CONFIG_DIR` に依存する:
+
+- 既定プロファイル: `Claude Code-credentials`
+- 非既定プロファイル: **`Claude Code-credentials-` + sha256(configDir) 先頭8桁（16進小文字）**
+  - 実証: `/Users/example/.claude-personal` → `Claude Code-credentials-5034c31c`（計算と実在項目が一致）
+
+tomobit は `~/.tomobit/config.json` の `claude_config_dir` を既に持っている
+（claude-code アダプタがこの値で起動している）ので、取得器は**設定から
+サービス名を決定的に導ける**。
+
+さらに重要な失敗モードを実測した: **既定サービス名（別プロファイル）の
+トークンで叩くと、401 ではなく HTTP 429 `rate_limit_error` が返る**。
+つまり「資格情報の取り違え」が「レート制限」に化ける。素朴に既定の場所だけ
+読む実装は、残量が読めない理由を取り違えて、しかも黙って誤った説明をする —
+Decision 5 が禁じる型の事故である（対処は Decision 5 追補）。
+
+**取り込み範囲**: 取得器が Snapshot にするのは utilization を持つ窓だけ
+（claude: `five_hour`/`seven_day`＋モデル別週次が非nullなら。codex:
+`rate_limit` の2窓）。`limits[]` のスコープ付き窓・`additional_rate_limits`・
+`spend`・`credits` は構造を本ADRに記録した上で**取り込まない** —
+読む View が現れるまで、依存するスキーマ表面を増やさない。
 
 ### 既に出しているもの
 
@@ -98,11 +149,17 @@ tomobit 経由の消費実績（claude-code の `cost_usd` 合計、codex のト
 
 採る場合の範囲も最小に絞る:
 
-- 資格情報は**ファイルのみ**読む（`~/.claude/.credentials.json`、
-  `$CODEX_HOME/auth.json` または `~/.codex/auth.json`）。macOS Keychain の
-  `Claude Code-credentials` は場所として既知だが実装しない —
-  `security` への shell out は新しい表面であり、ファイルが無い実機が
-  現れてから再訪する
+- 読む場所は **CLI 自身が資格情報を置いた場所だけ**。codex は
+  `$CODEX_HOME/auth.json` または `~/.codex/auth.json`。claude は実測3の通り
+  macOS では Keychain が実体（初稿段階の「ファイルのみ・Keychain は実機が
+  現れてから」は、所有者の実機にファイルが無いと実測された時点で解除条件に
+  到達した）。サービス名は `claude_config_dir` から決定的に導出する
+  （`quota.ClaudeKeychainServiceName` — 実行に使うプロファイルと同じ鍵を読む。
+  実測3の 429 事故は、既定サービス名を無条件に読む実装が引き起こす）。
+  Keychain の実読（`security find-generic-password` への shell out）は
+  配線時に実装し、取得器には注入可能なリーダの座席だけを置く。
+  ファイル `~/.claude/.credentials.json` はファイル型インストールの
+  フォールバックとして残す
 - トークンのリフレッシュは実装しない。claude の期限切れ・codex の
   `last_refresh` 8日超は「CLI を一度起動してください」というエラーで返す。
   リフレッシュフローを持った瞬間、tomobit は資格情報の**管理者**になる —
@@ -142,6 +199,18 @@ Bは表示文言が変わったとき「エラー」ではなく「誤読した�
   台帳の消費実績から残量を「補完」することはしない — 楽観側に外れる論拠は
   一字も変わっていない
 - 器官が黙ってそれらしい数字を出すより、境界を見せる方が相棒として誠実である
+
+**追補（実測3を受けて）: 「不明」の理由も正直でなければならない。**
+プロファイルを取り違えたトークンは 401 ではなく **429 に化ける**と実測された。
+「レート制限です」とだけ言うエラーは、この場合**もっともらしい嘘**になる。
+よって:
+
+- 取得器のエラーは**どの資格情報を読んだか**（Keychain サービス名 or ファイル
+  パス）を必ず含める（`ClaudeFetcher.CredentialOrigin` / `CodexFetcher` 同）。
+  トークン値そのものは決してエラーに載せない
+- 429 のエラー文言は「レート制限 **または** 別プロファイルのトークン」と
+  両方の可能性を言う。サーバ側からは区別できないものを、器官が勝手に
+  一方に断定しない
 
 ## Decision 6: 残量を決定則（ADR-0012）の入力にはしない【初稿 Decision 3 の維持・理由を差し替え】
 
@@ -206,15 +275,22 @@ SCHEMA 追記が要る。7a より重いので、7a を先に、7b は必要が�
 
 ## Consequences
 
-- 採用時（Decision 1 承認後）:
-  1. **実証**（所有者の同席または明示許可の下で）: 実資格情報で両端点を叩き、
-     スキーマ・utilization の単位・401/403 系の文言を pin する。
-     `internal/quota/` のフィクスチャとパーサをそれに追随させる
+- **実証は完了**（2026-07-24、所有者の明示許可の下）: 両端点 HTTP 200、
+  スキーマ・単位・時刻方言・プロファイル依存・429 の失敗モードを pin し、
+  `internal/quota/` のフィクスチャとパーサは実測スキーマに追随済み
+  （フィクスチャの値は自作ダミー。実データは持ち込んでいない）
+- 採用時（Decision 1 承認後）に残る作業:
+  1. Keychain リーダの実装（`security find-generic-password` shell out）と
+     `claude_config_dir` からの配線 — 導出関数と注入座席は実装済み
   2. 配線: `status --view json` に quota フィールド、人間向け `status` に残量行、
      GUI へは ADR-0039 の経路で流す。表示は「ベンダー申告の利用率」であって
      tomobit の保証ではない旨を文言で担保する
-  3. 資格情報ファイルの読みは fetch の瞬間だけ・読み捨て。トークンを DB・
-     ログ・エラーメッセージのどこにも書かない
+  3. Go 取得器そのものの実端点疎通（実測は HTTP クライアント直叩きで行った。
+     取得器コードは実端点をまだ走っていない — フェイク上の全テスト通過を
+     「完了」と呼ばない）
+  4. 資格情報の読みは fetch の瞬間だけ・読み捨て。トークンを DB・
+     ログ・エラーメッセージのどこにも書かない（エラーに載るのは
+     Keychain サービス名 / ファイルパスまで — Decision 5 追補）
 - 非公式端点が消えた日: エラー → 「不明（理由）」に自然に退化する。
   本ADRの改版は不要（Decision 5 が吸収する）
 - Decision 1 が却下された場合: `internal/quota/` は配線されないまま削除し、

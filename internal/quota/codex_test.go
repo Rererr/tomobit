@@ -2,6 +2,7 @@ package quota
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,13 +10,28 @@ import (
 	"time"
 )
 
-// codexUsageFixture is built from the structure the CodexBar implementation
-// survey reported (ADR-0044 Context) — hand-written, no real data.
+// codexUsageFixture mirrors the schema measured live on 2026-07-24 (HTTP
+// 200) — structure from the real response, every value a hand-written dummy:
+// rate_limit (singular) holds nullable primary/secondary windows with
+// used_percent 0–100, spans in seconds, and reset_at in unix epoch seconds;
+// the response also carries user_id / account_id / email / plan_type and
+// additional_rate_limits / credits, none of which may enter a Snapshot.
 const codexUsageFixture = `{
-	"rate_limits": {
-		"primary":   {"used_percent": 42.0, "window_minutes": 300,   "resets_in_seconds": 3600},
-		"secondary": {"used_percent": 80.5, "window_minutes": 10080, "resets_in_seconds": 86400}
-	}
+	"user_id": "user-dummy",
+	"account_id": "account-dummy",
+	"email": "dummy-owner@example.com",
+	"plan_type": "plus",
+	"rate_limit": {
+		"allowed": true,
+		"limit_reached": false,
+		"primary_window":   {"used_percent": 42.0, "limit_window_seconds": 18000,  "reset_after_seconds": 3600,  "reset_at": 1786000000},
+		"secondary_window": {"used_percent": 80.5, "limit_window_seconds": 604800, "reset_after_seconds": 86400, "reset_at": 1786500000}
+	},
+	"additional_rate_limits": [
+		{"limit_name": "gpt-5", "metered_feature": "codex", "rate_limit": {"allowed": true, "limit_reached": false, "primary_window": null, "secondary_window": null}}
+	],
+	"credits": {"has_credits": false, "unlimited": false, "overage_limit_reached": false, "balance": "0", "approx_local_messages": [0, 0], "approx_cloud_messages": [0, 0]},
+	"rate_limit_reset_credits": {"available_count": 0, "applicable_available_count": 0}
 }`
 
 func TestCodexFetchSendsBearerToTheVendorEndpointOnly(t *testing.T) {
@@ -34,12 +50,11 @@ func TestCodexFetchSendsBearerToTheVendorEndpointOnly(t *testing.T) {
 	}
 }
 
-func TestCodexFetchNamesWindowsByTheirSpanAndDerivesResetTimes(t *testing.T) {
-	now := time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC)
+func TestCodexFetchNormalizesEpochResetAtAndNamesWindowsByTheirSpan(t *testing.T) {
 	f := &CodexFetcher{
 		Tokens: staticToken("tok"),
 		HTTP:   &fakeDoer{resp: jsonResponse(200, codexUsageFixture)},
-		Now:    func() time.Time { return now },
+		Now:    func() time.Time { return time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC) },
 	}
 	snap, err := f.Fetch(context.Background())
 	if err != nil {
@@ -51,22 +66,75 @@ func TestCodexFetchNamesWindowsByTheirSpanAndDerivesResetTimes(t *testing.T) {
 	if len(snap.Windows) != 2 {
 		t.Fatalf("windows = %+v", snap.Windows)
 	}
-	if w := snap.Windows[0]; w.Label != "5h" || w.UsedPercent != 42.0 || !w.ResetsAt.Equal(now.Add(time.Hour)) {
+	// reset_at is epoch seconds (measured) — Claude speaks RFC3339; both
+	// must land in the same Window.ResetsAt clock.
+	if w := snap.Windows[0]; w.Label != "5h" || w.UsedPercent != 42.0 || !w.ResetsAt.Equal(time.Unix(1786000000, 0)) {
 		t.Errorf("primary window = %+v", w)
 	}
-	if w := snap.Windows[1]; w.Label != "7d" || w.UsedPercent != 80.5 || !w.ResetsAt.Equal(now.Add(24*time.Hour)) {
+	if w := snap.Windows[1]; w.Label != "7d" || w.UsedPercent != 80.5 || !w.ResetsAt.Equal(time.Unix(1786500000, 0)) {
 		t.Errorf("secondary window = %+v", w)
 	}
 }
 
-func TestCodexFetchWithoutRateLimitsIsASchemaErrorNotAnEmptySnapshot(t *testing.T) {
-	f := &CodexFetcher{Tokens: staticToken("tok"), HTTP: &fakeDoer{resp: jsonResponse(200, `{"plan":"plus"}`)}}
+func TestCodexFetchNeverCarriesEmailOrAccountIdentityIntoTheSnapshot(t *testing.T) {
+	f := &CodexFetcher{Tokens: staticToken("tok"), HTTP: &fakeDoer{resp: jsonResponse(200, codexUsageFixture)}}
+	snap, err := f.Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := fmt.Sprintf("%+v", snap)
+	for _, personal := range []string{"dummy-owner@example.com", "user-dummy", "account-dummy"} {
+		if strings.Contains(rendered, personal) {
+			t.Errorf("personal data %q has no seat in a Snapshot: %s", personal, rendered)
+		}
+	}
+}
+
+func TestCodexParseMissingResetAtFallsBackToNowPlusResetAfter(t *testing.T) {
+	now := time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC)
+	windows, err := parseCodexUsage([]byte(`{
+		"rate_limit": {"primary_window": {"used_percent": 1.0, "limit_window_seconds": 18000, "reset_after_seconds": 3600, "reset_at": 0}}
+	}`), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !windows[0].ResetsAt.Equal(now.Add(time.Hour)) {
+		t.Errorf("resets_at = %v, want now+1h", windows[0].ResetsAt)
+	}
+}
+
+func TestCodexParseANullWindowIsSkippedNotZeroed(t *testing.T) {
+	windows, err := parseCodexUsage([]byte(`{
+		"rate_limit": {"primary_window": {"used_percent": 9.0, "limit_window_seconds": 18000, "reset_after_seconds": 0, "reset_at": 0}, "secondary_window": null}
+	}`), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windows) != 1 || windows[0].Label != "5h" {
+		t.Fatalf("a null window must vanish, not become a 0%% row: %+v", windows)
+	}
+}
+
+func TestCodexFetchWithoutRateLimitWindowsIsASchemaErrorNotAnEmptySnapshot(t *testing.T) {
+	f := &CodexFetcher{Tokens: staticToken("tok"), HTTP: &fakeDoer{resp: jsonResponse(200, `{"plan_type": "plus"}`)}}
 	_, err := f.Fetch(context.Background())
 	if err == nil {
 		t.Fatal("an empty snapshot would read as 'no limits' — must error instead")
 	}
 	if !strings.Contains(err.Error(), "schema") {
 		t.Errorf("the error must name the schema mismatch: %v", err)
+	}
+}
+
+func TestCodexFetchErrorsNameTheCredentialOrigin(t *testing.T) {
+	f := &CodexFetcher{
+		Tokens:           staticToken("tok"),
+		HTTP:             &fakeDoer{resp: jsonResponse(429, `{"detail": "rate limited"}`)},
+		CredentialOrigin: "/custom/codex/auth.json",
+	}
+	_, err := f.Fetch(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "/custom/codex/auth.json") {
+		t.Fatalf("the error must say which auth file was read, got %v", err)
 	}
 }
 
@@ -147,17 +215,18 @@ func TestCodexAuthPathPrefersCodexHomeOverTheDefault(t *testing.T) {
 
 func TestCodexWindowLabelFallsBackToTheKeyWhenTheSpanIsAbsent(t *testing.T) {
 	cases := []struct {
-		minutes int64
+		seconds int64
 		want    string
 	}{
-		{300, "5h"},
-		{10080, "7d"},
-		{90, "90m"},
+		{18000, "5h"},
+		{604800, "7d"},
+		{5400, "90m"},
+		{90, "90s"},
 		{0, "primary"},
 	}
 	for _, c := range cases {
-		if got := codexWindowLabel(c.minutes, "primary"); got != c.want {
-			t.Errorf("codexWindowLabel(%d) = %q, want %q", c.minutes, got, c.want)
+		if got := codexWindowLabel(c.seconds, "primary"); got != c.want {
+			t.Errorf("codexWindowLabel(%d) = %q, want %q", c.seconds, got, c.want)
 		}
 	}
 }
