@@ -1,6 +1,6 @@
 # ADR-0043: 既定を auto へ — 判断の器官は、呼ばれなければ育たない
 
-- Status: **Proposed**（2026-07-24 起草。実台帳の実測が発端）
+- Status: **Accepted**（2026-07-24 起草・実台帳の実測が発端。同日、選ばれるProviderが変わることの了承つきで所有者が配備裁定 — ADR-0038 / ADR-0042 と同じ手続き）
 - Date: 2026-07-24
 - 関連: [ADR-0010](ADR-0010-codex-adapter.md)（Decision 1 の「既定 claude-code」を本ADRが改版 — 当該Decisionが自ら定めた解除条件に到達した）,
   [ADR-0012](ADR-0012-decision-rule-thompson-sampling.md)（決定則。Decision 2 の非対称性が本ADRの計測対象）,
@@ -19,7 +19,7 @@ read-only で計測した:
 
 | 観測 | 値 |
 |---|---|
-| 実行経験 | **41件すべて `claude-code`** |
+| 実行経験 | **41行（現行世代27件）すべて `claude-code`**（差分は再知覚で世代交代した旧行） |
 | capability connection | 20本、**すべて target=claude-code** |
 | preference connection | **0本** |
 | `tomo.decided`（判断の監査行） | **0件** |
