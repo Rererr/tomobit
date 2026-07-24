@@ -1,6 +1,6 @@
 # ADR-0040: 判断の監査行をviewへ流す — 「なぜ君にしたか」は記帳済みである
 
-- Status: **Proposed / 先行適用済み**（2026-07-24 起草・同日 goal 指示の自律セッションが実装を main へ適用。所有者の追認待ち — 却下時は revert で戻る）
+- Status: **Accepted**（2026-07-24 起草・goal 指示の自律セッションが先行適用、同日所有者が配備裁定で追認）
 - Date: 2026-07-24
 - 関連: [ADR-0011](ADR-0011-meaning-by-model-judgment-by-math.md)（根拠3: 監査可能性 — 「なぜCodexを選んだか」に計算で答えられる）,
   [ADR-0012](ADR-0012-decision-rule-thompson-sampling.md)（決定則）,
