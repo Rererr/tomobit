@@ -35,6 +35,15 @@ func (a *Adapter) Name() string { return providerName }
 // A resumed turn carries no --sandbox: measured on codex 0.144.4, `exec
 // resume` has no such flag — the thread keeps the sandbox it was started
 // with. Dropping it is the truthful mapping, not a silent downgrade.
+//
+// 作業場所の外で扱わせる場所 (ADR-0047 Decision 3) は codex にも --add-dir が
+// ある（"Additional directories that should be writable alongside the primary
+// workspace"）。claude 側とは権限の細部が違うが「主ワークスペースの外もこの
+// 場所なら扱ってよい」という同じ意図の口なので、同じ Request フィールドの
+// 翻訳先として使う。--sandbox と同じく `exec resume` にはこのフラグが無いため
+// 再開ターンでは積まない — スレッドは開始時の設定のまま続く。
+// 働く場所そのもの（WorkDir）に codex の -C/--cd は使わない: cwd は Executor
+// が全 Provider 共通で落とす（Decision 2）。
 func (a *Adapter) Command(req executor.Request) (string, []string, []string) {
 	if req.ResumeID != "" {
 		return "codex", []string{"exec", "resume", req.ResumeID, req.Prompt,
@@ -43,6 +52,11 @@ func (a *Adapter) Command(req executor.Request) (string, []string, []string) {
 	args := []string{"exec", "--json", "--skip-git-repo-check"}
 	if req.PermissionMode != "" {
 		args = append(args, "--sandbox", req.PermissionMode)
+	}
+	// プロンプトは末尾の位置引数のまま保つので、可変長の --add-dir はその前に
+	// 置き、1ディレクトリにつき1回積む（まとめると prompt を飲み込む）。
+	for _, dir := range req.AddDirs {
+		args = append(args, "--add-dir", dir)
 	}
 	args = append(args, req.Prompt)
 	return "codex", args, nil

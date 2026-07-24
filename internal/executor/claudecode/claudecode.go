@@ -45,6 +45,12 @@ func (a *Adapter) Command(req executor.Request) (string, []string, []string) {
 	if req.PermissionMode != "" {
 		args = append(args, "--permission-mode", req.PermissionMode)
 	}
+	// 作業場所の外で扱わせる場所 (ADR-0047 Decision 3)。--add-dir は可変長引数
+	// なので、ディレクトリをまとめず1つにつき1回積む: `--add-dir a b` の形は
+	// 後続フラグとの境界が並び順に依存する。
+	for _, dir := range req.AddDirs {
+		args = append(args, "--add-dir", dir)
+	}
 	args = append(args, a.ExtraArgs...)
 	var env []string
 	if a.ConfigDir != "" {

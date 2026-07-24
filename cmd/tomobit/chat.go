@@ -118,7 +118,12 @@ type chat struct {
 	permMode     string
 	timeout      time.Duration
 	size         string
-	extractor    perceive.Extractor
+	// workDir/addDirs は働く場所 (ADR-0047)。他の配線と同じくタスク境界でだけ
+	// 替えられる（/cd・/add-dir → setWiring）。空の workDir は tomobit 自身の
+	// cwd を継ぐ = 端末で `cd` してから起動した従来の姿。
+	workDir   string
+	addDirs   []string
+	extractor perceive.Extractor
 	// interactive is whether the terminal can draw — both stdin and stdout are
 	// a TTY (ADR-0035 Decision 2). It gates the split parallelism offer
 	// (splitAndFold), which shows a y/N prompt and a cost estimate meant for a
@@ -160,7 +165,24 @@ func cmdChat(args []string) error {
 	model := fs.String("model", "", "perception model for best-effort perception (default depends on --backend)")
 	url := fs.String("url", "", "perception backend url for best-effort perception (default depends on --backend)")
 	view := fs.String("view", "", "stdout view stream: ndjson (default: plain text)")
+	// 働く場所は起動時にも宣言できる (ADR-0047 Decision 6): /cd・/add-dir と
+	// 同じ値を、最初のタスクの前から持たせるための口。GUI のような入口は
+	// 起動のたびにコマンドを打ち込まずに済み、会話面が配線の応答で汚れない。
+	workDir := fs.String("cd", "", "where Tomo works for this chat (default: this process's cwd)")
+	var addDirs idList
+	fs.Var(&addDirs, "add-dir", "a place outside --cd Tomo may also work with (repeatable)")
 	fs.Parse(args)
+
+	// 存在しない場所は起動前に断る: 立てない場所を cwd にした exec の chdir
+	// エラーは、どの配線が悪いか語らない（/cd の check と同じ判定）。
+	if err := checkWorkingPlace(*workDir, "--cd"); err != nil {
+		return err
+	}
+	for _, dir := range addDirs {
+		if err := checkWorkingPlace(dir, "--add-dir"); err != nil {
+			return err
+		}
+	}
 
 	// The view choice validates before anything launches, like the provider: a
 	// bad value or a TTY target is a mistake to catch at the door, not one turn in.
@@ -238,6 +260,7 @@ func cmdChat(args []string) error {
 		s: s, ed: ed, in: ed.Reader(), out: out, stream: stream,
 		providerName: *providerName, capability: *capability,
 		permMode: *permMode, timeout: *timeout, size: *size,
+		workDir: *workDir, addDirs: addDirs,
 		extractor:   extractor,
 		interactive: isTTY(os.Stdin) && isTTY(os.Stdout),
 		// The declared view stream is the signal (ADR-0035 Decision 1) — not
@@ -352,6 +375,14 @@ func (c *chat) command(line string) (done bool, err error) {
 			}
 			return ensureClaudeProfile(c.in, v)
 		})
+	case "/cd":
+		// 働く場所 (ADR-0047 Decision 4)。存在確認はここで済ませる: 実在しない
+		// パスを cwd にした exec の chdir エラーは、どの配線が悪いか語らない。
+		c.setWiring(&c.workDir, arg, "cd", func(v string) error {
+			return checkWorkingPlace(v, "cd")
+		})
+	case "/add-dir":
+		c.addDir(arg)
 	case "/cap":
 		c.setWiring(&c.capability, arg, "cap", nil)
 	case "/size":
@@ -372,7 +403,7 @@ func (c *chat) command(line string) (done bool, err error) {
 // completableCommands are what Tab completes for the leading token. /quit is
 // an alias of /exit and stays out — completing to one spelling is enough, and
 // two candidates for the same action would only block the unique-commit path.
-var completableCommands = []string{"/new", "/provider", "/cap", "/size", "/status", "/help", "/exit"}
+var completableCommands = []string{"/new", "/provider", "/cd", "/add-dir", "/cap", "/size", "/status", "/help", "/exit"}
 
 // complete is the editor's Completer (ADR-0024 Decision 4): the leading token
 // completes to a command, and the second token of /provider or /size to that
@@ -437,6 +468,61 @@ func matchPrefix(vocab []string, prefix string) []string {
 		}
 	}
 	return out
+}
+
+// checkWorkingPlace rejects a place Tomo cannot be pointed at (ADR-0047).
+// One check for both doors — the launch flags and the slash commands — so a
+// path that is refused at startup is refused mid-chat for the same reason,
+// in the same words. Empty is fine: it means "unset", not "nowhere".
+func checkWorkingPlace(dir, label string) error {
+	if dir == "" {
+		return nil
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("%s: そこには行けない: %s (%v)", label, dir, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s: そこはディレクトリではない: %s", label, dir)
+	}
+	return nil
+}
+
+// addDir maintains the places outside the working dir that Tomo may also work
+// with (ADR-0047 Decision 4). Three words only: bare lists, "clear" empties,
+// anything else is a path to add. Mid-task it refuses like the other wiring —
+// same reason (setWiring), and the refusal is worded the same way.
+func (c *chat) addDir(arg string) {
+	if arg == "" {
+		if len(c.addDirs) == 0 {
+			c.sayln(dim("add-dir: なし"))
+			return
+		}
+		c.sayln(dim("add-dir: " + strings.Join(c.addDirs, " ")))
+		return
+	}
+	if c.sid != "" {
+		c.sayln("タスクの途中では add-dir を替えられない — /new で区切ってから")
+		return
+	}
+	if arg == "clear" {
+		c.addDirs = nil
+		c.sayln(dim("add-dir: なし"))
+		return
+	}
+	if err := checkWorkingPlace(arg, "add-dir"); err != nil {
+		c.sayln(err.Error())
+		return
+	}
+	for _, d := range c.addDirs {
+		if d == arg {
+			// 二度言われても一度だけ持つ: 同じ場所が argv に2回並ぶ意味はない。
+			c.sayln(dim("add-dir: " + strings.Join(c.addDirs, " ")))
+			return
+		}
+	}
+	c.addDirs = append(c.addDirs, arg)
+	c.sayln(dim("add-dir: " + strings.Join(c.addDirs, " ")))
 }
 
 // setWiring changes one of the per-task choices. Mid-task it refuses: an
@@ -581,6 +667,9 @@ func (c *chat) run(prompt string, opening bool) error {
 	result, runErr := ex.Run(ctx, executor.Request{
 		Prompt: runPrompt, ResumeID: c.threadID,
 		PermissionMode: c.permMode, Timeout: c.timeout,
+		// 働く場所 (ADR-0047): /cd と /add-dir がタスク境界で置いた値。
+		// 空なら従来どおり tomobit 自身の cwd を継ぐ。
+		WorkDir: c.workDir, AddDirs: c.addDirs,
 	}, sink)
 	v.end(result)
 
@@ -785,6 +874,8 @@ func (c *chat) closeTask() error {
 func chatUsage(w io.Writer) {
 	usage := `/new [prompt]     ここまでを区切って次のタスクへ(Feedback → 知覚 → Tomo)
 /provider <name>  次のタスクのProvider (claude-code|codex|human|auto)
+/cd <dir>         次のタスクで働く場所 (既定 いま tomobit を起動した場所)
+/add-dir <dir>    その外で扱わせる場所を足す (clear で全部外す・引数なしで一覧)
 /cap <name>       次のタスクのcapability (既定 implement)
 /size <s|m|l>     次のタスクの判断の温度 (--provider auto のとき効く)
 /status           相棒ビュー

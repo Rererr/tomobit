@@ -337,3 +337,38 @@ func TestCommandResumeDropsTheSandboxFlag(t *testing.T) {
 		}
 	}
 }
+
+// ADR-0047 Decision 3: codex にも --add-dir がある（0.144.x）。同じ Request
+// フィールドがここでも翻訳され、プロンプトは末尾の位置引数のまま残る。
+func TestCommandTranslatesAddDirsToAddDirFlags(t *testing.T) {
+	_, args, _ := New().Command(executor.Request{
+		Prompt:  "p",
+		AddDirs: []string{"/w/notes", "/w/shared"},
+	})
+	pairs := 0
+	for i, a := range args {
+		if a == "--add-dir" {
+			pairs++
+			if i+1 >= len(args) || args[i+1] == "p" {
+				t.Fatalf("--add-dir swallowed the prompt or has no value: %v", args)
+			}
+		}
+	}
+	if pairs != 2 {
+		t.Errorf("one --add-dir per directory expected, got %d: %v", pairs, args)
+	}
+	if got := args[len(args)-1]; got != "p" {
+		t.Errorf("prompt should stay the trailing argument: got %v", args)
+	}
+}
+
+// `codex exec resume` には --add-dir の席が無い（--sandbox と同じ）。
+// スレッドは開始時の設定のまま続くので、積まないのが正直なマッピング。
+func TestCommandResumeDropsTheAddDirFlag(t *testing.T) {
+	_, args, _ := New().Command(executor.Request{Prompt: "p", ResumeID: "th-1", AddDirs: []string{"/w/notes"}})
+	for _, a := range args {
+		if a == "--add-dir" {
+			t.Errorf("resume has no --add-dir seat: %v", args)
+		}
+	}
+}

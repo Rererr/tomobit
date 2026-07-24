@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,16 +16,21 @@ import (
 
 // threadAdapter is a provider that runs `printf` instead of a CLI, so a chat
 // can be driven turn by turn with no real one. It records the ResumeID of
-// every launch — how a test sees whether the thread was continued.
+// every launch — how a test sees whether the thread was continued — and the
+// working places it was handed (ADR-0047).
 type threadAdapter struct {
-	resumes []string
-	fail    bool
+	resumes  []string
+	workDirs []string
+	addDirs  [][]string
+	fail     bool
 }
 
 func (a *threadAdapter) Name() string { return "fake" }
 
 func (a *threadAdapter) Command(req executor.Request) (string, []string, []string) {
 	a.resumes = append(a.resumes, req.ResumeID)
+	a.workDirs = append(a.workDirs, req.WorkDir)
+	a.addDirs = append(a.addDirs, req.AddDirs)
 	if a.fail {
 		return "false", nil, nil // exits non-zero, streams nothing
 	}
@@ -769,5 +775,114 @@ func TestChatBookkeepingLinesCarryNoEscapeCodesOffATerminal(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "\x1b[") {
 		t.Errorf("no ANSI off a terminal: %q", out.String())
+	}
+}
+
+// ADR-0047: /cd と /add-dir で置いた働く場所が、そのタスクの起動条件として
+// Request に載る。同じ場所を二度足しても一度だけ持つ。
+func TestChatWorkingPlacesRideOnTheRequest(t *testing.T) {
+	s := openTestStore(t)
+	a := &threadAdapter{}
+	c, _ := newTestChat(t, s, a, "\n")
+	work, extra := t.TempDir(), t.TempDir()
+
+	if _, err := c.command("/cd " + work); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.command("/add-dir " + extra); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.command("/add-dir " + extra); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.addDirs) != 1 {
+		t.Errorf("the same place twice should be held once: %v", c.addDirs)
+	}
+
+	if err := c.turn("first task"); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.workDirs) != 1 || a.workDirs[0] != work {
+		t.Errorf("work dir on the request: got %v, want [%s]", a.workDirs, work)
+	}
+	if len(a.addDirs) != 1 || len(a.addDirs[0]) != 1 || a.addDirs[0][0] != extra {
+		t.Errorf("add dirs on the request: got %v, want [[%s]]", a.addDirs, extra)
+	}
+}
+
+// 実在しない場所は受け取らない: 立てない場所を cwd にした exec の chdir エラーは
+// どの配線が悪いか語らない（ADR-0047 Decision 4）。
+func TestChatCdRefusesAPlaceItCannotStandIn(t *testing.T) {
+	s := openTestStore(t)
+	c, out := newTestChat(t, s, &threadAdapter{}, "\n")
+	gone := filepath.Join(t.TempDir(), "gone")
+
+	if _, err := c.command("/cd " + gone); err != nil {
+		t.Fatal(err)
+	}
+	if c.workDir != "" {
+		t.Errorf("a missing place must not be accepted: %q", c.workDir)
+	}
+	if !strings.Contains(out.String(), gone) {
+		t.Errorf("the refusal should name the path: %q", out.String())
+	}
+}
+
+// 配線はタスク境界でだけ替わる（/provider と同じ規律・ADR-0047 Decision 4）。
+func TestChatWorkingPlacesRefuseToChangeMidTask(t *testing.T) {
+	s := openTestStore(t)
+	a := &threadAdapter{}
+	c, out := newTestChat(t, s, a, "\n")
+	first, second := t.TempDir(), t.TempDir()
+
+	if _, err := c.command("/cd " + first); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.turn("open the task"); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+
+	if _, err := c.command("/cd " + second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.command("/add-dir " + second); err != nil {
+		t.Fatal(err)
+	}
+	if c.workDir != first {
+		t.Errorf("mid-task /cd must not take effect: %q", c.workDir)
+	}
+	if len(c.addDirs) != 0 {
+		t.Errorf("mid-task /add-dir must not take effect: %v", c.addDirs)
+	}
+	if !strings.Contains(out.String(), "/new") {
+		t.Errorf("the refusal should point at the boundary: %q", out.String())
+	}
+}
+
+// /add-dir clear は全部外す。一覧（引数なし）は現在値を答えるだけで替えない。
+func TestChatAddDirClearEmptiesTheList(t *testing.T) {
+	s := openTestStore(t)
+	c, out := newTestChat(t, s, &threadAdapter{}, "\n")
+	extra := t.TempDir()
+
+	if _, err := c.command("/add-dir " + extra); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if _, err := c.command("/add-dir"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), extra) {
+		t.Errorf("a bare /add-dir should list what is set: %q", out.String())
+	}
+	if len(c.addDirs) != 1 {
+		t.Errorf("listing must not change the list: %v", c.addDirs)
+	}
+	if _, err := c.command("/add-dir clear"); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.addDirs) != 0 {
+		t.Errorf("clear should empty the list: %v", c.addDirs)
 	}
 }

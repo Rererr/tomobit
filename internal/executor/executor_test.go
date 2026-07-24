@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -293,4 +295,64 @@ func TestRunGivesTheChildNoStdin(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("the child must see an empty stdin, got %v", got)
 	}
+}
+
+// ADR-0047 Decision 2: 働く場所は Executor が cwd に落とす — Adapter は翻訳
+// しない。/bin/pwd は物理パスを返すので、比較前に両方 symlink を解決する
+// （macOS の t.TempDir は /var → /private/var の下に出る）。
+func TestRunLaunchesTheChildInTheRequestedWorkDir(t *testing.T) {
+	dir := t.TempDir()
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []recorded
+	ex := &Executor{Adapter: &fakeAdapter{cmd: "pwd"}}
+	if _, err := ex.Run(context.Background(), Request{Prompt: "p", WorkDir: dir}, collect(&got)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected pwd's one line, got %v", got)
+	}
+	if text := resolved(t, got[0].ev.Payload["text"]); text != want {
+		t.Errorf("child cwd = %v, want %v", text, want)
+	}
+}
+
+// 未設定は従来どおり tomobit 自身の cwd を継ぐ — 端末の `cd` の意味は変わらない。
+func TestRunInheritsOwnCwdWhenWorkDirUnset(t *testing.T) {
+	own, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []recorded
+	ex := &Executor{Adapter: &fakeAdapter{cmd: "pwd"}}
+	if _, err := ex.Run(context.Background(), Request{Prompt: "p"}, collect(&got)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected pwd's one line, got %v", got)
+	}
+	if text := resolved(t, got[0].ev.Payload["text"]); text != want {
+		t.Errorf("child cwd = %v, want inherited %v", text, want)
+	}
+}
+
+// resolved normalises a path the child printed: /bin/pwd reports the logical
+// path it was handed, so only the symlink-resolved forms are comparable.
+func resolved(t *testing.T, v any) string {
+	t.Helper()
+	s, ok := v.(string)
+	if !ok {
+		t.Fatalf("payload text is not a string: %v", v)
+	}
+	p, err := filepath.EvalSymlinks(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
 }

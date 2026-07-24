@@ -122,6 +122,17 @@ type Request struct {
 	ResumeID       string
 	PermissionMode string
 	Timeout        time.Duration // 0 = no limit
+
+	// WorkDir is where Tomo works — the child's cwd (ADR-0047 Decision 2).
+	// Empty inherits tomobit's own, which is what a terminal `cd` already
+	// expressed. The Executor applies it and no Adapter translates it: cwd is
+	// an OS concept, not a CLI's vocabulary.
+	WorkDir string
+	// AddDirs are the places outside WorkDir that Tomo may also work with
+	// (ADR-0047 Decision 3). Unlike WorkDir this one IS translated: each
+	// Adapter maps it onto its own CLI's flag, and an Adapter whose CLI has
+	// no such flag ignores it rather than inventing one.
+	AddDirs []string
 }
 
 // Result is what the Executor observes about a run, independent of what the
@@ -202,6 +213,9 @@ func (e *Executor) Run(ctx context.Context, req Request, emit Sink) (Result, err
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}
+	// Where Tomo works (ADR-0047 Decision 2). Empty leaves exec inheriting
+	// this process's cwd — the terminal's `cd`, unchanged.
+	cmd.Dir = req.WorkDir
 	cmd.Stderr = e.Stderr
 	// Stdin is deliberately left unset, which hands the child os.DevNull.
 	// Never wire the parent's stdin in: a chat (ADR-0022) reads the next turn

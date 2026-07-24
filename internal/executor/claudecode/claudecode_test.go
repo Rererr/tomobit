@@ -378,3 +378,36 @@ func TestTranslateInitCarriesTheThreadID(t *testing.T) {
 		t.Errorf("provider_session_id from init: got %v", evs[0].Payload["provider_session_id"])
 	}
 }
+
+// ADR-0047 Decision 3: 作業場所の外で扱わせる場所は --add-dir へ翻訳される。
+// まとめず1ディレクトリにつき1回積む（可変長引数の後続フラグ境界を並び順に
+// 依存させない）。
+func TestCommandTranslatesAddDirsToAddDirFlags(t *testing.T) {
+	_, args, _ := New().Command(executor.Request{
+		Prompt:  "p",
+		AddDirs: []string{"/w/notes", "/w/shared docs"},
+	})
+	pairs := 0
+	for i, a := range args {
+		if a != "--add-dir" {
+			continue
+		}
+		pairs++
+		if i+1 >= len(args) {
+			t.Fatalf("--add-dir without a value: %v", args)
+		}
+		if got := args[i+1]; got != "/w/notes" && got != "/w/shared docs" {
+			t.Errorf("--add-dir value: got %q, want one of the requested dirs", got)
+		}
+	}
+	if pairs != 2 {
+		t.Errorf("one --add-dir per directory expected, got %d: %v", pairs, args)
+	}
+}
+
+func TestCommandOmitsAddDirWhenNoneRequested(t *testing.T) {
+	_, args, _ := New().Command(executor.Request{Prompt: "p"})
+	if contains(args, "--add-dir") {
+		t.Errorf("no --add-dir should appear when none requested: %v", args)
+	}
+}
