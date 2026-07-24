@@ -1751,11 +1751,35 @@ type statusPayload struct {
 	Mood      *statusMood     `json:"mood,omitempty"`
 	Speak     string          `json:"speak,omitempty"`
 	Providers []providerUsage `json:"providers,omitempty"`
+	Growth    *statusGrowth   `json:"growth,omitempty"`
 }
 
 type statusMood struct {
 	Name   string `json:"name"`
 	Marker string `json:"marker"`
+}
+
+// statusGrowth is the growth disclosure (ADR-0046 Decision 1): the gates the
+// next stage requires, straight from face.GrowthFrom — the same evaluation
+// that produced the stage field, not a second derivation. Absent entirely at
+// あいぼう (no next, no fake 100%) and on old readers' side ignored under the
+// ADR-0032 forward-compat contract.
+type statusGrowth struct {
+	Next     int          `json:"next"`
+	NextName string       `json:"next_name"`
+	Gates    []statusGate `json:"gates"`
+}
+
+// statusGate mirrors face.Gate. Value carries no omitempty: 測定不能 must
+// serialize as an explicit null, not vanish — a reader has to be able to
+// tell 「測れない」 from 「届いていない」 (ADR-0046 Decision 1). Hint is the
+// one move that raises the value, only on unmet gates (Decision 3).
+type statusGate struct {
+	Name      string   `json:"name"`
+	Value     *float64 `json:"value"`
+	Threshold float64  `json:"threshold"`
+	Met       bool     `json:"met"`
+	Hint      string   `json:"hint,omitempty"`
 }
 
 // statusCandidates reduces connections to the voice.Candidate rows and state
@@ -1804,10 +1828,11 @@ func statusJSON(w io.Writer, dbPath string) error {
 	defer s.Close()
 
 	now := time.Now().UnixMilli()
-	stage, err := face.StageFrom(s, now)
+	growth, err := face.GrowthFrom(s, now)
 	if err != nil {
 		return err
 	}
+	stage := growth.Stage
 	conns, err := s.AllConnections()
 	if err != nil {
 		return err
@@ -1824,6 +1849,13 @@ func statusJSON(w io.Writer, dbPath string) error {
 		Stage:     &stage,
 		StageName: face.StageName(stage),
 		Mood:      &statusMood{Name: moodName, Marker: moodMarker},
+	}
+	if next, ok := growth.Next(); ok {
+		gates := make([]statusGate, len(growth.Gates))
+		for i, g := range growth.Gates {
+			gates[i] = statusGate{Name: g.Name, Value: g.Value, Threshold: g.Threshold, Met: g.Met, Hint: g.Hint()}
+		}
+		payload.Growth = &statusGrowth{Next: next, NextName: face.StageName(next), Gates: gates}
 	}
 	if text, ok := voice.Suggest(cands, now); ok {
 		payload.Speak = text

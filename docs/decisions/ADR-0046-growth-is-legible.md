@@ -1,6 +1,6 @@
 # ADR-0046: 次の段に何が足りないかを開示する — 育てている実感は、進捗が見えて初めて生まれる
 
-- Status: **Proposed**（2026-07-24 起草）
+- Status: **Accepted**（2026-07-24 起草、同日実装）
 - Date: 2026-07-24
 - 関連: [ADR-0045](ADR-0045-stage-needs-a-real-choice.md)（ゲートの定義。本ADRはそれを開示する側）,
   [ADR-0039](ADR-0039-status-machine-view.md)（機械viewはレンダラへのデータ供給）,
@@ -51,9 +51,10 @@
    "next":4,"next_name":"おとな",
    "gates":[
      {"name":"evidence","value":22.10,"threshold":3.0,"met":true},
+     {"name":"calibration_sample","value":31.2,"threshold":8.0,"met":true},
      {"name":"calibration","value":0.07,"threshold":0.15,"met":true},
-     {"name":"sharpness","value":0.49,"threshold":0.2,"met":false},
-     {"name":"preference_with_human","value":0.0,"threshold":1.0,"met":false}]}}
+     {"name":"sharpness","value":0.49,"threshold":0.2,"met":false,
+      "hint":"duelや質問に答えて好みを教える"}]}}
 ```
 
 - **view のために新しい計算はしない**（ADR-0040 Decision 1 と同じ規律）。
@@ -61,6 +62,17 @@
   そのために `StageFrom` の内部を「ゲートの評価結果を返す」形に組み直す
   （段そのものは評価結果から導出される。**ステージが View であることは不変** —
   ADR-0008 Decision 1、保存しない）
+- **列挙するのは `next` に到達するために要るゲートだけ**。ゲートは累積なので
+  next=4 なら evidence・較正・鋭さ、next=5 ならそれに human ペアの preference が
+  加わる。上の例（わかもの）に `preference_with_human` が無いのはそのため —
+  それは S5 のゲートであって「次の段（おとな）に足りないもの」ではない
+- **毛玉(S0)の next ゲートは `connection`（connection の誕生・閾値1）であって
+  evidence ではない**。実条件は最初の connection が生まれること（最初の仕事1回で
+  孵る）なので、evidence≥3 の開示は偽の遠さ — 偽の進捗を見せないことの裏面
+- **較正は2つのゲートに分ける**（`calibration_sample` と `calibration`）。
+  `isCalibrated` は「標本が足りない」と「予測がズレている」という**別の理由**で
+  落ちるのに、1つの数字ではどちらか分からない。Decision 3 の表もこの2つに
+  別の「次の一手」を割り当てている
 - 満たせないゲートが「なぜ満たせないか」を値が語る形にする。特に ADR-0045
   Decision 1 の「競争のある島が無い」は、**閾値との比較では表せない**
   （測定不能であって未達ではない）。この場合は値を null とし、
@@ -88,11 +100,16 @@ ADR-0007 Decision 4 と同じ流儀）。
 
 | ゲート | 足りないとき添える一手 |
 |---|---|
-| evidence | もっと一緒に仕事をする |
-| calibration | （量が足りない場合）同上 / （ズレている場合）予測が外れている文脈がある |
-| sharpness・競争なし | **二人目の Provider に会わせる**（ADR-0043 の auto に任せる） |
+| evidence / calibration_sample | もっと一緒に仕事をする |
+| calibration（ズレている） | 予測が外れている文脈がある |
+| calibration（台帳が空で平均が未定義=null） | もっと一緒に仕事をする（標本の問題であってズレではない） |
+| sharpness・競争なし（null） | **二人目の Provider に会わせる**（ADR-0043 の auto に任せる） |
 | sharpness・迷っている | duel や質問に答えて好みを教える |
 | preference_with_human | 自分でやった仕事を Tomo に見せる（`--provider human`） |
+
+一手は満たせないゲートにだけ `hint` として機械 view に同乗させる（充足した
+ゲートに一手は無い）。翻訳表を本体が持つことで、レンダラが表を手移植して
+ドリフトする余地を残さない（ADR-0039 と同じ規律）。
 
 これは指示ではなく開示である。**「やってあげる」ではなく「判断できる材料を渡す」** —
 どれを選ぶかは使用者が決める。

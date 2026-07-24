@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -299,6 +302,249 @@ func TestStatusJSONNoLedgerOmitsProviders(t *testing.T) {
 	got := decodeStatusJSON(t, out)
 	if _, hasProviders := got["providers"]; hasProviders {
 		t.Errorf("providers = %v, want absent when exists:false", got["providers"])
+	}
+}
+
+// statusJSONSoloGrownFixture seeds a single-provider network past the
+// calibration gates (10 fresh zero-excess ledger rows on one frequent
+// island) but with nobody to contest that island: StageFrom lands on
+// わかもの with sharpness 測定不能 (ADR-0045 Decision 1).
+func statusJSONSoloGrownFixture(t *testing.T, dbPath string, now int64) {
+	t.Helper()
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	conn := &core.Connection{
+		Kind: core.ConnCapability, ScopeKey: "cap=impl", Target: "claude",
+		Alpha: 11, Beta: 1, LastUpdate: now, BornTS: now,
+	}
+	if err := s.UpsertConnection(conn); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		if err := s.InsertLedger(&core.LedgerEntry{
+			Kind: core.ConnCapability, ScopeKey: "cap=impl", Target: "claude",
+			ExperienceID: fmt.Sprintf("led-%d", i), TS: now, SExcess: 0,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		mustInsert(t, s, &core.Experience{
+			ID: fmt.Sprintf("exp-%d", i), SessionID: "s1", TS: now, Kind: core.KindExecution,
+			Context: map[string]string{"cap": "impl"}, Provider: "claude", Source: "production",
+		})
+	}
+}
+
+// statusJSONPartnerFixture extends the solo network into a full あいぼう:
+// a rival with the pairwise preference settled (contested island, still
+// sharp) plus human-pair preference evidence above the re-ask ceiling.
+func statusJSONPartnerFixture(t *testing.T, dbPath string, now int64) {
+	t.Helper()
+	statusJSONSoloGrownFixture(t, dbPath, now)
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, conn := range []*core.Connection{
+		{Kind: core.ConnCapability, ScopeKey: "cap=impl", Target: "codex",
+			Alpha: 11, Beta: 1, LastUpdate: now, BornTS: now},
+		{Kind: core.ConnPreference, ScopeKey: "cap=impl", Target: "claude~codex",
+			Alpha: 30, Beta: 1, LastUpdate: now, BornTS: now},
+		{Kind: core.ConnPreference, ScopeKey: "cap=impl", Target: "claude~human",
+			Alpha: 3, Beta: 1, LastUpdate: now, BornTS: now},
+	} {
+		if err := s.UpsertConnection(conn); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestStatusJSONGrowthMatchesFaceDerivation guards ADR-0046 Decision 1 the
+// same way the stage/mood tests guard theirs: the growth field must be
+// face.GrowthFrom's own evaluation — names, met flags, null-ness, hints —
+// not a second derivation that can drift.
+func TestStatusJSONGrowthMatchesFaceDerivation(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	now := time.Now().UnixMilli()
+	statusJSONFixture(t, dbPath, now)
+
+	out, _ := captureStdoutStderr(t, func() {
+		if err := cmdStatus([]string{"--db", dbPath, "--view", "json"}); err != nil {
+			t.Fatalf("cmdStatus: %v", err)
+		}
+	})
+	got := decodeStatusJSON(t, out)
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	want, err := face.GrowthFrom(s, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNext, ok := want.Next()
+	if !ok {
+		t.Fatal("fixture unexpectedly at the top stage")
+	}
+
+	growth, ok := got["growth"].(map[string]any)
+	if !ok {
+		t.Fatalf("growth is not an object: %v", got["growth"])
+	}
+	if next, _ := growth["next"].(float64); int(next) != wantNext {
+		t.Errorf("growth.next = %v, want %d", growth["next"], wantNext)
+	}
+	if growth["next_name"] != face.StageName(wantNext) {
+		t.Errorf("growth.next_name = %v, want %q", growth["next_name"], face.StageName(wantNext))
+	}
+	gates, ok := growth["gates"].([]any)
+	if !ok || len(gates) != len(want.Gates) {
+		t.Fatalf("growth.gates = %v, want %d gates", growth["gates"], len(want.Gates))
+	}
+	for i, raw := range gates {
+		gate, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("gates[%d] is not an object: %v", i, raw)
+		}
+		w := want.Gates[i]
+		if gate["name"] != w.Name {
+			t.Errorf("gates[%d].name = %v, want %q", i, gate["name"], w.Name)
+		}
+		if gate["met"] != w.Met {
+			t.Errorf("gates[%d].met = %v, want %v", i, gate["met"], w.Met)
+		}
+		if th, _ := gate["threshold"].(float64); th != w.Threshold {
+			t.Errorf("gates[%d].threshold = %v, want %v", i, gate["threshold"], w.Threshold)
+		}
+		if (gate["value"] == nil) != (w.Value == nil) {
+			t.Errorf("gates[%d].value = %v, want null-ness %v (face.GrowthFrom)", i, gate["value"], w.Value == nil)
+		}
+		// 1e-4, not tighter: cmdStatus and this verification call time.Now()
+		// a moment apart, and evidence≈4 decays ~3.6e-7/s under the 90-day
+		// half-life — 1e-6 flakes on a slow CI while real derivation drift
+		// stays orders of magnitude above 1e-4. met/null-ness/name stay exact.
+		if v, isNum := gate["value"].(float64); isNum && w.Value != nil && math.Abs(v-*w.Value) > 1e-4 {
+			t.Errorf("gates[%d].value = %v, want %v", i, v, *w.Value)
+		}
+		wantHint := w.Hint()
+		gotHint, hasHint := gate["hint"]
+		if (wantHint != "") != hasHint || (hasHint && gotHint != wantHint) {
+			t.Errorf("gates[%d].hint = %v, want %q (Gate.Hint, omitted when met)", i, gotHint, wantHint)
+		}
+	}
+}
+
+// TestStatusJSONGrowthSharpnessUnmeasurableIsNull guards the line ADR-0046
+// calls the implementation's pass/fail: a single-provider network's
+// sharpness serializes as an explicit null (測定不能), not a zero or a
+// missing key, and its hint is the meeting-a-rival move — not the duel one
+// an actually-wobbling lottery would get.
+func TestStatusJSONGrowthSharpnessUnmeasurableIsNull(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	now := time.Now().UnixMilli()
+	statusJSONSoloGrownFixture(t, dbPath, now)
+
+	out, _ := captureStdoutStderr(t, func() {
+		if err := cmdStatus([]string{"--db", dbPath, "--view", "json"}); err != nil {
+			t.Fatalf("cmdStatus: %v", err)
+		}
+	})
+	got := decodeStatusJSON(t, out)
+	if stage, _ := got["stage"].(float64); int(stage) != face.StageYouth {
+		t.Fatalf("stage = %v, want わかもの (%d) — fixture drifted", got["stage"], face.StageYouth)
+	}
+
+	growth, ok := got["growth"].(map[string]any)
+	if !ok {
+		t.Fatalf("growth is not an object: %v", got["growth"])
+	}
+	gates, _ := growth["gates"].([]any)
+	var sharpness map[string]any
+	for _, raw := range gates {
+		if gate, ok := raw.(map[string]any); ok && gate["name"] == face.GateSharpness {
+			sharpness = gate
+		}
+	}
+	if sharpness == nil {
+		t.Fatalf("no sharpness gate in %v", growth["gates"])
+	}
+	v, present := sharpness["value"]
+	if !present {
+		t.Error("sharpness.value key is absent, want an explicit null — 測定不能を沈黙にしない")
+	}
+	if v != nil {
+		t.Errorf("sharpness.value = %v, want null — 測定不能は0でも未達でもない", v)
+	}
+	if sharpness["met"] != false {
+		t.Errorf("sharpness.met = %v, want false", sharpness["met"])
+	}
+	if sharpness["hint"] != "二人目のProviderに会わせる（autoに任せる）" {
+		t.Errorf("sharpness.hint = %v, want the meet-a-rival move (測定不能と未達で一手が違う)", sharpness["hint"])
+	}
+}
+
+// TestStatusJSONGrowthAbsentAtTheTop guards ADR-0046 Decision 1: あいぼう
+// has no next stage, and the payload carries no growth at all rather than
+// an all-met list dressed up as 100%.
+func TestStatusJSONGrowthAbsentAtTheTop(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	now := time.Now().UnixMilli()
+	statusJSONPartnerFixture(t, dbPath, now)
+
+	out, _ := captureStdoutStderr(t, func() {
+		if err := cmdStatus([]string{"--db", dbPath, "--view", "json"}); err != nil {
+			t.Fatalf("cmdStatus: %v", err)
+		}
+	})
+	got := decodeStatusJSON(t, out)
+	if stage, _ := got["stage"].(float64); int(stage) != face.StagePartner {
+		t.Fatalf("stage = %v, want あいぼう (%d) — fixture drifted", got["stage"], face.StagePartner)
+	}
+	if _, hasGrowth := got["growth"]; hasGrowth {
+		t.Errorf("growth = %v, want the key entirely absent at the top stage", got["growth"])
+	}
+}
+
+// TestStatusJSONNoLedgerOmitsGrowth guards the absent-ledger contract
+// (exists:false carries no other fields, growth included).
+func TestStatusJSONNoLedgerOmitsGrowth(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "nonexistent", "t.db")
+	out, _ := captureStdoutStderr(t, func() {
+		if err := cmdStatus([]string{"--db", dbPath, "--view", "json"}); err != nil {
+			t.Fatalf("cmdStatus: %v", err)
+		}
+	})
+	got := decodeStatusJSON(t, out)
+	if _, hasGrowth := got["growth"]; hasGrowth {
+		t.Errorf("growth = %v, want absent when exists:false", got["growth"])
+	}
+}
+
+// TestStatusHumanViewCarriesNoGrowthNumbers guards ADR-0046 Decision 2: the
+// terminal is the voice's place (ADR-0025) — the human view gains neither
+// gate names nor next-move templates; whoever wants the numbers has the
+// machine view.
+func TestStatusHumanViewCarriesNoGrowthNumbers(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	now := time.Now().UnixMilli()
+	statusJSONSoloGrownFixture(t, dbPath, now)
+
+	out, _ := captureStdoutStderr(t, func() {
+		if err := cmdStatus([]string{"--db", dbPath, "--view", "human"}); err != nil {
+			t.Fatalf("cmdStatus: %v", err)
+		}
+	})
+	for _, banned := range []string{face.GateCalibrationSample, face.GateSharpness, "二人目のProviderに会わせる", "もっと一緒に仕事をする"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("human status output contains %q — 端末は声の場 (ADR-0025)", banned)
+		}
 	}
 }
 
