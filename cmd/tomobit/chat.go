@@ -250,7 +250,9 @@ func cmdChat(args []string) error {
 	// the prompt (ADR-0022 Decision 4): you meet Tomo and you can talk. A pipe —
 	// view stream or plain — skips the greeting, as it always has.
 	if isTTY(os.Stdout) {
-		if err := showStatus(c.out, s); err != nil {
+		// nil collector: the between-turn view stays offline — a per-turn quota
+		// fetch is not what a chat is for (ADR-0044).
+		if err := showStatus(c.out, s, nil); err != nil {
 			return err
 		}
 		c.sayln(dim("話しかけて。/help でコマンド、Ctrl-D で終了"))
@@ -358,7 +360,7 @@ func (c *chat) command(line string) (done bool, err error) {
 		// decision (ADR-0012's n).
 		c.setWiring(&c.size, arg, "size", nil)
 	case "/status":
-		return false, showStatus(c.out, c.s)
+		return false, showStatus(c.out, c.s, nil)
 	case "/help":
 		chatUsage(c.out)
 	default:

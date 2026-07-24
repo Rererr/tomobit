@@ -1730,9 +1730,9 @@ func cmdStatus(args []string) error {
 			return err
 		}
 		defer s.Close()
-		return showStatus(os.Stdout, s)
+		return showStatus(os.Stdout, s, collectQuotaFn)
 	case "json":
-		return statusJSON(os.Stdout, *db)
+		return statusJSON(os.Stdout, *db, collectQuotaFn)
 	default:
 		return fmt.Errorf("unknown --view %q (human, json)", *view)
 	}
@@ -1752,6 +1752,11 @@ type statusPayload struct {
 	Speak     string          `json:"speak,omitempty"`
 	Providers []providerUsage `json:"providers,omitempty"`
 	Growth    *statusGrowth   `json:"growth,omitempty"`
+	// Quota is each Provider's vendor-reported utilization (ADR-0044). Attached
+	// only when the ledger exists, like Providers/Growth: exists:false carries
+	// nothing else. Each row is either observed windows or a 不明 Error, so a
+	// GUI reader can render the honesty boundary rather than a silent gap.
+	Quota []quotaStatus `json:"quota,omitempty"`
 }
 
 type statusMood struct {
@@ -1813,7 +1818,7 @@ func statusCandidates(s *store.Store, conns []*core.Connection, now int64) ([]vo
 // stream whose framing assumes every terminal organ stayed closed, while this
 // is a one-shot object with those organs unconditionally off — a human piping
 // it through jq on a terminal breaks nothing.
-func statusJSON(w io.Writer, dbPath string) error {
+func statusJSON(w io.Writer, dbPath string, quotaFn quotaCollector) error {
 	if _, err := os.Stat(dbPath); err != nil {
 		if os.IsNotExist(err) {
 			return json.NewEncoder(w).Encode(statusPayload{Type: "status", Exists: false})
@@ -1867,6 +1872,14 @@ func statusJSON(w io.Writer, dbPath string) error {
 	if usage := providerUsageSummary(exps); len(usage) > 0 {
 		payload.Providers = usage
 	}
+	if quotaFn != nil {
+		qctx, cancel := context.WithTimeout(context.Background(), quotaFetchTimeout)
+		q := quotaFn(qctx)
+		cancel()
+		if len(q) > 0 {
+			payload.Quota = q
+		}
+	}
 	return json.NewEncoder(w).Encode(payload)
 }
 
@@ -1875,12 +1888,23 @@ func statusJSON(w io.Writer, dbPath string) error {
 // writes to w rather than os.Stdout directly (ADR-0032 Decision 1) so a chat's
 // /status can route through the framing writer that keeps stdout NDJSON; the
 // TTY gate still reads the real terminal, since w may be a wrapper around it.
-func showStatus(w io.Writer, s *store.Store) error {
+func showStatus(w io.Writer, s *store.Store, quotaFn quotaCollector) error {
 	conns, err := s.AllConnections()
 	if err != nil {
 		return err
 	}
 	now := time.Now().UnixMilli()
+
+	// Quota is fetched once here (a network read of each Provider's usage
+	// endpoint, ADR-0044) and rendered below whichever branch runs. quotaFn is
+	// nil on chat's inline /status, keeping the between-turn view offline; only
+	// the standalone `tomobit status` pays the network wait.
+	var quotaRows []quotaStatus
+	if quotaFn != nil {
+		qctx, cancel := context.WithTimeout(context.Background(), quotaFetchTimeout)
+		quotaRows = quotaFn(qctx)
+		cancel()
+	}
 
 	// A pipe or redirect wants the machine-readable table only — no speech
 	// (ADR-0008 Decision 4). The avatar is gone (ADR-0025): the desktop window
@@ -1914,7 +1938,13 @@ func showStatus(w io.Writer, s *store.Store) error {
 		fmt.Fprintln(out, "no connections yet — record a session and run `tomobit perceive`")
 		if len(usage) > 0 {
 			fmt.Fprintln(out)
-			return printProviderUsage(out, usage, now)
+			if err := printProviderUsage(out, usage, now); err != nil {
+				return err
+			}
+		}
+		if len(quotaRows) > 0 {
+			fmt.Fprintln(out)
+			return printQuota(out, quotaRows, now)
 		}
 		return nil
 	}
@@ -1943,7 +1973,14 @@ func showStatus(w io.Writer, s *store.Store) error {
 		fmt.Fprintln(out)
 	}
 
-	return printConnections(out, cands, now, tty)
+	if err := printConnections(out, cands, now, tty); err != nil {
+		return err
+	}
+	if len(quotaRows) > 0 {
+		fmt.Fprintln(out)
+		return printQuota(out, quotaRows, now)
+	}
+	return nil
 }
 
 // Absence knobs (ADR-0019 Decision 2: 不在と判定する空白の長さ).

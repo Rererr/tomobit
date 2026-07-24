@@ -1,8 +1,12 @@
 # ADR-0044: Provider の残量観測 — 公式手段は無いが、自分の鍵で自分の残量を聞く経路は実在する
 
-- Status: **Proposed**（2026-07-24 起草。初稿は「取得不可・推定しない」を結論としたが、
+- Status: **Accepted**（2026-07-24 起草。初稿は「取得不可・推定しない」を結論としたが、
   同日の CodexBar 実装調査で前提が変わり全面改稿。さらに同日、所有者の明示許可の下で
-  実エンドポイントを実測しスキーマを確定（下記 Context）。経路ごとの採否は所有者裁定待ち）
+  実エンドポイントを実測しスキーマを確定（下記 Context）。同日、所有者裁定により
+  **経路A（Decision 1）を採用**し status への配線を実装。Decision 2/3/4 は却下、
+  Decision 5/6 は維持、Decision 7（Curiosity 予算ゲート／記帳）は将来 ADR へ切り出し保留。
+  実端点疎通（Consequences 項3）は同日実機で **両 Provider 完了**〈codex は当初 token
+  stale の当て推量に阻まれたが、計測が仮定を反証し `codexAuthStaleAfter` を撤去→200〉）
 - Date: 2026-07-24
 - 着想元: [CodexBar](https://github.com/steipete/CodexBar)（MIT, Peter Steinberger）。
   **もらったのは経路の存在と仕組みだけ**で、コードは独立実装（`internal/quota/`）
@@ -82,6 +86,17 @@ CodexBar（MIT・macOSメニューバー常駐）は、**使用者自身の OAut
 
 **実測2: codex（`GET chatgpt.com/backend-api/wham/usage`、Bearer は `~/.codex/auth.json` の `tokens.access_token`、`auth_mode: "chatgpt"`、`last_refresh` は RFC3339）**
 
+> **追測（2026-07-24 配線時に反証）: `last_refresh` は鮮度の指標ではない。**
+> 初版の取得器は「`last_refresh` が8日超なら失効＝ネットワーク前に fail-fast」
+> という当て推量（`codexAuthStaleAfter`）を持っていた。だが配線後の実機で、
+> **ログイン済みで正常に使えている codex の auth.json の `last_refresh` が9日前**
+> だった（ファイル mtime も同じ）。codex CLI は access_token をメモリ内で更新し、
+> auth.json を書き換えない。よって8日カットオフは「使えるトークンを不明にする
+> 偽陰性」を生む。撤去し、**トークンが実際に失効しているかは端点（401）に判定
+> させる**（`codex.go` の3行下に既にあった「unparseable な last_refresh は
+> request に落とす。端点が権威」の原則を全面適用）。推測ではなく計測が方針を
+> 覆した一例（回帰テスト `TestCodexFileTokenOldLastRefreshStillYieldsTheToken`）。
+
 - トップレベルに `user_id` / `account_id` / **`email`** / `plan_type` —
   **email は個人情報。Snapshot に持ち込まない・ログに出さない**（取得器は最初から decode しない）
 - `rate_limit`: `{allowed, limit_reached, primary_window: {…}|null, secondary_window: {…}|null}`。
@@ -127,7 +142,7 @@ tomobit 経由の消費実績（claude-code の `cost_usd` 合計、codex のト
 
 ---
 
-## Decision 1: 経路A（自分の鍵 → ベンダーのusage端点）を採用する【推奨・裁定待ち】
+## Decision 1: 経路A（自分の鍵 → ベンダーのusage端点）を採用する【採用済み】
 
 4経路のうちこれだけを採る。論拠:
 
@@ -227,7 +242,7 @@ Bは表示文言が変わったとき「エラー」ではなく「誤読した�
 （Decision 7a）。それでも決定則に混ぜるべきだと考えるなら、本ADRの改版ではなく
 別ADRを起こして裁定に回す。
 
-## Decision 7: 台帳との接続【提案・裁定待ち — CodexBar に対する tomobit の優位】
+## Decision 7: 台帳との接続【将来 ADR へ保留 — CodexBar に対する tomobit の優位】
 
 CodexBar は表示して捨てる。tomobit は台帳を持つ。その差を使う接続を提案する
 （本ADRでは**実装しない**。採否は所有者裁定）:
@@ -279,18 +294,37 @@ SCHEMA 追記が要る。7a より重いので、7a を先に、7b は必要が�
   スキーマ・単位・時刻方言・プロファイル依存・429 の失敗モードを pin し、
   `internal/quota/` のフィクスチャとパーサは実測スキーマに追随済み
   （フィクスチャの値は自作ダミー。実データは持ち込んでいない）
-- 採用時（Decision 1 承認後）に残る作業:
-  1. Keychain リーダの実装（`security find-generic-password` shell out）と
-     `claude_config_dir` からの配線 — 導出関数と注入座席は実装済み
-  2. 配線: `status --view json` に quota フィールド、人間向け `status` に残量行、
-     GUI へは ADR-0039 の経路で流す。表示は「ベンダー申告の利用率」であって
-     tomobit の保証ではない旨を文言で担保する
-  3. Go 取得器そのものの実端点疎通（実測は HTTP クライアント直叩きで行った。
-     取得器コードは実端点をまだ走っていない — フェイク上の全テスト通過を
-     「完了」と呼ばない）
-  4. 資格情報の読みは fetch の瞬間だけ・読み捨て。トークンを DB・
-     ログ・エラーメッセージのどこにも書かない（エラーに載るのは
-     Keychain サービス名 / ファイルパスまで — Decision 5 追補）
+- 採用時（Decision 1 承認後）の作業と、2026-07-24 配線時点の状態:
+  1. **【実装済み】** Keychain リーダ（`internal/quota/keychain.go`:
+     `ReadClaudeKeychain` = `security find-generic-password -s <service> -w` の
+     shell out。darwin 限定・5s タイムアウト・stderr のみをエラーに載せ stdout の
+     パスワードは決して載せない）。`cmd/tomobit/quota.go` が `claude_config_dir`
+     （env > config、`wireClaude` と同じ解決）からサービス名を導出し、ファイルが
+     在ればファイル source、無ければ darwin で Keychain source を選ぶ
+  2. **【実装済み】** 配線: `status --view json` に `quota` フィールド
+     （`statusPayload.Quota`、exists:true のときだけ付与）、人間向け `status` に
+     「残量（各Providerの申告値・tomobitの保証ではない）」ブロック、GUI へは
+     ADR-0039 の経路（tomobit-gui `stage.go` の `TomoStatus.Quota` デコード＋
+     MemoryPane の残量セクション、見出しで保証ではない旨を明示）。chat のターン間
+     `/status` は nil collector でオフライン（毎ターンのネットワーク待ちを避ける）
+  3. **【両 Provider 完了】** Go 取得器そのものの実端点疎通。2026-07-24
+     所有者確認の下で `tomobit status --view json` を実機実行した結果:
+     - **claude-code: 完了。** Keychain（`Claude Code-credentials-5034c31c`）を
+       実読みし `api.anthropic.com/api/oauth/usage` が 200、取得器コード経由で
+       `five_hour`/`seven_day` の window を実際にパースできた（値は所有者の実
+       データなので本 ADR には記さない）。プロファイル依存 Keychain の導出が
+       実機で効くことを確認 — フェイク上の通過ではない実疎通
+     - **codex: 完了（当初の想定を計測が反証）。** 初回は `last_refresh` 9 日前を
+       理由に `codexAuthStaleAfter` が fail-fast し不明に退化。だが実機計測で
+       「ログイン済みでも auth.json は書き換わらない＝last_refresh は鮮度指標では
+       ない」と判明（実測2の追測）。当て推量のカットオフを撤去し端点を権威に
+       すると `chatgpt.com/backend-api/wham/usage` が 200 を返し、`7d` window を
+       実際にパースできた（null だった 5h の `primary_window` は 0% でなく正しく
+       消えることも実機で確認）
+  4. **【設計で担保】** 資格情報の読みは fetch の瞬間だけ・読み捨て（TokenSource は
+     呼び出しごとに読む）。トークンを DB・ログ・エラーメッセージのどこにも書かない
+     （エラーに載るのは Keychain サービス名 / ファイルパスまで — Decision 5 追補。
+     テスト `TestCollectQuotaErrorCarriesOriginNotToken` が 429 経路で非漏洩を固定）
 - 非公式端点が消えた日: エラー → 「不明（理由）」に自然に退化する。
   本ADRの改版は不要（Decision 5 が吸収する）
 - Decision 1 が却下された場合: `internal/quota/` は配線されないまま削除し、
