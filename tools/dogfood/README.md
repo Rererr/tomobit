@@ -16,10 +16,13 @@ ADR-0042（Split飢餓・辞書順遮蔽）を発見した。較正材料（ADR-
 - `ollama_stub.py` — 知覚バックエンドの偽 HTTP サーバー（決定的応答）
 - `bin/claude` / `bin/codex` — PATH に置く Provider スタブ
 - `env.sh` — HOME 隔離（実 `~/.tomobit` に触れない）・顔窓抑止
-- `replay/` — Go プローブ6種: seed再現（decide.Choose の決定性）/
+- `replay/` — Go プローブ7種: seed再現（decide.Choose の決定性）/
   sample（選択分布）/ probe（Split反実仮想 lnBF・飢餓）/
   planprobe（planメニュー・引退・復帰）/ gapprobe（curiosity Gap）/
-  reflectprobe（Reflection 5トリガ・予算・verdict の20チェック）
+  reflectprobe（Reflection 5トリガ・予算・verdict の20チェック）/
+  stagecurve（ADR-0017 成長ステージ較正: セッション数→stage曲線、
+  isSharp Wobble の単一/複数Provider比較、ゲート実数値、ノブ感度スイープ。
+  perceiveを介さずcore.Engine.Applyを直接叩く。`go run ./stagecurve <dir>`）
 - `seed2.py` + `run_plan.sh` + `run_adr41.sh` — 第2弾（2026-07-24）:
   plan学習・reflection・duel・ADR-0041回帰
 - `duel.exp` / `duel_budget.exp` — duel の実PTY駆動（ADR-0026 の手動E2Eの

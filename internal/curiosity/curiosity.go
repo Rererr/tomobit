@@ -32,7 +32,11 @@ const (
 	ThetaEven = 1.0 // nats: providers are indistinguishable below this ln BF
 	NMin      = 2.5 // effective evidence each capability Connection needs
 	FMin      = 2.5 // decayed scope frequency worth a question
-	EMax      = 0.5 // "we don't know the preference yet" ceiling
+
+	// EMax: "we don't know the preference yet" ceiling. The value lives in
+	// core (PrefKnownMin) because the face's S5 gate must read the same
+	// number and cannot import this package (see core's comment).
+	EMax = core.PrefKnownMin
 
 	// BudgetWindowMs is the rolling window in which a single tomo.asked spends
 	// the whole budget (ADR-0007 Decision 3).

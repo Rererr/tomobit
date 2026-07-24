@@ -24,6 +24,16 @@ const (
 	// thousand-battle veteran; the child is born an m₀-baby whose first
 	// impression is the parent's opinion.
 	InheritM0 = 2.0
+
+	// PrefKnownMin: the decayed preference evidence below which a pair's
+	// preference no longer counts as known. Two organs must read the same
+	// number — curiosity's re-ask ceiling (EMax: below this the question
+	// reopens, ADR-0007 追記) and the face's S5 gate (at or above this Tomo
+	// still knows the human pair, ADR-0045 Decision 3 追記) — or "Tomo would
+	// ask again" and "Tomo still knows you" drift apart. It lives here, not
+	// in curiosity, because face cannot import curiosity (curiosity → voice →
+	// face is already an import path).
+	PrefKnownMin = 0.5
 )
 
 // DecayFactor returns 2^(-Δt/halflife); 1 when to <= from.
