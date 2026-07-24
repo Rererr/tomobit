@@ -21,6 +21,11 @@ tomobit setup    # 対話式で配線を決める(claude profile / 知覚バッ�
 tomobit          # 相棒ビュー → そのまま対話へ。単発なら `tomobit do "..."`
 ```
 
+`do` / `chat` の `--provider` の既定は **auto** — Tomoが台帳の経験から実行者を選ぶ
+（[ADR-0043](docs/decisions/ADR-0043-auto-by-default.md)）。autoの候補になるのは実際に
+起動できるProviderだけなので、codex未導入でもそのまま動く。`--provider claude-code` の
+明示指定は今までどおり効く。
+
 台帳は `~/.tomobit/tomobit.db` に住む（[経験主権 — ADR-0018](docs/decisions/ADR-0018-experience-sovereignty.md)）。
 コマンド一覧は `tomobit help`。初期導入の設計は [ADR-0021](docs/decisions/ADR-0021-onboarding.md)。
 
@@ -92,3 +97,7 @@ tomobit          # 相棒ビュー → そのまま対話へ。単発なら `tom
 - [ADR-0040](docs/decisions/ADR-0040-decision-audit-view.md) — 判断の監査行をviewへ流す（`tomo.decided`に記帳済みのCandidates〈分位点・ゲート・勝ち数〉を`chat --view ndjson`の`decided`イベントとしても流し、GUIが「なぜこのProviderか」を開示可能にする / 声は不変・既定は畳む — ADR-0011根拠3の監査可能性を表示経路へ延伸。Proposed）
 - [ADR-0041](docs/decisions/ADR-0041-out-of-order-perception.md) — 順序外の知覚は正典に立ち返る（遅延知覚がlive射影を減衰重み1.0で汚し無期限に残る実測 / バッチが既知覚より古ければlive Applyを捨ててrebuild — forgetの自動rebuildと同じ姿勢。Proposed）
 - [ADR-0042](docs/decisions/ADR-0042-split-starvation-and-lexical-shadowing.md) — Splitの飢餓と辞書順の遮蔽（均衡混合でexcess surprisalが発火せず、同粒度tie-breakの辞書順でlang=系Connectionが系統的に読まれない — 11連敗Providerが最頻選択される実測 / 対案5件を実測で序列づけ、対案2「選ぶのは一つ、拒否は同粒度の全員」を先行適用。ADR-0013 Decision 2改版。所有者の追認待ち）
+- [ADR-0043](docs/decisions/ADR-0043-auto-by-default.md) — 既定をautoへ（実台帳41セッション全てclaude-code・tomo.decided 0件＝判断の器官が既定経路で一度も呼ばれていない実測 / do・chatの`--provider`既定をautoにし、候補は起動できるProviderに限る＝環境の不備をProviderの能力の証拠にしない / 起動できなかった実行は非ゼロ終了・経験にもしない / humanは知っている文脈でのみ候補 / GUIはProviderを明示的に持ち既定auto — ADR-0010 Decision 1・ADR-0018 Decision 2を改版。Proposed）
+- [ADR-0044](docs/decisions/ADR-0044-provider-quota-observation.md) — Providerの残量観測（公式手段は無いが、自分のOAuthトークンでベンダー自身のusage端点を読む経路が実在する〈着想元CodexBar・MIT・独立実装〉 / 経路A採用を推奨・PTYスクレイプとブラウザcookie読みとcodexbar依存は却下 / 取れないときは「不明」＝推定値を出さない・決定則には混ぜない / curiosity予算への残量ゲートと`quota.observed`記帳を提案。実端点の実証は所有者許可待ち。Proposed）
+- [ADR-0045](docs/decisions/ADR-0045-stage-needs-a-real-choice.md) — 鋭さは選択肢が無ければ測れない（候補1つだとWobbleが構造的に常に0で「おとな」へ素通り・2Providerだと90セッションでも未到達の正反対の病理を合成dogfoodで実測 / 鋭さは競争のある島でのみ測る・較正判定に標本数を要求〈ThetaCalMin=8.0実測較正〉・S5「あいぼう」は自分との比較を知っていること — ADR-0017の3ゲートを精密化。Proposed）
+- [ADR-0046](docs/decisions/ADR-0046-growth-is-legible.md) — 次の段に何が足りないかを開示する（成長は段が変わる瞬間しか見えず、しかも3ゲートが同時に開いて段が踏まれない＝育てている実感が生まれない / `status --view json`に`growth`〈各ゲートの値・閾値・充足〉を足し、測定不能と未達を別の顔で出す / 声は不変・見せ方はレンダラの裁量・既定は畳む — ADR-0040 Decision 2と同じ二層。Proposed・未実装）

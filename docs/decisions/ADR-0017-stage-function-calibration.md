@@ -31,6 +31,14 @@
 
 ## Decision: S3/S4を「較正＋鋭さ」でゲートする
 
+> **改版（[ADR-0045](ADR-0045-stage-needs-a-real-choice.md)・2026-07-24）**:
+> 本Decisionの3ゲートは精密化された — S3の較正は標本量（`sumW ≥ ThetaCalMin`）を
+> 要求し（ADR-0045 Decision 2）、S4の鋭さは**競争のある**頻繁な島でのみ測り
+> （同 Decision 1: 候補1つの島の Wobble≡0 は測定ではない）、S5は human を含む
+> ペアの preference 証拠（閾値は curiosity の EMax）で定義し直された
+> （同 Decision 3）。S0〜S2の量ゲート・「ステージはView」の原則・
+> 若返り＝正直さは不変。
+
 ```text
 S0 たまご    connectionsが空                       据え置き
 S1 ひよこ    connection ≥ 1                        据え置き

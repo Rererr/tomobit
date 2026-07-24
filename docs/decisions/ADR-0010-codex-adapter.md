@@ -20,6 +20,12 @@ preferenceは永遠に育たない。2つ目のAdapterが相棒の完成条件�
 
 ## Decision 1: 選択は `do --provider`（既定 claude-code）— 人間が選ぶ
 
+> **改版（[ADR-0043](ADR-0043-auto-by-default.md) Decision 1・2026-07-24）**:
+> 「既定 claude-code」は置換された — do/chat の `--provider` 既定は `auto`。
+> 本Decisionが自ら書いた解除条件（Connectionが十分育つまで）に到達したための
+> 改版で、`--provider claude-code` の明示指定は今までどおり効く。
+> Decision 2/3/4（起動形・写像・検証の限界）は不変。
+
 - 登録名は `codex`（R3: 道具名のみ。モデル名はContext属性へ）
 - Phase 1のDecision Engineは「人間がフラグで選ぶ」に縮退する
   （ADR-0006のPlan縮退・ADR-0007のScheduler縮退と同型）。
