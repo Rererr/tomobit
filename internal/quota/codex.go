@@ -14,10 +14,6 @@ import (
 const (
 	codexProvider = "codex"
 	codexUsageURL = "https://chatgpt.com/backend-api/wham/usage"
-	// codexAuthStaleAfter mirrors the CLI's own refresh horizon: a token whose
-	// last_refresh is older than this has long expired, so the request is
-	// doomed — fail before the network, with the user's fix in the message.
-	codexAuthStaleAfter = 8 * 24 * time.Hour
 )
 
 // CodexAuthPath prefers $CODEX_HOME/auth.json (the CLI's own override), else
@@ -38,11 +34,16 @@ func CodexAuthPath() (string, error) {
 // Read-only, same line as ClaudeFileToken: tomobit never refreshes.
 type CodexFileToken struct {
 	Path string
-	Now  func() time.Time // nil = time.Now; injected so staleness is testable
 }
 
 // codexAuth is the auth.json shape (live-verified 2026-07-24: tokens with
 // access_token under auth_mode "chatgpt", last_refresh in RFC3339).
+// last_refresh is decoded to document the schema but never gates the request:
+// measured 2026-07-24, a logged-in user's auth.json carried a last_refresh 9
+// days old because the codex CLI refreshes the access token in memory without
+// rewriting the file. The endpoint — not this reading of a disk timestamp — is
+// the authority on whether the token still works (a stale-looking last_refresh
+// with a valid token is exactly the false negative a pre-network cutoff caused).
 type codexAuth struct {
 	Tokens struct {
 		AccessToken string `json:"access_token"`
@@ -62,16 +63,10 @@ func (s CodexFileToken) Token() (string, error) {
 	if a.Tokens.AccessToken == "" {
 		return "", fmt.Errorf("codex auth %s: no tokens.access_token (not logged in, or the schema drifted)", s.Path)
 	}
-	if a.LastRefresh != "" {
-		// An unparseable last_refresh falls through to the request: the
-		// endpoint, not this reading of the file, is the authority on
-		// whether the token still works.
-		if t, err := time.Parse(time.RFC3339, a.LastRefresh); err == nil {
-			if nowOf(s.Now).Sub(t) > codexAuthStaleAfter {
-				return "", fmt.Errorf("codex token is stale (last_refresh %s) — run `codex` once to refresh it", a.LastRefresh)
-			}
-		}
-	}
+	// No staleness cutoff: a present token is handed to the request, and a
+	// genuinely expired one comes back as the endpoint's 401 ("run the provider
+	// CLI once to re-login", getJSON) — the honest reason, not a guess from the
+	// file's age.
 	return a.Tokens.AccessToken, nil
 }
 

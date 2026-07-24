@@ -138,32 +138,22 @@ func TestCodexFetchErrorsNameTheCredentialOrigin(t *testing.T) {
 	}
 }
 
-func TestCodexFileTokenStaleLastRefreshFailsBeforeAnyNetwork(t *testing.T) {
+// TestCodexFileTokenOldLastRefreshStillYieldsTheToken guards the regression
+// measured 2026-07-24: a logged-in user's auth.json carried a last_refresh 9
+// days old (the codex CLI refreshes in memory without rewriting the file), and
+// an 8-day pre-network cutoff turned that into a false 不明 for a token that
+// still worked. A present token must be handed to the request regardless of the
+// timestamp's age — the endpoint, not the file's clock, decides validity.
+func TestCodexFileTokenOldLastRefreshStillYieldsTheToken(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "auth.json")
-	if err := os.WriteFile(p, []byte(`{"tokens":{"access_token":"tok"},"last_refresh":"2026-07-01T00:00:00Z"}`), 0o600); err != nil {
+	if err := os.WriteFile(p, []byte(`{"tokens":{"access_token":"tok-old"},"last_refresh":"2026-06-01T00:00:00Z"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC) // 23 days later, past the 8-day horizon
-	_, err := CodexFileToken{Path: p, Now: func() time.Time { return now }}.Token()
-	if err == nil {
-		t.Fatal("a stale token is a doomed request — must fail before the network")
-	}
-	if !strings.Contains(err.Error(), "run `codex`") {
-		t.Errorf("tomobit never refreshes credentials — the fix is the user's: %v", err)
-	}
-}
-
-func TestCodexFileTokenFreshLastRefreshYieldsTheToken(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "auth.json")
-	if err := os.WriteFile(p, []byte(`{"tokens":{"access_token":"tok-1"},"last_refresh":"2026-07-23T00:00:00Z"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
-	tok, err := CodexFileToken{Path: p, Now: func() time.Time { return now }}.Token()
+	tok, err := CodexFileToken{Path: p}.Token()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("a weeks-old last_refresh must not block a present token: %v", err)
 	}
-	if tok != "tok-1" {
+	if tok != "tok-old" {
 		t.Errorf("token = %q", tok)
 	}
 }
