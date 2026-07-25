@@ -6,3 +6,6 @@
 
 # 設計図の生成物(単体で開くHTML)。リポジトリには入れない
 /tomobit-architecture.html
+
+# goreleaser の出力
+/dist/
