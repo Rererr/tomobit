@@ -48,13 +48,29 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# 初回(v0.1.0)は前のタグが無く、これが98コミット全部を生SHAで並べたので本文は
+# 手書きに差し替えた。2回目以降は前タグとの差分になるので自動で足りるが、
+# 素の羅列は読めないので種類で束ねる。
 changelog:
   use: github
   sort: asc
+  groups:
+    - title: 器官と挙動
+      regexp: '^feat:'
+      order: 0
+    - title: 修正
+      regexp: '^fix:'
+      order: 1
+    - title: 設計の記録(ADR)
+      regexp: '^docs:'
+      order: 2
+    - title: その他
+      order: 99
   filters:
     exclude:
       - "^chore:"
       - "^test:"
+      - "^Merge "
 
 release:
   draft: true # Zenodo が拾う前に本文とDOIバッジを確認する余地を残す
