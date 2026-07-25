@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -166,7 +167,46 @@ func (f *ClaudeFetcher) fetchError(err error) error {
 
 // claudeWindowOrder puts the two windows every plan shares first; anything
 // else (model weeklies, when the vendor populates them) follows lexically.
-var claudeWindowOrder = map[string]int{"five_hour": 0, "seven_day": 1}
+// Keyed on the normalized label (spanLabelFromKey), not the vendor's key.
+var claudeWindowOrder = map[string]int{"5h": 0, "7d": 1}
+
+// spanWordNumbers / spanWordUnits are the English spelled-out spans claude
+// keys its windows with (ADR-0044 改訂 2026-07-25). Small on purpose: this is
+// a faithful restatement of a span we read, not a guess about what a key means
+// — an unrecognized word leaves the key untouched.
+var spanWordNumbers = map[string]int{
+	"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+	"seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+
+var spanWordUnits = map[string]string{
+	"minute": "m", "hour": "h", "day": "d", "week": "w", "month": "mo",
+}
+
+// spanLabelFromKey restates a spelled-out window key as the span vocabulary
+// codexWindowLabel already emits ("5h", "7d"), so one screen does not show two
+// vendors' spellings of the same idea. Trailing key parts survive as a
+// qualifier (seven_day_opus → "7d opus"), and anything this cannot read comes
+// back unchanged — degrading to the vendor's own word, never to a wrong one.
+func spanLabelFromKey(key string) string {
+	parts := strings.Split(key, "_")
+	if len(parts) < 2 {
+		return key
+	}
+	n, ok := spanWordNumbers[parts[0]]
+	if !ok {
+		return key
+	}
+	unit, ok := spanWordUnits[strings.TrimSuffix(parts[1], "s")]
+	if !ok {
+		return key
+	}
+	label := fmt.Sprintf("%d%s", n, unit)
+	if rest := parts[2:]; len(rest) > 0 {
+		label += " " + strings.Join(rest, " ")
+	}
+	return label
+}
 
 // parseClaudeUsage reads every top-level object carrying a numeric
 // utilization as one window, keyed by the vendor's own name. The live schema
@@ -194,7 +234,7 @@ func parseClaudeUsage(body []byte) ([]Window, error) {
 			continue
 		}
 		windows = append(windows, Window{
-			Label:       key,
+			Label:       spanLabelFromKey(key),
 			UsedPercent: *w.Utilization,
 			ResetsAt:    parseClaudeResetsAt(w.ResetsAt),
 		})

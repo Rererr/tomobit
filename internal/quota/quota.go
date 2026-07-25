@@ -36,10 +36,15 @@ type TokenSource interface {
 
 // Window is one vendor-measured rate-limit window.
 type Window struct {
-	// Label names the window in the vendor's own vocabulary ("five_hour",
-	// "7d"). No prettifying translation layer on top of an unverified schema:
-	// renaming a key we have not seen live would add a second thing to be
-	// wrong about.
+	// Label names the window by its span in one vocabulary across vendors
+	// ("5h", "7d") — codex derives it from limit_window_seconds
+	// (codexWindowLabel), claude restates its spelled-out keys into the same
+	// form (spanLabelFromKey). ADR-0044 改訂 2026-07-25: the earlier rule kept
+	// each vendor's own spelling to avoid "renaming a key we have not seen
+	// live", but that showed one screen "five_hour" next to "7d" for the same
+	// idea. The restatement is faithful to a span we actually read, and
+	// anything unreadable still comes back as the vendor's own word — the
+	// guess the old rule guarded against is still not made.
 	Label string
 	// UsedPercent is the vendor-reported utilization, assumed 0–100. The live
 	// verification (ADR-0044 Consequences) pins the unit.

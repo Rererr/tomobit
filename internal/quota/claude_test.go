@@ -71,8 +71,9 @@ func TestClaudeFetchReadsTheMeasuredSchemaNullKeysAndNonWindowsSkipped(t *testin
 		labels = append(labels, w.Label)
 	}
 	// Null model keys and limits/spend/extra_usage(null utilization) are not
-	// windows; only the two populated ones remain.
-	want := []string{"five_hour", "seven_day"}
+	// windows; only the two populated ones remain. Labels come back in the
+	// span vocabulary codex already speaks (ADR-0044 改訂 2026-07-25).
+	want := []string{"5h", "7d"}
 	if fmt.Sprint(labels) != fmt.Sprint(want) {
 		t.Fatalf("windows = %v, want %v", labels, want)
 	}
@@ -82,7 +83,7 @@ func TestClaudeFetchReadsTheMeasuredSchemaNullKeysAndNonWindowsSkipped(t *testin
 	// The measured resets_at form: microseconds plus a numeric offset.
 	wantReset := time.Date(2026, 7, 24, 12, 0, 0, 123456000, time.UTC)
 	if !snap.Windows[0].ResetsAt.Equal(wantReset) {
-		t.Errorf("five_hour resets_at = %v, want %v", snap.Windows[0].ResetsAt, wantReset)
+		t.Errorf("5h resets_at = %v, want %v", snap.Windows[0].ResetsAt, wantReset)
 	}
 }
 
@@ -99,9 +100,33 @@ func TestClaudeParsePopulatedModelWeekliesJoinAfterTheSharedWindows(t *testing.T
 	for _, w := range windows {
 		labels = append(labels, w.Label)
 	}
-	want := []string{"five_hour", "seven_day", "seven_day_opus"}
+	// モデル別の週次は span + 修飾子に畳まれ、共有の2枠の後ろに続く。
+	want := []string{"5h", "7d", "7d opus"}
 	if fmt.Sprint(labels) != fmt.Sprint(want) {
 		t.Fatalf("windows = %v, want %v", labels, want)
+	}
+}
+
+// ADR-0044 改訂 2026-07-25: 画面に "five_hour" と "7d" が並ぶのをやめる。
+// 読めた分だけを言い換え、読めないものはベンダーの語のまま返す — 旧規則が
+// 恐れた「見たことのないキーの改名」は依然として行わない。
+func TestSpanLabelFromKeyRestatesOnlyWhatItCanRead(t *testing.T) {
+	cases := map[string]string{
+		"five_hour":       "5h",
+		"seven_day":       "7d",
+		"seven_days":      "7d",
+		"seven_day_opus":  "7d opus",
+		"one_minute":      "1m",
+		"twelve_month":    "12mo",
+		"thirty_day":      "thirty_day",      // 数詞の表に無い = 触らない
+		"weekly":          "weekly",          // 区切りが無い = 触らない
+		"seven_fortnight": "seven_fortnight", // 単位の表に無い = 触らない
+		"":                "",
+	}
+	for in, want := range cases {
+		if got := spanLabelFromKey(in); got != want {
+			t.Errorf("spanLabelFromKey(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
