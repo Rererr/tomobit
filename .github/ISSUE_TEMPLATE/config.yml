@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 脆弱性の報告 / Report a vulnerability
+    url: https://github.com/Rererr/tomobit/security/advisories/new
+    about: 公開Issueではなく、非公開の報告経路を使ってください
+  - name: 設計を読む / Read the design records
+    url: https://github.com/Rererr/tomobit/tree/main/docs/decisions
+    about: 挙動の「なぜ」はだいたい48本のADRのどれかに書いてあります
+  - name: GUI の問題 / Issues with the desktop GUI
+    url: https://github.com/Rererr/tomobit-gui/issues
+    about: チャットGUI(tomobit-gui)は別リポジトリです

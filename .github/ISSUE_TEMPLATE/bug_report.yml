@@ -1,0 +1,54 @@
+name: バグ報告 / Bug report
+description: 想定と違う挙動。日本語・English どちらでも
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **台帳の中身を貼らないでください。** `~/.tomobit/tomobit.db` には実際の会話が
+        入っています。ログを貼るときは、機微な部分を伏せてから。
+
+        Please do not paste ledger contents — `~/.tomobit/tomobit.db` holds your
+        real conversations.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 何が起きたか / What happened
+      description: 期待した挙動と、実際の挙動
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 再現手順 / How to reproduce
+      description: |
+        使い捨ての台帳で再現するなら、そちらの手順を。
+        `TOMOBIT_DB=/tmp/scratch.db tomobit ...`
+      placeholder: |
+        1. TOMOBIT_DB=/tmp/scratch.db tomobit do "..."
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: 環境 / Environment
+      value: |
+        - OS:
+        - `go version`:
+        - tomobit のコミット or タグ:
+        - Provider: claude-code / codex / 両方
+        - 知覚バックエンド: ollama / mlx-lm / 無し
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 確認
+      options:
+        - label: 貼ったログに機微な情報が含まれていないことを確認した
+          required: true

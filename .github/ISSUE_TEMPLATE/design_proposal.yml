@@ -1,0 +1,56 @@
+name: 設計の提案 / Design proposal (ADR draft)
+description: 挙動・思想・数式に関わる変更。コードより先にここから
+labels: [design, adr]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        このプロジェクトでは、設計に関わる変更は **ADR（Architecture Decision Record）**
+        から始まります。[docs/decisions/](../../tree/main/docs/decisions) に48本あります。
+
+        いちばん強いADRは、思いつきではなく**観測**から始まっています。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 何が問題か / What is wrong
+      description: |
+        できれば実測で。「こうなっているはずなのに、実際はこうだった」の形が最も強い。
+      placeholder: |
+        例: 台帳41セッションが全てclaude-codeで、tomo.decided は0件だった。
+        判断の器官が既定経路で一度も呼ばれていなかった。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 提案 / What you propose
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 却下した代替案と、その理由 / Alternatives rejected, and why
+      description: これが無いADRは弱いです
+    validations:
+      required: true
+
+  - type: textarea
+    id: falsifier
+    attributes:
+      label: これが間違いだと分かる条件 / How we would know this was wrong
+      description: |
+        何を観測したら、この判断を撤回すべきか。
+        （このプロジェクトは覆された判断も記録として残します）
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: principles
+    attributes:
+      label: 原則との整合
+      options:
+        - label: 判断にLLMを呼ばない（Meaning by Model, Judgment by Math / ADR-0011）
+        - label: 真実は追記専用のまま、射影は rebuild で再構成できる（ADR-0001）

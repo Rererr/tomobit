@@ -1,0 +1,67 @@
+# goreleaser v2. 検証: goreleaser check && goreleaser release --snapshot --clean
+#
+# 配布するのは cmd/tomobit だけ。顔窓(cmd/tomobit-face)は Ebiten = cgo + 各OSの
+# システムライブラリを要求するのでクロスコンパイルできない — 顔窓は go install の
+# ままにする。主CLIが CGO_ENABLED=0 で5ターゲット全部通ることは実測済みで、
+# これは ADR-0048「Ebiten依存を端末利用者へ伝播させない」がツールチェーンの
+# 側からも成立していることの確認になっている。
+version: 2
+project_name: tomobit
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: tomobit
+    main: ./cmd/tomobit
+    binary: tomobit
+    env:
+      - CGO_ENABLED=0
+    # README が「動く」と言っているのは macOS。Linux はCIが通っているだけで、
+    # まだ誰も住んでいない。Windows はコンパイルは通るが宣言しない。
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    # -X でのバージョン埋め込みはしない。main にその変数が無く、存在しない
+    # シンボルへの -X はリンカが黙って捨てるので、埋めたつもりの嘘になる。
+    # 埋めるなら main に var を生やし `tomobit version` を足してからにする。
+    ldflags:
+      - -s -w
+
+archives:
+  - id: tomobit
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - README.en.md
+      - LICENSE
+      - LICENSE-docs
+      - CITATION.cff
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^chore:"
+      - "^test:"
+
+release:
+  draft: true # Zenodo が拾う前に本文とDOIバッジを確認する余地を残す
+  footer: |
+    ---
+    **顔窓 (`tomobit-face`) はこのアーカイブに入っていません。**
+    Ebiten が cgo を要求するためで、`go install github.com/Rererr/tomobit/cmd/tomobit-face@latest`
+    で入れてください。無くても本体は動きます（警告1行で続行）。
+
+    ライセンス: コード = AGPL-3.0-only / docs = CC BY-SA 4.0
