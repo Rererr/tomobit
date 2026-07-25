@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: "If you use Tomobit or build on its design, please cite it as below."
+title: "Tomobit: a Living Harness that learns which AI to trust, in which context"
+abstract: >-
+  Tomobit stands in front of multiple coding AIs (Claude Code, Codex, local
+  models) and learns, from lived experience, which provider and which plan
+  works in which context. Knowledge is a living Connection Graph backed by a
+  single decayed Beta ledger; meaning is assigned by a local LLM, but every
+  judgment is a pure function (pessimistic capability gate plus Thompson
+  sampling). Connections discover their own context granularity by splitting
+  and merging under a corrected log Bayes factor driven by excess surprisal.
+  The ledger lives in one SQLite file owned by the user.
+type: software
+authors:
+  - name: "Rererr"
+    website: "https://github.com/Rererr"
+repository-code: "https://github.com/Rererr/tomobit"
+url: "https://github.com/Rererr/tomobit"
+license: AGPL-3.0-only
+keywords:
+  - ai-coding-agent
+  - agent-harness
+  - model-routing
+  - contextual-bandit
+  - thompson-sampling
+  - bayesian-inference
+  - agent-memory
+  - local-first
+  - event-sourcing
+  - go
+# バージョンとリリース日は v0.1.0 のタグを打つ時点で更新する。
+# Zenodo 連携を有効にしておくと、タグ作成時にこの内容から DOI が発行される。
+version: 0.1.0
+date-released: 2026-07-25
