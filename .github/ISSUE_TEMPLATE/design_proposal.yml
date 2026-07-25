@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         このプロジェクトでは、設計に関わる変更は **ADR（Architecture Decision Record）**
-        から始まります。[docs/decisions/](../../tree/main/docs/decisions) に48本あります。
+        から始まります。[docs/decisions/](../../tree/main/docs/decisions) に49本あります。
 
         いちばん強いADRは、思いつきではなく**観測**から始まっています。
 

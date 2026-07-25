@@ -28,7 +28,13 @@ keywords:
   - local-first
   - event-sourcing
   - go
-# バージョンとリリース日は v0.1.0 のタグを打つ時点で更新する。
-# Zenodo 連携を有効にしておくと、タグ作成時にこの内容から DOI が発行される。
+# doi は concept DOI（版を問わず常に最新版へ解決する）。版が上がっても引用が
+# 切れないので、人に配るならこちら。特定の版を再現したい引用のために、その版の
+# DOI は identifiers に並べる。
+doi: 10.5281/zenodo.21553016
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.21553017
+    description: The versioned DOI for v0.1.0
 version: 0.1.0
 date-released: 2026-07-25

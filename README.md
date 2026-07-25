@@ -2,6 +2,10 @@
 
 > **Tomobit is not built to use AI. Tomobit is built to grow with it.**
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21553016.svg)](https://doi.org/10.5281/zenodo.21553016)
+[![CI](https://github.com/Rererr/tomobit/actions/workflows/ci.yml/badge.svg)](https://github.com/Rererr/tomobit/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+
 複数のコーディングAIの前に立ち、経験（Experience）からConnectionを育てる **Living Harness**。
 
 *English: [README.en.md](README.en.md)（正本はこの日本語版）*
@@ -136,3 +140,7 @@ tomobit          # 相棒ビュー → そのまま対話へ。単発なら `tom
 
 設計を参照・引用する場合は [CITATION.cff](CITATION.cff) を使ってください
 （GitHubの "Cite this repository" から各形式で取得できます）。
+
+DOI: [**10.5281/zenodo.21553016**](https://doi.org/10.5281/zenodo.21553016)
+— 版を問わず常に最新版へ解決します。特定の版を指したいときは、その版のDOIを
+（v0.1.0 = [10.5281/zenodo.21553017](https://doi.org/10.5281/zenodo.21553017)）。
