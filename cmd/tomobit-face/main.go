@@ -34,13 +34,31 @@ func run(args []string) error {
 	fontPath := fs.String("font", "", "font file for the bubble (.ttf/.otf/.ttc; default: system Japanese font)")
 	debug := fs.Bool("debug", false, "keep raw stderr (macOS system noise included — needed to see panics)")
 	resident := fs.Bool("resident", false, "0セッションでも常駐（既定は最後の対話終了後に自閉）")
+	view := fs.String("view", "", "json で姿(スプライト資産とアニメのノブ)を出して終わる — 窓は開かない")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), `tomobit-face — Tomoのマスコット窓（表示専用・DBは読み取りのみ）
 
-ドラッグで移動 / Esc・Qで終了。回答は端末（tomobit）側で。`)
+ドラッグで移動 / Esc・Qで終了。回答は端末（tomobit）側で。
+--view json は窓を開かず姿(スプライト資産)を出して終わる（第三のレンダラ向け）。`)
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)
+
+	breed, ok := facewin.ParseBreed(*breedName)
+	if !ok {
+		return fmt.Errorf("unknown --breed %q (shiba / retriever / pom)", *breedName)
+	}
+
+	// 姿の機械可読view (ADR-0048): assets out, no window, no DB, no lock. It
+	// returns before every side effect below — a third renderer asking what Tomo
+	// looks like must not take the desktop's one mascot slot, silence anyone's
+	// stderr, or open a ledger it never reads.
+	if *view != "" {
+		if *view != "json" {
+			return fmt.Errorf("unknown --view %q (json)", *view)
+		}
+		return writeSpriteView(os.Stdout, breed)
+	}
 
 	// One mascot per machine (ADR-0025 Decision 2): if another face already
 	// holds the lock, exit quietly — a manual second launch is a no-op, not an
@@ -65,10 +83,6 @@ func run(args []string) error {
 		}
 	}
 
-	breed, ok := facewin.ParseBreed(*breedName)
-	if !ok {
-		return fmt.Errorf("unknown --breed %q (shiba / retriever / pom)", *breedName)
-	}
 	if *scale < 1 {
 		return fmt.Errorf("--scale must be a positive integer (integer nearest-neighbor only)")
 	}

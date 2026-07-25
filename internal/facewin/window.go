@@ -24,6 +24,7 @@ const (
 	blinkHold    = 180 * time.Millisecond
 	bubbleFor    = 8 * time.Second // 吹き出し表示時間
 	bobPeriod    = 3200 * time.Millisecond
+	bobPx        = 1 // 呼吸の振れ幅: 整数拡大を崩さないよう論理1px固定
 
 	// residentGrace is how long presence must stay 0 before an ephemeral window
 	// self-closes (ADR-0027 Decision 2): a momentary dip — a do finishing before
@@ -249,7 +250,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	// offsets only, so the nearest-neighbor edges never smear.
 	bob := 0
 	if g.started && (now.Sub(g.start)/(bobPeriod/2))%2 == 1 {
-		bob = 1
+		bob = bobPx
 	}
 
 	spriteX := (g.w - spriteSize*g.scale) / 2
