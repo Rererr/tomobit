@@ -67,6 +67,14 @@ type quotaCollector func(ctx context.Context) []quotaStatus
 // swap the real reader out; chat's inline /status passes nil instead, staying
 // offline between turns (a per-turn network wait is not what a chat is for).
 var collectQuotaFn quotaCollector = func(ctx context.Context) []quotaStatus {
+	// ADR-0049: silence is not consent. Until config quota_observe is an
+	// explicit true, no Keychain item is read and no vendor endpoint is called.
+	// Disabled returns nil, not a 不明 row — 不明 means "we asked and could not
+	// tell" (ADR-0044 Decision 5), and claiming that when we never asked would
+	// make the one honest word in this view a lie.
+	if !cfg.QuotaObserveEnabled() {
+		return nil
+	}
 	return collectQuota(ctx, defaultQuotaFetchers())
 }
 

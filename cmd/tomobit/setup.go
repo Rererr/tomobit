@@ -59,6 +59,9 @@ func cmdSetup(args []string) error {
 	if err := askFaceResident(in, out, &c); err != nil {
 		return err
 	}
+	if err := askQuotaObserve(in, out, &c); err != nil {
+		return err
+	}
 
 	if err := config.Save(c); err != nil {
 		return fmt.Errorf("setup: %w", err)
@@ -400,6 +403,40 @@ func askFaceResident(in *bufio.Reader, out io.Writer, c *config.Config) error {
 		c.FaceResident = &yes
 	case "off", "n", "no":
 		c.FaceResident = nil
+	default:
+		fmt.Fprintf(out, "  on か off で — 現状(%s)を維持\n", cur)
+	}
+	return nil
+}
+
+// askQuotaObserve asks whether to turn the ADR-0044 route-A observers on
+// (ADR-0049). The mirror of askFaceResident: "on" stores &true and "off"
+// stores nil, because absent already means off. What makes this question
+// different from the others is that the prompt must state what saying yes
+// actually does — reading a Keychain item and calling an endpoint the vendor
+// never documented. An opt-in nobody understood is not consent, so the cost is
+// spelled out in the question rather than left in the ADR.
+func askQuotaObserve(in *bufio.Reader, out io.Writer, c *config.Config) error {
+	cur := "off(既定)"
+	if c.QuotaObserveEnabled() {
+		cur = "on"
+	}
+	fmt.Fprintf(out, "\nProviderの残量をstatusに表示する?\n"+
+		"  onにすると、あなた自身のOAuthトークンをmacOS Keychainから読み、\n"+
+		"  ベンダーの**非公式な**usage端点を参照します(いつ消えてもおかしくない)。\n"+
+		"  取れなければ「不明」と出るだけで、推定はせず、判断にも混ぜません。\n"+
+		"  [on/off, 現在: %s / Enterで維持] > ", cur)
+	line, err := readLine(in)
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(line) {
+	case "":
+	case "on", "y", "yes":
+		yes := true
+		c.QuotaObserve = &yes
+	case "off", "n", "no":
+		c.QuotaObserve = nil
 	default:
 		fmt.Fprintf(out, "  on か off で — 現状(%s)を維持\n", cur)
 	}

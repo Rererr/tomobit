@@ -4,6 +4,8 @@
 
 複数のコーディングAIの前に立ち、経験（Experience）からConnectionを育てる **Living Harness**。
 
+*English: [README.en.md](README.en.md)（正本はこの日本語版）*
+
 ## Getting Started
 
 前提:
@@ -103,6 +105,8 @@ tomobit          # 相棒ビュー → そのまま対話へ。単発なら `tom
 - [ADR-0046](docs/decisions/ADR-0046-growth-is-legible.md) — 次の段に何が足りないかを開示する（成長は段が変わる瞬間しか見えず、しかも3ゲートが同時に開いて段が踏まれない＝育てている実感が生まれない / `status --view json`に`growth`〈各ゲートの値・閾値・充足〉を足し、測定不能と未達を別の顔で出す / 声は不変・見せ方はレンダラの裁量・既定は畳む — ADR-0040 Decision 2と同じ二層。Accepted・実装済み）
 - [ADR-0047](docs/decisions/ADR-0047-workspace-is-wiring.md) — 働く場所は配線である（作業ディレクトリと読み取り先が claude 固有の env 経由でしか渡らず、codex を選ぶと無言で効かなくなっていた / `executor.Request` に `WorkDir`・`AddDirs` を持たせ cwd は Executor が落とし `--add-dir` は各 Adapter が翻訳・chat に `/cd` と `/add-dir` を追加〈他の配線と同じくタスク境界でだけ替わる〉 / 台帳には書かない — 配線は経験ではない。Accepted・実装済み）
 - [ADR-0048](docs/decisions/ADR-0048-sprite-machine-view.md) — 姿の機械可読view（第三のレンダラが姿を欲しがったが、資産を書き写せば正本が割れ `internal/` は import できない — ADR-0039と同じ構造の問題 / `tomobit-face --view json` が格子・パレット・気分記号の座・アニメのノブを1オブジェクトで配り、窓も台帳も顔ロックも触らずに返る / 口は主CLIでなく顔窓側＝資産を持つ者が配る・Ebiten依存を端末利用者へ伝播させない / 犬種は導出せず引数のまま — ADR-0020 Decision 5。Accepted・実装済み）
+
+- [ADR-0049](docs/decisions/ADR-0049-quota-observation-is-opt-in.md) — 沈黙は同意ではない（ADR-0044の「所有者許可の下で実測済み」は所有者の機械にしか及ばず、公開すると全員の機械で無言で走る / `quota_observe` を追加し**他のポインタboolと非対称にnil=OFF**＝降格の事故より無言の実行の事故が重い / 無効時は行を出さず「不明」を使わない＝訊いていないのにその語を出すとviewで唯一正直な言葉が嘘になる / setupの質問文にコストを書く＝理解されていないopt-inは同意ではない / ADR-0044は撤回せず既定値だけを変える・既存の機械も一度OFFに落ちる＝自分の機械にも同じ規則を適用する。Accepted・実装済み）
 
 ## 貢献 / セキュリティ
 

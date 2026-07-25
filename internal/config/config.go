@@ -56,6 +56,21 @@ type Config struct {
 	// at all). A plain bool's zero value would read a config that predates the
 	// key as "disabled", silently downgrading every existing machine.
 	SplitProtocol *bool `json:"split_protocol,omitempty"`
+	// QuotaObserve gates the ADR-0044 route-A observers (ADR-0049). A pointer
+	// for the same absent-vs-set reason as the others, but unlike SplitProtocol
+	// the default is OFF: nil = key absent = do not read the Keychain and do not
+	// call the vendor usage endpoint. The asymmetry is deliberate — this is the
+	// one organ that reads a credential and touches a network endpoint the
+	// vendor never documented, so "the user never said yes" must not mean yes.
+	QuotaObserve *bool `json:"quota_observe,omitempty"`
+}
+
+// QuotaObserveEnabled resolves the ADR-0049 gate: absent key = off. Kept on
+// Config (not in cmd/) because both the CLI and any future renderer must read
+// the same answer — a second copy of this default is a second place to get the
+// "silence means no" wrong.
+func (c Config) QuotaObserveEnabled() bool {
+	return c.QuotaObserve != nil && *c.QuotaObserve
 }
 
 // ResolveBackend picks which perception backend serves this machine
@@ -107,7 +122,8 @@ func (c Config) hasAnyOtherFieldSet() bool {
 		c.MLXModel != "" ||
 		c.FaceAutoLaunch != nil ||
 		c.FaceResident != nil ||
-		c.SplitProtocol != nil
+		c.SplitProtocol != nil ||
+		c.QuotaObserve != nil
 }
 
 // Path is ~/.tomobit/config.json — beside the default DB, never inside it.

@@ -23,14 +23,17 @@ Tomobitはローカルで動きます。運用者が把握しておくべき接�
   独自の送信先を持ちません。
 - **知覚バックエンド** — Ollama / mlx-lm のローカルHTTP端点のみ
   （[ADR-0029](docs/decisions/ADR-0029-perception-backend-choice.md)）。
-- **Provider残量の観測** — `status` の表示のために、macOS Keychain から**あなた自身の**
-  OAuthトークンを読み、ベンダーのusage端点を参照します。読むのは常に、実際に起動する
-  プロファイルの資格情報だけです（`claude_config_dir` から導出）。取れなければ「不明」と
-  出るだけで、推定値は作らず、判断にも混ぜません。
+- **Provider残量の観測（既定OFF・明示的なopt-in）** — `~/.tomobit/config.json` の
+  `quota_observe` が `true` のときだけ動きます。**有効にするまで、Keychainは一度も
+  読まず、外部端点も一度も叩きません**（[ADR-0049](docs/decisions/ADR-0049-quota-observation-is-opt-in.md)）。
+  有効にした場合: macOS Keychain から**あなた自身の**OAuthトークンを読み
+  （実際に起動するプロファイルの資格情報だけ。`claude_config_dir` から導出）、
+  ベンダーのusage端点を参照します。取れなければ「不明」と出るだけで、推定値は作らず、
+  判断にも混ぜません。
   **これはベンダーの非公式な端点であり、いつ消えてもおかしくありません。**
   設計上の根拠・却下した代替経路・実測は
   [ADR-0044](docs/decisions/ADR-0044-provider-quota-observation.md) に全て書いてあります。
-  この挙動が不要なら、現状は本体をビルドし直す必要があります（設定での無効化は未実装）。
+  切り替えは `tomobit setup` の質問から。
 
 ## 対象範囲 / Scope
 

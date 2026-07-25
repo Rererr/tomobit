@@ -171,9 +171,27 @@ func TestResolveBackend(t *testing.T) {
 // regression ResolveBackend's legacy branch exists to prevent. When this
 // fails: add the new field to hasAnyOtherFieldSet, then bump the count.
 func TestHasAnyOtherFieldSetEnumeratesEveryConfigField(t *testing.T) {
-	const known = 11 // 3 checked by ResolveBackend + 8 in hasAnyOtherFieldSet
+	const known = 12 // 3 checked by ResolveBackend + 9 in hasAnyOtherFieldSet
 	if n := reflect.TypeOf(Config{}).NumField(); n != known {
 		t.Errorf("Config grew to %d fields (knew %d): update hasAnyOtherFieldSet and this count together", n, known)
+	}
+}
+
+// TestQuotaObserveDefaultsOff pins ADR-0049's asymmetry against the other
+// pointer bools: an absent key must resolve to OFF, because this is the organ
+// that reads a credential and calls an endpoint the vendor never documented.
+// A config written before the key existed (nil) must not read as consent.
+func TestQuotaObserveDefaultsOff(t *testing.T) {
+	if (Config{}).QuotaObserveEnabled() {
+		t.Error("absent quota_observe must be off: silence is not consent")
+	}
+	no := false
+	if (Config{QuotaObserve: &no}).QuotaObserveEnabled() {
+		t.Error("explicit false must be off")
+	}
+	yes := true
+	if !(Config{QuotaObserve: &yes}).QuotaObserveEnabled() {
+		t.Error("explicit true must be on")
 	}
 }
 
