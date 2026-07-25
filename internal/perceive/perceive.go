@@ -24,7 +24,7 @@ var SemanticKeys = []string{"lang", "framework", "topic", "size"}
 // ledger forever.
 //
 // 20 is measured, not guessed: against the dogfood ledger
-// (/Users/example/.tomobit/tomobit.db, 2026-07-21, 28 experiences), known values
+// (~/.tomobit/tomobit.db, 2026-07-21, 28 experiences), known values
 // average 6-10 characters, so a saturated key's line stays under ~200
 // characters at this limit; four such keys are still a small, fixed
 // fraction of the 12000-character session digest budget they share the
