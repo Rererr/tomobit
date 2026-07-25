@@ -495,6 +495,7 @@ func TestTruncateIsRuneSafeAcrossMultibyteCharacters(t *testing.T) {
 // audit lands in events with the seed as a string — UnixNano does not fit
 // JSON's exact float64 integers, and a rounded seed cannot replay.
 func TestAutoDecideRecordsReplayableSeed(t *testing.T) {
+	registerRunnableFakeProvider(t, "fake-runnable")
 	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -926,6 +927,20 @@ func registerFakeProvider(t *testing.T, name string, a executor.Adapter) {
 	t.Helper()
 	providers[name] = a
 	t.Cleanup(func() { delete(providers, name) })
+}
+
+// registerRunnableFakeProvider registers a provider that auto will actually
+// consider, on any machine. availableProviderNames filters the registry by
+// whether the adapter's executable is on PATH (ADR-0043 Decision 2), so a test
+// calling autoDecide without one of these decides nothing wherever the real
+// claude/codex CLIs are absent — it passes on a developer's laptop and fails
+// in CI, which is a test that measures the machine rather than the code.
+// fakeSplitAdapter's Command names `sh`, which is on PATH everywhere this
+// suite runs, so the candidate is runnable for real rather than by stubbing
+// the PATH lookup.
+func registerRunnableFakeProvider(t *testing.T, name string) {
+	t.Helper()
+	registerFakeProvider(t, name, &fakeSplitAdapter{name: name, line: "ok"})
 }
 
 // subtaskSessionIDs returns the distinct session ids whose task.started names
@@ -1701,6 +1716,7 @@ func TestAutoDecideMergesSemanticTokensWithDeterministicPrecedence(t *testing.T)
 // so it is measurable, not merely logged and forgotten (ADR-0036 Decision
 // 2b/2d).
 func TestAutoDecideRecordsPerceptionDegradedReasonWhenExtractionFails(t *testing.T) {
+	registerRunnableFakeProvider(t, "fake-runnable")
 	s := openTestStore(t)
 	fake := &countingTaskExtract{err: fmt.Errorf("mlx-lm: connection refused")}
 	tp := newTaskPerception("fix it", fake.fn)

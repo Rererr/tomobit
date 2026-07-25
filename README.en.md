@@ -143,8 +143,10 @@ Philosophy: [VISION.md](docs/core/VISION.md).
 
 Early. Built and dogfooded by one person, on macOS, for real daily work.
 CI runs on Linux and macOS; the quota reader and the notification silencer are
-macOS-only. Linux is not yet a platform anyone has actually lived on — treat it
-as "compiles and passes tests", not "supported".
+macOS-only. On Linux the face window compiles but is not exercised — a headless
+runner has no display context, and nobody has actually run the window on Linux
+yet, so passing it under a virtual framebuffer would prove nothing. Treat Linux
+as "the terminal CLI compiles and passes its tests", not "supported".
 
 **Tomobit is worst on day one** — an empty ledger knows nothing, judgments fall
 back to uniform priors, and Tomo is a ball of fluff. That is the design, not a

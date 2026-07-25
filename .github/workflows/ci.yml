@@ -46,8 +46,22 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # ビルドは全パッケージ。Linuxでも顔窓が「コンパイルは通る」ことは保証する。
       - name: go build
         run: go build ./...
 
-      - name: go test
+      - name: go test (macOS — 全パッケージ)
+        if: runner.os == 'macOS'
         run: go test ./...
+
+      # Linuxのランナーには表示コンテキストが無く、Ebitenは
+      # `panic: glfw: The GLFW library is not initialized` で落ちる(実測)。
+      # xvfbで通すこともできるが、Linuxで顔窓を実際に動かす利用者はまだ居らず、
+      # 通したところで「動く」の証拠にはならない。GL依存の2パッケージだけ外し、
+      # 端末CLI — Linuxで本当に動いてほしい部分 — はすべて検証する。
+      # ADR-0048「Ebiten依存を端末利用者へ伝播させない」の、CI側での対応物。
+      - name: go test (Linux — GL依存の2パッケージを除く)
+        if: runner.os == 'Linux'
+        run: |
+          go test $(go list ./... \
+            | grep -v -e '/cmd/tomobit-face$' -e '/internal/facewin$')
