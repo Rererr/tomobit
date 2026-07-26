@@ -287,6 +287,17 @@ R4. eventsのtype初期カタログ（14種で確定）
     質問予算の管理と「聞きすぎていないか」の検証に使う。
     封筒方式のため、type追加はいつでも可能（このカタログは初版）
 
+    test.result（初期カタログ。書き手は ADR-0052 で初めて生えた）:
+    payload = {passed, exit_code, duration_ms, command}。読むのは passed だけで、
+    残りは監査用（command が無いと passed:true が**何について真なのか**を
+    後から言えない）。書くのは tomobit 自身がタスク境界で走らせた1本のコマンドの
+    終了コードだけで、Providerの自己申告は受け取らない — test.result は
+    OutcomeWeight で y を直接決めるため、宣言に Beta を動かす資格を与えない
+    （ADR-0052 Decision 1）。**起動できなかった/タイムアウトした場合は記帳しない**:
+    どちらも成果物についての判定ではなく、passed:false と書けば壊れたテスト環境が
+    Providerの失敗として台帳に残る（同 Decision 4）。分割の子には走らせない
+    （群間逐次では途中の赤が正常な中間状態であり、帰属できない — 同 Decision 3）
+
     **抽出プロンプトが見るのは「起きたこと」だけ**（ADR-0036 Decision 2d）:
     tomo.decided / plan.selected はハーネス自身の判断の記録であり、
     Reality ではない（PERCEPTION_ENGINE: Reality → Observation）。
@@ -340,6 +351,23 @@ R4. eventsのtype初期カタログ（14種で確定）
     （plan.generated は初期カタログ14種に含まれる。ADR-0014の提案記帳:
       payload = {cap, plan, parent, op} — メニューの生存はこのイベントから
       導出されるため rebuild で消えない）
+    - task.workspace（ADR-0050）: Providerが宣言した作業場の隔離。
+      payload = {isolated, kind, path} または {isolated: false, reason}。
+      kind は**自由文字列**（"git worktree" / "jj workspace" / …）— 閉語彙に
+      した瞬間に tomobit がVCSを知り始めるため、カタログ側でも列挙しない。
+      **台帳が持つのは「Providerがそう宣言した」という事実であって、
+      「隔離された」という事実ではない**（tomobitはVCSを知らないので検証しない —
+      ADR-0050 Decision 2）。知覚は読まないので extractor_ver のバンプ不要
+    - user.split_verdict（ADR-0051）: 分け方（采配）への評価。
+      payload = {sid, provider, verdict, source}。verdict は "good" | "bad" |
+      ""（無信号）、source は "feedback"（区切りのFeedbackに相乗り）|
+      "question"（分割時の追加の問い）。**能力とは別の事実**なので
+      task.finished の adopted/reverted には混ぜない（ADR-0003 Decision 2 の
+      「負けた」と「できなかった」は別、と同じ理屈）。source を持つのは
+      「分け方のせいではない」（無罪）と「分け方がよかった」（積極的評価）を
+      後から区別できるようにするため。現時点では connections.kind に対応する
+      賭け先を作らない（標本が貯まるまで信号だけ貯める — ADR-0051 Decision 1）。
+      知覚は読まないので extractor_ver のバンプ不要
 
     列追加（ADR-0014）: experiences.plan（機械属性 — ハーネス自身が知って
     いる採用Plan。plan Connectionの賭け先キー）
