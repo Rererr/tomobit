@@ -346,6 +346,76 @@ Decision 2 は `isolated:false` を「隔離できない現場」（VCS無し・
 
 ---
 
+## 実測（2026-07-27 codex での追従 — Decision 1 の「Providerが判断する」の検証）
+
+上の「未確認」の筆頭を潰した。codex 0.145.0・使い捨て git リポジトリ（`main.go` と
+`go.mod` だけ）・使い捨て `TOMOBIT_DB`・`--provider codex`・権限は既定（`auto` →
+`--sandbox workspace-write`）。1ターン、$0.04（入力 117,306 / うちキャッシュ
+108,800、出力 1,419）。
+
+```text
+記帳    task.workspace {"isolated":true,"kind":"local git clone",
+                        "path":"~/.tomobit/worktrees/0019f9fd3d130-1f6e9227"}
+元リポ  無傷（## master クリーン、main.go は空の main のまま）
+成果    隔離先にのみ着地（fmt.Println("Hello") 入り）
+宣言    出力の最後に、fenced json で、ちょうど1回
+```
+
+**予測は外れた。** 事前の見立ては「codex の `workspace-write` は workspace の外に
+書けないので、隔離先（`~/.tomobit/worktrees/<sid>`）に届かず失敗するか
+`isolated:false` を返す」だった。実際には**隔離できた** — Decision 4 が隔離先の親を
+`AddDirs` に積む形にしてあり、codex 側でそれが `--add-dir`（"Additional directories
+that should be writable alongside the primary workspace"）へ訳されているので、
+配線はすでに通っていた。見立ての方が配線を見落としていた。
+
+**だが worktree にはならなかった。** codex は最初 `git worktree add` を試し、2度
+失敗している:
+
+> ブランチ名の参照競合で初回作成に失敗したため、別名のブランチで同じ指定先に
+> worktree を作成します。
+>
+> 共有リポジトリの Git 参照への書き込み権限がないため、ローカル clone による
+> 独立した Git 作業場を作成します。
+
+`workspace-write` は workspace 内でも `.git` の参照への書き込みを止める。worktree は
+**元リポの `.git/worktrees/` に書く**手段なので、この sandbox とは構造的に噛み合わない。
+codex はそこで**別の隔離手段（ローカル clone）へ自分で切り替えた**。
+
+これは Decision 1 が期待したとおりの動き方である。プロトコル文は「git」とも
+「worktree」とも言っておらず、「このプロジェクトが使っているバージョン管理の隔離手段」
+としか言っていない。どの手段がこの現場で実際に通るかは Provider にしか見えない
+事実で、tomobit は知らないままでよかった。
+
+- **`kind` を閉語彙にしなかった判断が、2 Provider 目でも効いた**。claude は
+  `"git worktree"`、codex は `"local git clone"`。enum にしていたら、後者は
+  「未知の値」として落ちるか、嘘の値に丸められていた
+- **権限の問いは立たなかった**（予測どおり）。codex の sandbox は道具ごとの許可を
+  持たないので ADR-0053 の問いに乗る事象がそもそも発生しない。**止まる代わりに
+  迂回する** — claude が人に訊いて止まったのと対照的で、ADR-0053 が
+  「同型ではない」と書いた差が、隔離という同じ仕事の上で観測できた
+- **sandbox の摩擦がもう1つ出た**: 共有の Go ビルドキャッシュが書き込み不可で、
+  codex は一時 `GOCACHE` を作って迂回した。**第1層（ADR-0052）はこれを継がない** —
+  テストコマンドは tomobit 自身が sandbox の外で走らせるので、Provider の sandbox
+  制約は観測に影響しない。第1層を Provider の申告にしなかった判断の副次的な裏付け
+
+**新しく判ったこと: `kind` によって「成果の持ち帰り方」が変わる。** worktree なら
+元リポから `git worktree list` とブランチで辿れる。clone は**オブジェクトストアが
+別**なので、人は clone 側から fetch しないと元リポに持ち帰れない。宣言の `path` は
+「どこにあるか」を伝えるが「どう戻すか」は伝えない。Decision 4 の「後片付けは人の
+仕事」の範囲が、手段によって重くなる場合があるということ — 記録しておくが、
+宣言に手順を書かせる方向へは行かない（それは tomobit が各VCSの語彙を持つことになる）。
+
+**前回の実測が挙げた「実装時ノブの筆頭」は、プロンプト変更ではなく ADR-0053 が
+塞いだ。** 「権限で止まって人に訊く」という第三の出口は、当時は台帳にも会話にも
+残らない行き止まりだった。いまは許可要求が問いになり、許可すればそのターンを
+やり直すので、**出口が本当に出口になっている**。プロトコル文に
+「許可が得られない場合も `isolated:false`」を足す案は、当面見送る。
+
+未確認（更新）: `isolated:false` を返す現場（VCS 無しのプロジェクト）、
+`--provider auto` 経由、duel の実機。
+
+---
+
 ## 実装フェーズ（Proposed）
 
 1. **プロトコル + 宣言のパースだけ**（隔離先は渡すが、まだ `do` のみ）: `Parse` の
