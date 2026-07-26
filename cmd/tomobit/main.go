@@ -288,6 +288,8 @@ func run(args []string) error {
 		return cmdForget(rest)
 	case "amend":
 		return cmdAmend(rest)
+	case "verdict":
+		return cmdVerdict(rest)
 	case "status":
 		return cmdStatus(rest)
 	case "setup":
@@ -363,6 +365,11 @@ usage:
                    経験の訂正(ADR-0033)。削除ではなく人間による再知覚として追記
                    (現行世代のみ・過去世代は不可)。context/outcome/providerを
                    全置換。key閉集合・provider登録名+humanに限定。自動rebuild
+  tomobit verdict  <session-id> up|down|clear
+                   第2層の判定(ADR-0003/0055)。閉じたタスクへの👍/👎で、
+                   赤テストを含む他の全層を上書きする。clearで取り消せる。
+                   user.verdictを追記し、知覚済みなら経験を1行繰り上げて自動rebuild。
+                   中断・未終了・分割の子・amend済みのセッションは断る
   tomobit status   [--view human|json] same as no args
                    --view json は顔窓を起動せず、TTY装飾も挨拶記帳もせず
                    {type,exists,stage,stage_name,mood,speak,providers} を1行書いて終わる
@@ -1021,6 +1028,14 @@ func finishTask(s *store.Store, sid string, in *bufio.Reader, out io.Writer, jud
 	// answer: a session graded 文句なし needs no second question, so the extra
 	// friction lands only on the days it earns.
 	recordSplitVerdict(s, sid, in, out, judged, payload)
+
+	// 第2層 (ADR-0055 Decision 1). Same shape and the same reason as the line
+	// above — it reads the Feedback answer and only fires when it contradicts
+	// the observation, so the question lands on the one day it means something.
+	// It runs before perception so the verdict is read on the first pass.
+	if judged {
+		askVerdictOnContradiction(s, sid, in, out, humanPresent, payload)
+	}
 
 	// The reflection snapshot is taken before perception so that whatever
 	// the coming Apply batch discovers (Split, 逆転, Questioned, 名誉回復)

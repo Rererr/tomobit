@@ -200,3 +200,49 @@ PendingSessions（Deferred Perception のキュー導出）は、このマーカ
   （View は読み取り、書きは CLI、という責務分担のまま）
 - 「経験は消せる・訂正できる」が、rebuild と同様**いつでも試せるコマンド**として
   体現される（再生成可能性を常時テストするのと同型の、処分権の常時テスト）
+
+---
+
+## 追記（2026-07-27）: verdict は3本目の動詞ではない — 判定だけを差し替える
+
+[ADR-0055](ADR-0055-verdict-is-a-veto.md) が `tomobit verdict` を足した。
+Decision 2 の「二つの動詞」に3本目を並べるのではなく、**amend の隣に置いて
+役割を割る**形にしてある:
+
+|          | amend                          | verdict                        |
+|----------|--------------------------------|--------------------------------|
+| 対象     | **知覚**（意味も判定も）        | **判定だけ**                    |
+| 機構     | (session,kind) 現行世代を全行   | execution 1行                  |
+| 出自     | `human` に書き換え              | **元のまま**                    |
+| 凍結     | する（`user.amended` → D4）     | **しない**                      |
+| 取消     | 再 amend のみ                   | `clear` で戻せる                |
+
+一言でいえば **「後で言えるようになった」は verdict、「意味の取り方が
+間違っていた」は amend**。Decision 2 が forget と amend の間に引いた
+「動詞の役割が重ならない」線が、そのまま延びている。
+
+### Decision 3 の copy-forward が全行なのに、verdict が1行で済む理由
+
+Decision 3 が兄弟行を全部運ぶのは `experiences_current` が (session, kind) ごとに
+最大版を選ぶためで、対象行だけ版を上げると兄弟がビューから消える。だが
+**view の grouping は kind 単位**であり、execution 行はセッションに1つしかない
+（`perceiveSession` が1件だけ作る）。preference の兄弟は別 kind なので巻き込まれ
+ない。verdict の繰り上げは execution 1行のコピーで閉じる。
+
+### Decision 4 の凍結を verdict に広げてはいけない
+
+D4 が守っているのは「人の訂正を、機械が『より良い解釈』で上書きする」事故である。
+verdict は**機械が知覚した意味（context）に1バイトも触れない** —
+経験の行のうちモデルの主張は context だけで、outcome は最初から
+`parseDeterministic`（決定的コード）の領分だからである。守るべき訂正が存在しない
+ので凍結の理由が無く、むしろ凍結**してはいけない**: 👍 を1つ付けた代償に将来の
+抽出器改善を全て失うのでは、拒否権の行使に税金がかかる。
+
+同じ理由で `extractor_model` も書き換えない。出自が変わっていない行の出自表示を
+変える方が嘘になる（Decision 3 の「出自は嘘をつかない」の適用）。
+
+### verdict が断る相手に amend 済みが入っている
+
+逆向きは塞いである。`user.amended` を持つセッションへの verdict は断り、
+`amend --outcome` を案内する — D4 で凍結済みのセッションに、より軽い器官を
+重ねない。

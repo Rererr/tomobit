@@ -43,7 +43,11 @@ type Outcome struct {
 	// delivering — folding one into the other would blur two meanings rebuild
 	// could never separate again. It is the only signal a split subtask or a
 	// duel child carries (both have an empty task.finished).
-	Failed    bool   `json:"failed,omitempty"`
+	Failed bool `json:"failed,omitempty"`
+	// Verdict is the human's layer-2 judgment (ADR-0003 第2層, given a writer by
+	// ADR-0055). "" is the ordinary state — no opinion, and the derivation falls
+	// through to the layers below. Withdrawing a verdict lands here too: the
+	// event says "clear", parseDeterministic maps it back to "".
 	Verdict   string `json:"verdict,omitempty"` // "up" | "down"
 	Cancelled bool   `json:"cancelled,omitempty"`
 	Preferred string `json:"preferred,omitempty"` // preference kind

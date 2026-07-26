@@ -611,3 +611,34 @@ func TestExtractionPromptHidesDecisionRecordsButPlanStillParsesDeterministically
 		t.Errorf("plan.selected must still parse deterministically: got %q", d.plan)
 	}
 }
+
+// 第2層は最後が勝ち、clear は空へ写る (ADR-0055 Decision 2)。判定を変えたこと
+// 自体も Reality なので台帳は全部残り、経験にはいまの判定だけが載る。
+func TestParseDeterministicVerdictIsLastWinsAndClearEmpties(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		events []*store.Event
+		want   string
+	}{
+		{"1つだけ", []*store.Event{ev("user.verdict", map[string]any{"verdict": "down"})}, "down"},
+		{"後が勝つ", []*store.Event{
+			ev("user.verdict", map[string]any{"verdict": "up"}),
+			ev("user.verdict", map[string]any{"verdict": "down"}),
+		}, "down"},
+		{"clear は取り消し", []*store.Event{
+			ev("user.verdict", map[string]any{"verdict": "up"}),
+			ev("user.verdict", map[string]any{"verdict": "clear"}),
+		}, ""},
+		{"取り消した後にまた付けられる", []*store.Event{
+			ev("user.verdict", map[string]any{"verdict": "up"}),
+			ev("user.verdict", map[string]any{"verdict": "clear"}),
+			ev("user.verdict", map[string]any{"verdict": "down"}),
+		}, "down"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseDeterministic(tc.events).outcome.Verdict; got != tc.want {
+				t.Errorf("verdict: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

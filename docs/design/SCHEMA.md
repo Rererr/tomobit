@@ -298,6 +298,23 @@ R4. eventsのtype初期カタログ（14種で確定）
     Providerの失敗として台帳に残る（同 Decision 4）。分割の子には走らせない
     （群間逐次では途中の赤が正常な中間状態であり、帰属できない — 同 Decision 3）
 
+    user.verdict（初期カタログ。書き手は ADR-0055 で初めて生えた）:
+    payload = {verdict: "up" | "down" | "clear"}。ADR-0003 の第2層で、
+    OutcomeWeight が**最初に**読む＝他の全層を上書きする。上書きの相手は実質
+    1つで、導出の中で唯一 機械が人より上に立つ `TestsPassed=false`（赤テストが
+    「1=文句なし」を潰す）である — provider.error は既に as-is に負けており、
+    3=だめだった は赤と同じ向きなので衝突しない。**第1層が空だった間は
+    上書きすべき対象が無かった**ので、この型は6年間書き手を持たなかった。
+    書き手は2つ: 境界で赤×文句なしの矛盾が出た時だけ立つ問い（Decision 1。
+    2=まあまあ は含めない）と、閉じたタスクへの `tomobit verdict <sid>`
+    （Decision 2）。"clear" は取り消しで、parseDeterministic が "" へ写して
+    第1層へ落とす。**最後が勝つ**（判定を変えたこと自体も Reality なので
+    台帳は全部残る）。**赤の観測は消さない** — 経験の行の中で
+    tests_passed:false と verdict:"up" が共存し、導出で強い方が勝つ。
+    知覚済みセッションへ後から付いた場合は execution 行1つを
+    extractor_ver+1 で繰り上げて「いま効かせる」が、**永続性はイベント側が
+    持つ**（以後の再知覚が parseDeterministic で読み直す）
+
     **抽出プロンプトが見るのは「起きたこと」だけ**（ADR-0036 Decision 2d）:
     tomo.decided / plan.selected はハーネス自身の判断の記録であり、
     Reality ではない（PERCEPTION_ENGINE: Reality → Observation）。

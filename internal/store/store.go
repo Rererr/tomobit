@@ -1116,6 +1116,77 @@ func (s *Store) AmendExperience(id string, tsMs int64, apply func(target *core.E
 	return newVer, tx.Commit()
 }
 
+// CarryVerdictForward makes an already-perceived session's execution experience
+// show the human's layer-2 judgment now, by copying the current row forward at
+// extractor_ver+1 with only Outcome.Verdict replaced (ADR-0055 Decision 2).
+//
+// **The event is the truth; this copy only makes it effective today.** The
+// verdict lives in the ledger as user.verdict, and every later re-perception
+// reads it back through parseDeterministic — so the judgment is imperishable
+// and what this carries is immediacy, not permanence. Without it a 👍 would
+// change nothing until the extractor happened to be revised, which is how
+// test.result stayed at zero for six years.
+//
+// Exactly one row moves. Amend copies the whole current generation forward
+// because experiences_current picks the max ver per (session, kind) and lifting
+// one sibling would drop the others out of the view — but a session holds
+// exactly one execution row (perceiveSession writes one), and preference
+// siblings sit under a different kind, outside this view's grouping. So the
+// full copy-forward amend needs is not needed here.
+//
+// Nothing else about the row changes. extractor_model keeps its original value
+// rather than becoming "human" (as amend's does): in an experience row the
+// model's own claim is the *context*, while the outcome has always been
+// parseDeterministic's — deterministic code reading events. Rewriting the
+// provenance of a row whose provenance did not change would be the lie
+// (ADR-0033: 出自は嘘をつかない). No user.amended marker is written either, so
+// the session stays perceivable — freezing it would tax the human for using
+// their veto (Decision 3).
+//
+// carried reports whether a row was found to move. false is ordinary, not an
+// error: a session whose boundary perception has not run yet has nothing to
+// carry, and the pending queue will read the event when it gets there.
+func (s *Store) CarryVerdictForward(sessionID, verdict string, tsMs int64) (newVer int, carried bool, err error) {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return 0, false, err
+	}
+	defer tx.Rollback()
+
+	current, err := currentExperiencesTx(tx, sessionID, core.KindExecution)
+	if err != nil {
+		return 0, false, err
+	}
+	if len(current) == 0 {
+		return 0, false, nil
+	}
+	if len(current) > 1 {
+		// One execution row per session is an invariant of perceiveSession, and
+		// this method's single-row copy depends on it. Say so rather than
+		// silently carrying the first and stranding the rest.
+		return 0, false, fmt.Errorf(
+			"verdict: session %s has %d current execution experiences, expected 1", sessionID, len(current))
+	}
+
+	e := current[0]
+	newVer = e.ExtractorVer + 1
+	e.Outcome.Verdict = verdict
+
+	provider := sql.NullString{String: e.Provider, Valid: e.Provider != ""}
+	plan := sql.NullString{String: e.Plan, Valid: e.Plan != ""}
+	if _, err := tx.Exec(`
+		INSERT INTO experiences
+		  (id, session_id, ts, kind, extractor_ver, extractor_model,
+		   context, provider, outcome, source, plan)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		NewID(tsMs), e.SessionID, e.TS, e.Kind, newVer, e.ExtractorModel,
+		core.MarshalContext(e.Context), provider,
+		core.MarshalOutcome(e.Outcome), e.Source, plan); err != nil {
+		return 0, false, fmt.Errorf("verdict: carrying %s forward: %w", e.ID, err)
+	}
+	return newVer, true, tx.Commit()
+}
+
 // Vacuum reclaims the space freed by forget so a "消した" is not the
 // sovereign lie of leaving the content in WAL frames or free pages
 // (ADR-0033 Decision 5).

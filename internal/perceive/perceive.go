@@ -338,7 +338,16 @@ func parseDeterministic(events []*store.Event) deterministic {
 				d.outcome.TestsPassed = &p
 			}
 		case "user.verdict":
-			d.outcome.Verdict = str(e.Payload, "verdict")
+			// 第2層 (ADR-0003, 書き手は ADR-0055)。最後が勝つ — 判定を変えた
+			// こと自体も Reality なので、台帳は両方残したまま、いまの判定だけが
+			// 経験に載る。"clear" は人の言葉のまま記帳され、ここで "" へ写る:
+			// 行の語彙を up/down/空 に保つためで、OutcomeWeight は up/down 以外を
+			// 無視するので写像を忘れても壊れはしない。
+			if v := str(e.Payload, "verdict"); v == "clear" {
+				d.outcome.Verdict = ""
+			} else {
+				d.outcome.Verdict = v
+			}
 		case "user.preference":
 			d.preferences = append(d.preferences, core.Outcome{
 				Preferred: str(e.Payload, "preferred"),
