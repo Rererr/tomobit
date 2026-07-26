@@ -68,16 +68,46 @@ func TestCommandBuildsHeadlessJSONExec(t *testing.T) {
 			t.Errorf("args missing %q: got %v", want, args)
 		}
 	}
-	if contains(args, "--sandbox") {
-		t.Errorf("no sandbox flag should be passed when unset: %v", args)
+	// 未設定は「渡さない」ではなく auto 相当 (ADR-0053 Decision 1)。
+	if !contains(args, "--sandbox") || !contains(args, "workspace-write") {
+		t.Errorf("未設定は workspace-write として明示されるべき: %v", args)
 	}
 	if got := args[len(args)-1]; got != "fix the bug" {
 		t.Errorf("prompt should stay the trailing argument: got %v", args)
 	}
 }
 
+// 中立3語が codex 自身の語へ訳される (ADR-0053 Decision 1)。
+// **同型ではない** — claude の permission は訊く機構、codex の sandbox は囲う
+// 機構で、対応しているのは意図の方だけである。
+func TestPermissionModeIsTranslatedIntoCodexSandbox(t *testing.T) {
+	for _, tc := range []struct {
+		in   executor.Permission
+		want string
+	}{
+		{"", "workspace-write"},
+		{executor.PermissionAuto, "workspace-write"},
+		{executor.PermissionStrict, "read-only"},
+		{executor.PermissionOpen, "danger-full-access"},
+	} {
+		_, args, _ := New().Command(executor.Request{Prompt: "p", PermissionMode: tc.in})
+		if !contains(args, tc.want) {
+			t.Errorf("%q → %q が argv に無い: %v", tc.in, tc.want, args)
+		}
+	}
+}
+
+// codex の sandbox は道具ごとの許可を持たないので、AllowedTools は訳さない
+// （無いものを発明せず無視する — ADR-0047 が --add-dir について書いたのと同じ）。
+func TestAllowedToolsAreIgnoredWhereTheCLIHasNoSuchThing(t *testing.T) {
+	_, args, _ := New().Command(executor.Request{Prompt: "p", AllowedTools: []string{"Read"}})
+	if contains(args, "--allowedTools") || contains(args, "Read") {
+		t.Errorf("codex に無いフラグを発明した: %v", args)
+	}
+}
+
 func TestCommandPassesSandboxModeThrough(t *testing.T) {
-	_, args, _ := New().Command(executor.Request{Prompt: "p", PermissionMode: "workspace-write"})
+	_, args, _ := New().Command(executor.Request{Prompt: "p", PermissionMode: executor.PermissionAuto})
 	if !contains(args, "--sandbox") || !contains(args, "workspace-write") {
 		t.Errorf("permission mode should map to --sandbox: %v", args)
 	}

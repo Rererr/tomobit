@@ -497,7 +497,7 @@ func cmdDo(args []string) error {
 	db := dbFlag(fs)
 	capability := fs.String("cap", "implement", "capability of the task")
 	timeout := fs.Duration("timeout", 0, "max run time, 0 = no limit")
-	permMode := fs.String("permission-mode", "", "permission mode passthrough (claude --permission-mode / codex --sandbox)")
+	permMode := fs.String("permission-mode", "", "how much a Provider may do without asking: auto|strict|open (ADR-0053)")
 	providerName := providerFlag(fs)
 	planArg := fs.String("plan", "", "plan: auto, a label (full|direct|quick), or steps like analyze>implement>test")
 	size := fs.String("size", "", "task size for decision stakes: small|medium|large (--provider auto)")
@@ -559,6 +559,13 @@ func cmdDo(args []string) error {
 	// --plan direct, duel unfired) never perceives at all.
 	tp := newTaskPerception(prompt, taskExtractFuncFor(s, extractor))
 
+	// 権限の語は中立3語だけ (ADR-0053 Decision 1): 生のCLI語を通すと、tomobit が
+	// 片方のCLIの語彙を持つことになる。duel も split も同じ値を受け取る。
+	perm, err := executor.ParsePermission(*permMode)
+	if err != nil {
+		return err
+	}
+
 	// Before committing to one provider, Tomo may offer an A/B experiment
 	// (ADR-0026): if an open Preference Gap covers this capability, it asks to
 	// run both providers and settle the preference by real work. Y takes the
@@ -569,7 +576,7 @@ func cmdDo(args []string) error {
 			isTTY(os.Stdin) && isTTY(os.Stdout), now, tp); accepted {
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 			defer stop()
-			return runDuel(ctx, s, gap, prompt, *capability, *size, *permMode, *timeout,
+			return runDuel(ctx, s, gap, prompt, *capability, *size, perm, *timeout,
 				stdin, os.Stdout, extractor)
 		}
 	}
@@ -658,7 +665,7 @@ func cmdDo(args []string) error {
 				fmt.Printf("-- plan %d/%d: %s --\n", i+1, len(steps), step)
 			}
 			req := executor.Request{
-				Prompt: stepPrompt(runPrompt, step, i, len(steps)), PermissionMode: *permMode, Timeout: *timeout,
+				Prompt: stepPrompt(runPrompt, step, i, len(steps)), PermissionMode: perm, Timeout: *timeout,
 			}
 			if isoParent != "" {
 				// The scope has to name a directory that exists, so AddDirs
@@ -714,7 +721,7 @@ func cmdDo(args []string) error {
 	if splitProtocol && runErr == nil && result.ExitCode == 0 {
 		if groups := readSplitProposal(texts); groups != nil {
 			return runSplit(ctx, s, sid, groups, prompt, *providerName, *capability, *size,
-				*permMode, *timeout, stdin, os.Stdout, isTTY(os.Stdin) && isTTY(os.Stdout), extractor, tp)
+				perm, *timeout, stdin, os.Stdout, isTTY(os.Stdin) && isTTY(os.Stdout), extractor, tp)
 		}
 	}
 
@@ -756,6 +763,12 @@ func providerSink(s *store.Store, sid string, out io.Writer, collect *[]string) 
 // out here. Shared by every sink (do, chat, split, duel) so the skip rule
 // cannot drift between them.
 func recordEvent(s *store.Store, sid string, ev executor.Event, ts int64) error {
+	// 許可は配線であって経験ではない (ADR-0053 Decision 4)。「何を許したか」は
+	// どう走らせるかの話で、何が起きたかではない — ADR-0047 が働く場所について
+	// 引いた線がそのまま当たる。人に見せるだけで、台帳には残さない。
+	if ev.Type == executor.EventPermissionRequired {
+		return nil
+	}
 	payload := executor.StripViewOnly(ev.Payload)
 	if len(payload) == 0 && len(ev.Payload) > 0 {
 		return nil // purely view-only: shown to the human, not recorded
@@ -819,7 +832,7 @@ func openSubtask(s *store.Store, out io.Writer, providerName, capability, size, 
 // finishTask: the parent's own artifact was the split proposal itself, not
 // something to grade.
 func runSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]string,
-	parentIntent, providerName, capability, size, permMode string, timeout time.Duration,
+	parentIntent, providerName, capability, size string, permMode executor.Permission, timeout time.Duration,
 	in *bufio.Reader, out io.Writer, interactive bool, extractor perceive.Extractor, tp *taskPerception) error {
 	_, cancelled, err := executeSplit(ctx, s, parentSID, groups, parentIntent,
 		providerName, capability, size, permMode, timeout, in, out, interactive, nil, tp)

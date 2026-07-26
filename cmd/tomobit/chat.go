@@ -116,7 +116,7 @@ type chat struct {
 
 	providerName string
 	capability   string
-	permMode     string
+	permMode     executor.Permission
 	timeout      time.Duration
 	size         string
 	// workDir/addDirs は働く場所 (ADR-0047)。他の配線と同じくタスク境界でだけ
@@ -141,6 +141,14 @@ type chat struct {
 	// --view ndjson has a person reading, but no terminal to render y/N into.
 	humanPresent bool
 
+	// allowedTools は人がこのセッションで許した道具 (ADR-0053 Decision 3)。
+	// 寿命はタスクの区切りまでで、ディスクには書かない — 覚えた許可は、次に人が
+	// 見ていない時にも効いてしまう。
+	allowedTools []string
+	// permissionRounds は1ターンで何度訊いたか。許可のたびに再実行するので、
+	// 上限が無いと「もう1つ道具が要る」の発見ごとに人と費用を往復させる。
+	permissionRounds int
+
 	// sid == "" means no task is open: the next prompt starts one.
 	sid       string
 	adapter   executor.Adapter
@@ -159,7 +167,7 @@ func cmdChat(args []string) error {
 	db := dbFlag(fs)
 	capability := fs.String("cap", "implement", "capability of the task")
 	timeout := fs.Duration("timeout", 0, "max run time per turn, 0 = no limit")
-	permMode := fs.String("permission-mode", "", "permission mode passthrough (claude --permission-mode / codex --sandbox)")
+	permMode := fs.String("permission-mode", "", "how much a Provider may do without asking: auto|strict|open (ADR-0053)")
 	providerName := providerFlag(fs)
 	size := fs.String("size", "", "task size for decision stakes: small|medium|large (--provider auto)")
 	backend := fs.String("backend", "", "perception backend for best-effort perception: ollama|mlx-lm (default: resolved from config)")
@@ -173,6 +181,13 @@ func cmdChat(args []string) error {
 	var addDirs idList
 	fs.Var(&addDirs, "add-dir", "a place outside --cd Tomo may also work with (repeatable)")
 	fs.Parse(args)
+
+	// 権限の語は中立3語だけを受ける (ADR-0053 Decision 1): 生のCLI語を通すと、
+	// tomobit が片方のCLIの語彙を持つことになる。
+	perm, err := executor.ParsePermission(*permMode)
+	if err != nil {
+		return err
+	}
 
 	// 存在しない場所は起動前に断る: 立てない場所を cwd にした exec の chdir
 	// エラーは、どの配線が悪いか語らない（/cd の check と同じ判定）。
@@ -260,7 +275,7 @@ func cmdChat(args []string) error {
 	c := &chat{
 		s: s, ed: ed, in: ed.Reader(), out: out, stream: stream,
 		providerName: *providerName, capability: *capability,
-		permMode: *permMode, timeout: *timeout, size: *size,
+		permMode: perm, timeout: *timeout, size: *size,
 		workDir: *workDir, addDirs: addDirs,
 		extractor:   extractor,
 		interactive: isTTY(os.Stdin) && isTTY(os.Stdout),
@@ -559,6 +574,11 @@ func (c *chat) turn(prompt string) error {
 		c.sayln(dim("いまのタスクは君の手にある — 終わったら /new か /exit で区切る"))
 		return nil
 	}
+	// 権限の確認回数は「人が打った1ターン」ごとに数え直す (ADR-0053)。
+	// 許可のたびの再実行は run が自分を呼び直すので、この行を通らずに積み上がる —
+	// 上限が守るのは「1つの依頼が何度人を呼び止めてよいか」である。
+	c.permissionRounds = 0
+
 	opening := c.sid == ""
 	if opening {
 		if err := c.startTask(prompt); err != nil {
@@ -654,6 +674,10 @@ func (c *chat) run(prompt string, opening bool) error {
 	}
 	collect := split || isolate
 
+	// この実行が権限で止まった分。ターンが終わってから人へ訊く (ADR-0053
+	// Decision 2) — 実測のとおり、その場で答える経路は CLI に無い。
+	var asked []permissionAsk
+
 	v := c.newView(c.adapter.Name())
 	sink := func(ev executor.Event, ts int64) error {
 		// The thread id arrives on provider.selected (both adapters) and
@@ -663,6 +687,11 @@ func (c *chat) run(prompt string, opening bool) error {
 			c.threadID = id
 		}
 		v.show(ev)
+		if ev.Type == executor.EventPermissionRequired {
+			tool, _ := ev.Payload["tool"].(string)
+			detail, _ := ev.Payload["detail"].(string)
+			asked = append(asked, permissionAsk{tool: tool, detail: detail})
+		}
 		if collect && ev.Type == executor.EventProviderOutput {
 			if text, ok := ev.Payload["text"].(string); ok && text != "" {
 				texts = append(texts, text)
@@ -694,7 +723,7 @@ func (c *chat) run(prompt string, opening bool) error {
 	}
 	result, runErr := ex.Run(ctx, executor.Request{
 		Prompt: runPrompt, ResumeID: c.threadID,
-		PermissionMode: c.permMode, Timeout: c.timeout,
+		PermissionMode: c.permMode, AllowedTools: c.allowedTools, Timeout: c.timeout,
 		// 働く場所 (ADR-0047): /cd と /add-dir がタスク境界で置いた値。
 		// 空なら従来どおり tomobit 自身の cwd を継ぐ。
 		WorkDir: c.workDir, AddDirs: addDirs,
@@ -726,6 +755,14 @@ func (c *chat) run(prompt string, opening bool) error {
 		if isolate {
 			recordWorkspace(c.s, c.sid, texts)
 		}
+	}
+
+	// 権限で止まったなら、人へ訊いてから同じターンをやり直す (ADR-0053
+	// Decision 2)。断られたらターンはそのまま終わる — 断ることが作業の放棄に
+	// ならないのは、ADR-0028 の並走ゲートが「n でも作業は失われない」と決めたのと
+	// 同じ姿勢。
+	if granted := c.askPermissions(asked); granted {
+		return c.run(prompt, opening)
 	}
 
 	// A clean opening turn's output may be a split proposal (ADR-0028 Decision
@@ -871,6 +908,10 @@ func (c *chat) closeTask() error {
 	sid, completed := c.sid, c.completed
 	c.sid, c.threadID, c.turns = "", "", 0
 	c.adapter, c.human, c.completed = nil, false, false
+	// 許した道具はタスクの区切りまで (ADR-0053 Decision 3)。次のタスクへ
+	// 持ち越さないのは、許可が「この仕事のための」判断だからで、覚えたままだと
+	// 次に人が見ていない時にも効く。
+	c.allowedTools, c.permissionRounds = nil, 0
 	// ADR-0036 Decision 2b: the holder's lifetime is one task — /new (this
 	// function) discards it, so the next task gets a fresh one in startTask
 	// rather than reading a stale extraction against a new intent.
@@ -1463,4 +1504,127 @@ func (v *ndjsonView) end(result executor.Result) {
 		out["cost_usd"] = v.cost
 	}
 	v.s.emit(out)
+}
+
+// permissionAsk is one tool a run was stopped from using, with a one-line
+// summary of what it was about to touch (ADR-0053 Decision 3).
+type permissionAsk struct {
+	tool   string
+	detail string
+}
+
+// maxPermissionRounds bounds how many times one turn may come back asking.
+// A model that keeps discovering it needs one more tool would otherwise loop
+// the human through a question per tool, each one costing another run.
+const maxPermissionRounds = 3
+
+// askPermissions turns this run's denials into the question the person answers,
+// and reports whether anything new was granted — which is the caller's cue to
+// re-run the same turn (ADR-0053 Decision 2).
+//
+// The question rides the same channel as the boundary organs (Decision 5): a
+// TTY sees one line, a view stream sees an `await` note, and neither gets a
+// vocabulary of its own. **A pipe with nobody reading is a refusal**: silence
+// must never grant, which is the whole reason this ADR exists.
+//
+// 再実行は費用を焼き直す（止まるところまでのトークンは戻らない）。それを
+// 隠さないために、問いに「許可して再実行」と書く。
+func (c *chat) askPermissions(asked []permissionAsk) bool {
+	if len(asked) == 0 {
+		return false
+	}
+	if c.permissionRounds >= maxPermissionRounds {
+		c.gap()
+		c.sayln(dim(fmt.Sprintf("権限の確認が%d回続いたので、このターンはここで止める", maxPermissionRounds)))
+		c.gap()
+		return false
+	}
+	// 同じ道具を二度訊かない。既に許したものが混ざるのは、モデルが1回の実行で
+	// 複数の道具を試したとき（実測でも Read と Edit が並んだ）。
+	var fresh []permissionAsk
+	for _, a := range asked {
+		if a.tool == "" || c.isToolAllowed(a.tool) {
+			continue
+		}
+		if !containsAsk(fresh, a.tool) {
+			fresh = append(fresh, a)
+		}
+	}
+	if len(fresh) == 0 {
+		return false
+	}
+
+	c.gap()
+	for _, a := range fresh {
+		line := a.tool
+		if a.detail != "" {
+			line += " — " + a.detail
+		}
+		c.sayln(dim("権限が要る: " + line))
+	}
+	// 選択肢は本体が書く (GUI ADR-0005 Decision 2: GUI は語彙を持たない)。
+	granted := c.askPermissionYN(fresh)
+	c.gap()
+	if !granted {
+		return false
+	}
+	for _, a := range fresh {
+		c.allowedTools = append(c.allowedTools, a.tool)
+	}
+	c.permissionRounds++
+	return true
+}
+
+// askPermissionYN asks the one question and reads the answer. Enter / EOF /
+// anything unrecognised is a refusal: a permission nobody said yes to is a no
+// (本体 ADR-0049「沈黙は同意ではない」).
+func (c *chat) askPermissionYN(fresh []permissionAsk) bool {
+	names := make([]string, 0, len(fresh))
+	for _, a := range fresh {
+		names = append(names, a.tool)
+	}
+	question := fmt.Sprintf("%s の使用を許可する? 許可すると同じターンをやり直す（費用がもう一度かかる） [1=許可する / Enter=許可しない]",
+		strings.Join(names, " と "))
+	// view ストリームには構造化した型で出す (ADR-0053 Decision 5 / 本体 ADR-0032)。
+	// レンダラは type を見てモーダルを出せばよく、**文面を読んで種類を当てる必要が
+	// 無い** — GUI が語彙を持たないための一線（GUI ADR-0005 Decision 2）。
+	// 選択肢は角括弧に入れたまま流すので、ボタン化は既存の経路がそのまま使える。
+	// 未知の type を無視する消費者は、この行を落としても壊れない（契約どおり）。
+	if c.stream != nil {
+		tools := make([]map[string]any, len(fresh))
+		for i, a := range fresh {
+			tools[i] = map[string]any{"tool": a.tool, "detail": a.detail}
+		}
+		c.stream.emit(map[string]any{
+			"type": "permission", "await": true, "text": question, "tools": tools,
+		})
+	}
+	c.sayln(question)
+	// view ストリームでの await 印は flush-on-read が自動で付ける
+	// (ADR-0032 Decision 1) — 境界の Feedback とまったく同じ経路なので、
+	// ここが独自に何かを emit する必要は無い。
+	line, err := c.in.ReadString('\n')
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(line) == "1"
+}
+
+// isToolAllowed reports whether this session already granted a tool.
+func (c *chat) isToolAllowed(tool string) bool {
+	for _, t := range c.allowedTools {
+		if t == tool {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAsk(asks []permissionAsk, tool string) bool {
+	for _, a := range asks {
+		if a.tool == tool {
+			return true
+		}
+	}
+	return false
 }

@@ -187,7 +187,7 @@ func readSplitProposal(texts []string) [][]string {
 // every subtask opened below (ADR-0036 Decision 2b: a split child reads the
 // parent's tokens, never re-perceives).
 func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]string,
-	parentIntent, providerName, capability, size, permMode string, timeout time.Duration,
+	parentIntent, providerName, capability, size string, permMode executor.Permission, timeout time.Duration,
 	in *bufio.Reader, out io.Writer, interactive bool, newView func(string) view, tp *taskPerception) (subs []string, cancelled bool, err error) {
 	subs, idxGroups := flattenGroups(groups)
 	now := time.Now().UnixMilli()
@@ -244,7 +244,7 @@ func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups 
 // after which the children and parent already hold task.cancelled and the
 // caller skips finishTask.
 func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][]string, subs []string,
-	parentIntent, providerName, capability, size, permMode string, timeout time.Duration,
+	parentIntent, providerName, capability, size string, permMode executor.Permission, timeout time.Duration,
 	in *bufio.Reader, out io.Writer, tp *taskPerception) (cancelled bool, err error) {
 	var mu sync.Mutex // guards the shared terminal, not the store (its single connection serializes writes)
 	base := 0
@@ -295,7 +295,7 @@ func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][
 // subtask stops the loop before the next one opens, so a task that never started
 // leaves no half-run in the ledger.
 func runSubtasksSequential(ctx context.Context, s *store.Store, parentSID string, subs []string,
-	parentIntent, providerName, capability, size, permMode string, timeout time.Duration,
+	parentIntent, providerName, capability, size string, permMode executor.Permission, timeout time.Duration,
 	in *bufio.Reader, out io.Writer, newView func(string) view, tp *taskPerception) (cancelled bool, err error) {
 	for i, sub := range subs {
 		fmt.Fprintf(out, "-- subtask %d/%d: %s --\n", i+1, len(subs), truncate(sub, 60))
@@ -328,7 +328,7 @@ func runSubtasksSequential(ctx context.Context, s *store.Store, parentSID string
 // per subtask (its provider can differ from the parent's own, under auto) and
 // drives begin/show/end around the run exactly as an ordinary turn does.
 func runSubtaskSequential(ctx context.Context, s *store.Store, parentSID, sub string, gi, total int,
-	providerName, capability, size, parentIntent, permMode string, timeout time.Duration,
+	providerName, capability, size, parentIntent string, permMode executor.Permission, timeout time.Duration,
 	in *bufio.Reader, out io.Writer, newView func(string) view, tp *taskPerception) (failed, cancelled bool, err error) {
 	sid, adapter, human, err := openSubtask(s, out, providerName, capability, size, sub, parentSID, tp)
 	if err != nil {
@@ -405,7 +405,7 @@ func subtaskSink(s *store.Store, sid string, out io.Writer, v view) executor.Sin
 // Returns failed (any member failed — the caller then stops before the next
 // group) and cancelled (SIGINT — children and parent already hold task.cancelled).
 func runGroupParallel(ctx context.Context, s *store.Store, parentSID string, group []string, base, total int,
-	providerName, capability, size, parentIntent, permMode string, timeout time.Duration,
+	providerName, capability, size, parentIntent string, permMode executor.Permission, timeout time.Duration,
 	in *bufio.Reader, out io.Writer, mu *sync.Mutex, tp *taskPerception) (failed, cancelled bool, err error) {
 	type member struct {
 		sid     string

@@ -44,15 +44,39 @@ func (a *Adapter) Name() string { return providerName }
 // 再開ターンでは積まない — スレッドは開始時の設定のまま続く。
 // 働く場所そのもの（WorkDir）に codex の -C/--cd は使わない: cwd は Executor
 // が全 Provider 共通で落とす（Decision 2）。
+// sandboxFlag translates tomobit's three words into codex's own (ADR-0053
+// Decision 1). Measured 2026-07-27 on codex 0.145.0: --sandbox takes
+// read-only / workspace-write / danger-full-access.
+//
+// **これは同型ではない。** claude の permission は「訊く」機構で、codex の
+// sandbox は「囲う」機構である。auto → workspace-write は「普通に働けて、外に
+// 出るときだけ止まる」という**意図**の対応であって、挙動の等価ではない。
+// その結果 codex には許可の問いが立たない（訊く相手がそもそも居ない）—
+// Provider によって体験が違うことは ADR-0053 Consequences に明記してある。
+//
+// 未知の値は auto 相当へ落とす（claude 側と同じく、迷ったら開かない方へ）。
+func sandboxFlag(p executor.Permission) string {
+	switch p.Resolve() {
+	case executor.PermissionStrict:
+		return "read-only"
+	case executor.PermissionOpen:
+		return "danger-full-access"
+	default:
+		return "workspace-write"
+	}
+}
+
+// AllowedTools は訳さない: codex の sandbox は道具ごとの許可を持たないので、
+// 対応するフラグが存在しない。ADR-0047 が --add-dir の無い CLI について書いた
+// 「無いものを発明せず無視する」と同じ扱い。
+
 func (a *Adapter) Command(req executor.Request) (string, []string, []string) {
 	if req.ResumeID != "" {
 		return "codex", []string{"exec", "resume", req.ResumeID, req.Prompt,
 			"--json", "--skip-git-repo-check"}, nil
 	}
 	args := []string{"exec", "--json", "--skip-git-repo-check"}
-	if req.PermissionMode != "" {
-		args = append(args, "--sandbox", req.PermissionMode)
-	}
+	args = append(args, "--sandbox", sandboxFlag(req.PermissionMode))
 	// プロンプトは末尾の位置引数のまま保つので、可変長の --add-dir はその前に
 	// 置き、1ディレクトリにつき1回積む（まとめると prompt を飲み込む）。
 	for _, dir := range req.AddDirs {

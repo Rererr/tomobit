@@ -33,16 +33,45 @@ func TestCommandBuildsHeadlessStreamJSON(t *testing.T) {
 			t.Errorf("args missing %q: got %v", want, args)
 		}
 	}
-	if contains(args, "--permission-mode") {
-		t.Errorf("no permission mode should be passed when unset: %v", args)
+	// 未設定は「渡さない」ではなく auto になった (ADR-0053 Decision 1)。
+	// フラグが無いと本体は claude の設定ファイル任せになり、実測ではそれが
+	// 読み取りすら拒否する状態だった — 既定は働ける側に置く。
+	if !contains(args, "--permission-mode") || !contains(args, "auto") {
+		t.Errorf("未設定は auto として明示されるべき: %v", args)
 	}
 	_ = joined
 }
 
-func TestCommandPassesPermissionModeThrough(t *testing.T) {
-	_, args, _ := New().Command(executor.Request{Prompt: "p", PermissionMode: "acceptEdits"})
-	if !contains(args, "--permission-mode") || !contains(args, "acceptEdits") {
-		t.Errorf("permission mode should be forwarded: %v", args)
+// tomobit の中立3語が、claude 自身の語へ訳される (ADR-0053 Decision 1)。
+// tomobit がこの CLI の語彙を持たないための境界そのもの。
+func TestPermissionModeIsTranslatedIntoClaudesOwnVocabulary(t *testing.T) {
+	for _, tc := range []struct {
+		in   executor.Permission
+		want string
+	}{
+		{"", "auto"},
+		{executor.PermissionAuto, "auto"},
+		{executor.PermissionStrict, "manual"},
+		{executor.PermissionOpen, "bypassPermissions"},
+	} {
+		_, args, _ := New().Command(executor.Request{Prompt: "p", PermissionMode: tc.in})
+		if !contains(args, tc.want) {
+			t.Errorf("%q → %q が argv に無い: %v", tc.in, tc.want, args)
+		}
+	}
+}
+
+// 人が許した道具だけが積まれる (ADR-0053 Decision 3)。空なら足さない —
+// 「何も許されていない」と「全部許されている」の距離をフラグ1本で縮めない。
+func TestAllowedToolsRideOnlyWhenGranted(t *testing.T) {
+	_, args, _ := New().Command(executor.Request{Prompt: "p"})
+	if contains(args, "--allowedTools") {
+		t.Errorf("許可が無いのに --allowedTools が乗った: %v", args)
+	}
+
+	_, args, _ = New().Command(executor.Request{Prompt: "p", AllowedTools: []string{"Read", "Edit"}})
+	if !contains(args, "--allowedTools") || !contains(args, "Read") || !contains(args, "Edit") {
+		t.Errorf("許された道具が乗らない: %v", args)
 	}
 }
 

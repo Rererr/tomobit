@@ -42,8 +42,12 @@ func (a *Adapter) Command(req executor.Request) (string, []string, []string) {
 	if req.ResumeID != "" {
 		args = append(args, "--resume", req.ResumeID)
 	}
-	if req.PermissionMode != "" {
-		args = append(args, "--permission-mode", req.PermissionMode)
+	args = append(args, "--permission-mode", permissionFlag(req.PermissionMode))
+	// 人が許した道具だけを積む (ADR-0053 Decision 3)。空なら足さない —
+	// 「何も許されていない」と「全部許されている」の距離をフラグ1本で縮めない。
+	if len(req.AllowedTools) > 0 {
+		args = append(args, "--allowedTools")
+		args = append(args, req.AllowedTools...)
 	}
 	// 作業場所の外で扱わせる場所 (ADR-0047 Decision 3)。--add-dir は可変長引数
 	// なので、ディレクトリをまとめず1つにつき1回積む: `--add-dir a b` の形は
@@ -93,6 +97,52 @@ type streamLine struct {
 	NumTurns     *int64   `json:"num_turns"`
 	IsError      bool     `json:"is_error"`
 	Result       string   `json:"result"`
+	// PermissionDenials lists the tools this run was not allowed to use
+	// (ADR-0053). Measured 2026-07-27 on claude 2.1.220: the turn ends here —
+	// even under --input-format stream-json no control message arrives to
+	// answer with — so this is the only place the request is legible.
+	PermissionDenials []struct {
+		ToolName  string         `json:"tool_name"`
+		ToolInput map[string]any `json:"tool_input"`
+	} `json:"permission_denials"`
+}
+
+// permissionFlag translates tomobit's three words into claude's own
+// (ADR-0053 Decision 1). Measured 2026-07-27 on claude 2.1.220: the flag takes
+// acceptEdits / auto / bypassPermissions / manual / dontAsk / plan.
+//
+// auto は「普通に働いて、要るところで人に訊く」— この CLI がまさにその名前を
+// 持っている。strict → manual は「訊かれるまで何もしない」で、read-only の
+// 意味に一番近い。open → bypassPermissions は「訊かない」そのもの。
+//
+// 未知の値は auto へ落とす: 権限は開く側へ倒れてはいけないので、迷ったら
+// 「訊く」に着地させる。
+func permissionFlag(p executor.Permission) string {
+	switch p.Resolve() {
+	case executor.PermissionStrict:
+		return "manual"
+	case executor.PermissionOpen:
+		return "bypassPermissions"
+	default:
+		return "auto"
+	}
+}
+
+// permissionDetail summarises what a denied tool was about to do, for the one
+// line a person reads before deciding (ADR-0053 Decision 3 — 入力は見せるが、
+// 許可の単位にはしない).
+//
+// The keys are claude's tool-input shapes, tried in the order that answers
+// "what would this touch?" first. An unknown shape yields "" rather than a
+// dump: a person deciding on a permission is not helped by raw JSON, and the
+// tool name alone is still a real question.
+func permissionDetail(input map[string]any) string {
+	for _, k := range []string{"file_path", "command", "path", "pattern", "url"} {
+		if v, ok := input[k].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (a *Adapter) Translate(line []byte) ([]executor.Event, error) {
@@ -170,6 +220,21 @@ func (a *Adapter) Translate(line []byte) ([]executor.Event, error) {
 			payload["num_turns"] = *s.NumTurns
 		}
 		out := []executor.Event{{Type: executor.EventProviderFinished, Payload: payload}}
+		// 権限で止まったことは失敗ではない (ADR-0053 Decision 4): 実行は正常に
+		// 終わっており、進まなかったのは作業の方である。provider.error にすると
+		// 「人が許可を渡さなかった」判断が Provider の成績になる。
+		for _, d := range s.PermissionDenials {
+			if d.ToolName == "" {
+				continue
+			}
+			out = append(out, executor.Event{
+				Type: executor.EventPermissionRequired,
+				Payload: map[string]any{
+					"tool":   d.ToolName,
+					"detail": permissionDetail(d.ToolInput),
+				},
+			})
+		}
 		if s.IsError || strings.HasPrefix(s.Subtype, "error") {
 			out = append(out, executor.Event{
 				Type:    executor.EventProviderError,

@@ -165,7 +165,7 @@ func recordDuelOffer(s *store.Store, gap curiosity.Gap, accepted bool, now int64
 // Phase 2 (ADR-0026 Decision 3) will present both results here and record the
 // user's preference; for now each sibling becomes an ordinary execution
 // experience and the parent closes quietly.
-func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, capability, size, permMode string, timeout time.Duration, in *bufio.Reader, out io.Writer, extractor perceive.Extractor) error {
+func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, capability, size string, permMode executor.Permission, timeout time.Duration, in *bufio.Reader, out io.Writer, extractor perceive.Extractor) error {
 	now := time.Now().UnixMilli()
 	parentSID := store.NewID(now)
 	if err := s.AppendEvent(parentSID, "task.started", now,

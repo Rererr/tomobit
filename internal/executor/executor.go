@@ -28,6 +28,15 @@ const (
 	EventProviderOutput   = "provider.output"
 	EventProviderFinished = "provider.finished"
 	EventProviderError    = "provider.error"
+	// EventPermissionRequired says the run stopped because a tool needed a
+	// person's permission (ADR-0053 Decision 2). Measured 2026-07-27: this
+	// ends the turn — there is no in-stream way to answer — so it is a
+	// report, not a prompt. Whoever is driving decides what to do with it.
+	//
+	// View-only: it never reaches the ledger (ADR-0053 Decision 4 — 許可は
+	// 配線であって経験ではない). Payload carries `tool` and a human-readable
+	// `detail` of what was asked for.
+	EventPermissionRequired = "permission.required"
 )
 
 // PayloadDetail is a view-only payload key (ADR-0024 Decision 6): a short,
@@ -119,9 +128,23 @@ type Request struct {
 	// (ADR-0022 Decision 2): the provider_session_id an earlier run of the
 	// same session reported. Empty starts a fresh thread. How to continue —
 	// or that the CLI cannot — is the Adapter's to know.
-	ResumeID       string
-	PermissionMode string
-	Timeout        time.Duration // 0 = no limit
+	ResumeID string
+	// PermissionMode is tomobit's own three-word vocabulary, never a CLI's
+	// (ADR-0053 Decision 1): Auto / Strict / Open. Each Adapter translates it
+	// into whatever its CLI calls the same intent — claude has permission
+	// modes, codex has sandbox policies, and they are not the same mechanism.
+	//
+	// Empty means Auto. The default is deliberately the working one: a harness
+	// whose Provider cannot read a file is not a harness, and the answer to
+	// "may it do this?" belongs to a person at the moment it is asked, not to
+	// a flag nobody set (Decision 2).
+	PermissionMode Permission
+	// AllowedTools are the tools a person has granted for this session
+	// (ADR-0053 Decision 3). Tool names only — never a CLI's permission DSL,
+	// which is the Adapter's vocabulary to know. An Adapter whose CLI has no
+	// per-tool grant ignores this rather than inventing one.
+	AllowedTools []string
+	Timeout      time.Duration // 0 = no limit
 
 	// WorkDir is where Tomo works — the child's cwd (ADR-0047 Decision 2).
 	// Empty inherits tomobit's own, which is what a terminal `cd` already
@@ -340,3 +363,48 @@ func (e *Executor) debugf(format string, args ...any) {
 }
 
 func nowMs() int64 { return time.Now().UnixMilli() }
+
+// Permission is how much a Provider may do without asking (ADR-0053 Decision 1).
+//
+// Three words, chosen so tomobit never holds one CLI's vocabulary. The mapping
+// is deliberately NOT an equivalence: claude's permission modes ask a human,
+// codex's sandbox policies build a fence. What the words name is the *intent* —
+// "work normally, stop at the edge" — and each Adapter says that in its own
+// CLI's terms. Translating an intent is the Adapter's job (ADR-0006 Decision
+// 2); pretending the two mechanisms are the same would be tomobit's mistake.
+type Permission string
+
+const (
+	// PermissionAuto lets the Provider work and stop where it needs a person.
+	// The default, because the alternative is a harness that cannot act.
+	PermissionAuto Permission = "auto"
+	// PermissionStrict lets it look but not touch.
+	PermissionStrict Permission = "strict"
+	// PermissionOpen removes the asking entirely. Never a default, and never
+	// reached by omission — only by someone saying so.
+	PermissionOpen Permission = "open"
+)
+
+// Resolve turns an empty value into the default. Callers translate the result;
+// nobody has to remember that "" means auto.
+func (p Permission) Resolve() Permission {
+	if p == "" {
+		return PermissionAuto
+	}
+	return p
+}
+
+// ParsePermission reads the three words, rejecting anything else — including a
+// raw CLI mode like "bypassPermissions". Letting those through is how a CLI's
+// vocabulary leaks into tomobit one flag at a time, and the error names the
+// three words so the fix is obvious.
+func ParsePermission(s string) (Permission, error) {
+	switch Permission(s) {
+	case "":
+		return PermissionAuto, nil
+	case PermissionAuto, PermissionStrict, PermissionOpen:
+		return Permission(s), nil
+	default:
+		return "", fmt.Errorf("permission: unknown mode %q (auto, strict, open)", s)
+	}
+}
