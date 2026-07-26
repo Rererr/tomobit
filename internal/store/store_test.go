@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -814,6 +815,74 @@ func TestPendingSessionsExcludesForgottenAndAmended(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "normal" {
 		t.Errorf("only the unmarked session stays pending at a higher ver, got %v", got)
+	}
+}
+
+// ADR-0054 Decision 2: a split's children are that task's breakdown, so the
+// task's one experience is the parent's — the children never enter the Deferred
+// Perception queue at all. Their events stay untouched; only the projection
+// skips them (One Ledger).
+//
+// A duel's two sides are the exception, and it is written as an opt-in: they
+// name themselves out through the task.duel their parent recorded, so any
+// future parent/child relationship defaults to "breakdown" rather than
+// silently becoming a second task.
+func TestPendingSessionsSkipsSplitChildrenButKeepsDuelSides(t *testing.T) {
+	s := openTest(t)
+	open := func(sess string, payload map[string]any) {
+		t.Helper()
+		if err := s.AppendEvent(sess, "task.started", 100, payload); err != nil {
+			t.Fatal(err)
+		}
+		mustAppend(t, s, sess, "task.finished", 200)
+	}
+	open("plain", map[string]any{"intent": "a task"})
+	open("split-parent", map[string]any{"intent": "big task"})
+	mustAppend(t, s, "split-parent", "task.split", 110)
+	open("split-kid", map[string]any{"intent": "sub one", "parent": "split-parent"})
+	open("duel-parent", map[string]any{"intent": "compare"})
+	mustAppend(t, s, "duel-parent", "task.duel", 110)
+	open("duel-a", map[string]any{"intent": "compare", "parent": "duel-parent"})
+	open("duel-b", map[string]any{"intent": "compare", "parent": "duel-parent"})
+
+	got, err := s.PendingSessions(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(got)
+	want := "duel-a,duel-b,duel-parent,plain,split-parent"
+	if strings.Join(got, ",") != want {
+		t.Errorf("pending = %v, want %s (the split child is the only one dropped)", got, want)
+	}
+
+	// The events themselves are never touched — the child is still fully in
+	// the ledger, and a reader following the parent link still finds it.
+	kids, err := s.ChildSessions("split-parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kids) != 1 || kids[0] != "split-kid" {
+		t.Errorf("the child must stay in the ledger, got %v", kids)
+	}
+}
+
+// A child of a parent that recorded neither task.split nor task.duel is still
+// a breakdown: the Decision falls on that side, so an unknown relationship
+// must not quietly become an independent commission.
+func TestPendingSessionsTreatsAnUnknownChildAsABreakdown(t *testing.T) {
+	s := openTest(t)
+	if err := s.AppendEvent("kid", "task.started", 100,
+		map[string]any{"intent": "sub", "parent": "some-parent"}); err != nil {
+		t.Fatal(err)
+	}
+	mustAppend(t, s, "kid", "task.finished", 200)
+
+	got, err := s.PendingSessions(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("an unrecognised child must default to breakdown, got %v", got)
 	}
 }
 

@@ -186,14 +186,15 @@ func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, cap
 	childSID := [2]string{}
 	adapter := [2]executor.Adapter{}
 	for i, p := range pair {
-		// tp: nil — a duel's providerName is always one concrete side of the
-		// gap (never "auto"), so openSubtask's autoDecide branch is
-		// structurally unreachable here; there is nothing to hand it.
-		sid, a, _, err := openSubtask(s, out, p, capability, size, prompt, parentSID, nil)
+		// A duel names both sides itself — they are the experiment — so the
+		// adapter comes straight from the gap, never from a decision made here
+		// (ADR-0054 Decision 1 removed openSubtask's own routing entirely; a
+		// duel never depended on it, since pair is always two concrete names).
+		sid, err := openSubtask(s, capability, prompt, parentSID)
 		if err != nil {
 			return err
 		}
-		childSID[i], adapter[i] = sid, a
+		childSID[i], adapter[i] = sid, providers[p]
 	}
 
 	// Each child gets its own workspace (ADR-0050 Decision 3). A duel is the

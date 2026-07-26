@@ -160,8 +160,12 @@ func OutcomeWeight(e *Experience) (y float64, ok bool) {
 		return 0.7, true
 	}
 	// Failed is the final conclusion only when no subjective Feedback was given —
-	// a subtask/duel child scores y=0 off its objective error alone (ADR-0028
-	// Decision 5 / C1), since its empty task.finished leaves Adopted "". But when
+	// a duel child scores y=0 off its objective error alone (ADR-0026 / C1),
+	// since its empty task.finished leaves Adopted "". (A split child used to
+	// land here too; since ADR-0054 Decision 2 it produces no experience at all,
+	// which also removes the one-sided evidence that path carried: only its
+	// failures could ever score, so a Provider that never erred in a subtask
+	// gained nothing while one that erred was pushed below the prior.) But when
 	// a human returned Feedback, their sovereign judgment (ADR-0018 experience
 	// sovereignty) outranks a transient provider.error: the do/chat boundary asks
 	// for Feedback even after a failed run, and a "文句なし" on the whole session —

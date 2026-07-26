@@ -239,7 +239,7 @@ func TestSplitChildrenAreNotObserved(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, [][]string{{"a"}, {"b"}},
-		"big task", "oc", "implement", "", "", 0, in, &out, false, extractor, nil); err != nil {
+		"big task", namedWiring("oc"), in, &out, false, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 

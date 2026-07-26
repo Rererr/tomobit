@@ -338,7 +338,15 @@ R4. eventsのtype初期カタログ（14種で確定）
       サブタスクは独立セッションで、その task.started は payload に
       parent: <親session_id> を持つ（source は production のまま）。
       知覚は task.split を読まず、抽出プロンプト/schemaも不変なので
-      payload 拡張でも extractor_ver のバンプ不要（ADR-0006と同じ理屈）
+      payload 拡張でも extractor_ver のバンプ不要（ADR-0006と同じ理屈）。
+      **parent を持つセッションは既定で経験にならない**（ADR-0054 D2）:
+      分割はタスク1つの内訳なので、そのタスクの経験は親の1件である。
+      PendingSessions が子を列に入れない — イベントは1バイトも消さず、
+      変わるのは投影だけ（One Ledger）。例外は duel の2側だけで、親が
+      task.duel を持つことで自分を名指しで外す＝**将来の親子関係は
+      既定で「内訳」に倒れ**、独立した発注として扱うには明示が要る。
+      **子は tomo.decided を持たない**（ADR-0054 D1）: 決定はタスクにつき
+      1回で、子は親が選ばれた相手をそのまま使う
     - user.forgot / user.amended（ADR-0033）: 忘却の器官の記帳。
       user.forgot payload = {ids: [...]}（経験単位forgetで消したid — 内容は
       載せない）、user.amended payload = {id, ver}（訂正元idと新世代）。

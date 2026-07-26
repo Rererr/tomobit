@@ -929,6 +929,14 @@ func registerFakeProvider(t *testing.T, name string, a executor.Adapter) {
 	t.Cleanup(func() { delete(providers, name) })
 }
 
+// namedWiring is the parent's decision a split's children inherit (ADR-0054
+// Decision 1), for a provider the test already registered. The place is left
+// empty — the process cwd, which is what a run with no /cd and no isolation
+// declaration uses; the tests that care about the place set workDir themselves.
+func namedWiring(name string) subtaskWiring {
+	return subtaskWiring{adapter: providers[name], capability: "implement"}
+}
+
 // registerRunnableFakeProvider registers a provider that auto will actually
 // consider, on any machine. availableProviderNames filters the registry by
 // whether the adapter's executable is on PATH (ADR-0043 Decision 2), so a test
@@ -1052,8 +1060,8 @@ func TestRunSplitNormalFlowRecordsParentAndPerSubtaskLedger(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
-		"implement", "", "", 0, in, &out, false, extractor, nil)
+	err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("fake-split"), in, &out, false, extractor)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -1124,8 +1132,8 @@ func TestRunSplitFlattensGroupsAndRecordsIndexGroups(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
-		"implement", "", "", 0, bufio.NewReader(strings.NewReader("")), &out, false, extractor, nil)
+	err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("fake-split"), bufio.NewReader(strings.NewReader("")), &out, false, extractor)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -1170,8 +1178,8 @@ func TestRunSplitFlatProposalOmitsGroups(t *testing.T) {
 	groups := [][]string{{"one"}, {"two"}}
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
-		"implement", "", "", 0, bufio.NewReader(strings.NewReader("")), &out, false, extractor, nil); err != nil {
+	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("fake-split"), bufio.NewReader(strings.NewReader("")), &out, false, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -1339,8 +1347,8 @@ func TestRunSplitStopsAfterAFailedSubtask(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	err := runSplit(context.Background(), s, parentSID, groups, "big task", "fail-split",
-		"implement", "", "", 0, in, &out, false, extractor, nil)
+	err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("fail-split"), in, &out, false, extractor)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -1357,18 +1365,16 @@ func TestRunSplitStopsAfterAFailedSubtask(t *testing.T) {
 // TestRunSplitAutoInheritsDecisionEnginePerSubtask guards ADR-0023 Decision
 // 3: a parent run with --provider auto has each subtask decided separately.
 // The candidate pool is swapped to adapters this test controls — real
-// claude-code/codex adapters must never be launched by a unit test — so
-// whichever candidate wins, the run stays safe to finish; only the recorded
-// tomo.decided is asserted, not who won.
-func TestRunSplitAutoInheritsDecisionEnginePerSubtask(t *testing.T) {
+// claude-code/codex adapters must never be launched by a unit test — so the
+// wiring below always names a fake.
+//
+// One task, one decision (ADR-0054 Decision 1). Before it, every child called
+// autoDecide on the *parent's* perception tokens, which drew the same lottery
+// K times and then filed each result under the child's own re-perceived scope.
+// The children must now record no decision at all.
+func TestSplitChildrenRecordNoDecisionOfTheirOwn(t *testing.T) {
 	s := openTestStore(t)
-
-	saved := providers
-	providers = map[string]executor.Adapter{
-		"fake-a": &fakeSplitAdapter{name: "fake-a", line: "did a"},
-		"fake-b": &fakeSplitAdapter{name: "fake-b", line: "did b"},
-	}
-	t.Cleanup(func() { providers = saved })
+	registerFakeProvider(t, "fake-split", &fakeSplitAdapter{name: "fake-split", line: "done"})
 
 	const parentSID = "parent-auto"
 	if err := s.AppendEvent(parentSID, "task.started", 1000,
@@ -1377,15 +1383,12 @@ func TestRunSplitAutoInheritsDecisionEnginePerSubtask(t *testing.T) {
 	}
 
 	groups := [][]string{{"subtask A"}, {"subtask B"}}
-	// Enough lines to cover runHuman (1 line per subtask), in case auto ever
-	// routes either one to the human candidate — that must not stop the run.
-	// No per-subtask Feedback is asked anymore (ADR-0028 Decision 5).
-	in := bufio.NewReader(strings.NewReader(strings.Repeat("\n", 8)))
+	in := bufio.NewReader(strings.NewReader(""))
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	err := runSplit(context.Background(), s, parentSID, groups, "big task", "auto",
-		"implement", "", "", 0, in, &out, false, extractor, nil)
+	err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("fake-split"), in, &out, false, extractor)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -1395,22 +1398,18 @@ func TestRunSplitAutoInheritsDecisionEnginePerSubtask(t *testing.T) {
 		t.Fatalf("expected 2 subtask sessions, got %d", len(subSIDs))
 	}
 	for i, sid := range subSIDs {
-		if n := countEventsOfTypeInSession(t, s, sid, "tomo.decided"); n != 1 {
-			t.Errorf("subtask %d should record tomo.decided under --provider auto, got %d", i, n)
+		if n := countEventsOfTypeInSession(t, s, sid, "tomo.decided"); n != 0 {
+			t.Errorf("subtask %d must record no decision of its own, got %d tomo.decided", i, n)
 		}
 	}
 }
 
-// TestRunSplitSharesOneTaskPerceptionHolderAcrossChildren exercises the full
-// runSplit → executeSplit → runSubtasksSequential/runGroupParallel →
-// openSubtask threading (ADR-0036 Decision 2b), not just openSubtask in
-// isolation: both --provider auto subtasks must share the parent's holder,
-// so a regression that drops tp anywhere along that chain (e.g. a call site
-// silently passing nil instead of threading it through) shows up here as a
-// second extraction.
-func TestRunSplitSharesOneTaskPerceptionHolderAcrossChildren(t *testing.T) {
+// The parent's Provider is the one that runs, in every child, on both the
+// sequential and the parallel path (ADR-0054 Decision 1). Pinned through
+// provider.selected rather than the adapter identity, because that is what the
+// ledger — and so the learning — actually reads.
+func TestEverySplitChildRunsOnTheParentsProvider(t *testing.T) {
 	s := openTestStore(t)
-
 	saved := providers
 	providers = map[string]executor.Adapter{
 		"fake-a": &fakeSplitAdapter{name: "fake-a", line: "did a"},
@@ -1418,29 +1417,41 @@ func TestRunSplitSharesOneTaskPerceptionHolderAcrossChildren(t *testing.T) {
 	}
 	t.Cleanup(func() { providers = saved })
 
-	const parentSID = "parent-auto-tp"
+	const parentSID = "parent-one-provider"
 	if err := s.AppendEvent(parentSID, "task.started", 1000,
 		map[string]any{"intent": "big task", "source": "production"}); err != nil {
 		t.Fatal(err)
 	}
 
-	groups := [][]string{{"subtask A"}, {"subtask B"}}
-	in := bufio.NewReader(strings.NewReader(strings.Repeat("\n", 8)))
+	// A lone group and a wide group, so the sequential and the parallel path
+	// both run under the same assertion.
+	groups := [][]string{{"lone"}, {"para A", "para B"}}
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
-	fake := &countingTaskExtract{semantic: map[string]string{"lang": "go"}}
-	tp := newTaskPerception("big task", fake.fn)
 
-	err := runSplit(context.Background(), s, parentSID, groups, "big task", "auto",
-		"implement", "", "", 0, in, &out, false, extractor, tp)
+	err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("fake-a"), bufio.NewReader(strings.NewReader("")), &out, false, extractor)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
-	if len(subtaskSessionIDs(t, s, parentSID)) != 2 {
-		t.Fatalf("expected 2 subtask sessions")
+
+	subSIDs := subtaskSessionIDs(t, s, parentSID)
+	if len(subSIDs) != 3 {
+		t.Fatalf("expected 3 subtask sessions, got %d", len(subSIDs))
 	}
-	if fake.calls != 1 {
-		t.Errorf("two --provider auto subtasks under one split should share one extraction, got %d calls", fake.calls)
+	for _, sid := range subSIDs {
+		evs, err := s.EventsBySession(sid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range evs {
+			if e.Type != "provider.selected" {
+				continue
+			}
+			if got := e.Payload["provider"]; got != "fake-a" {
+				t.Errorf("child %s ran on %v, not the parent's provider", sid, got)
+			}
+		}
 	}
 }
 
@@ -1639,24 +1650,31 @@ func TestDuelOfferNonInteractiveNeverAsksTaskPerception(t *testing.T) {
 }
 
 // A split child is the parent task's own decomposition, not a second task
-// (ADR-0036 Decision 2b): both subtasks below share one holder, and only the
-// first to open reaches into it.
-func TestOpenSubtaskReusesParentHolderWithoutReperceiving(t *testing.T) {
+// (ADR-0054 Decision 1): opening one records the session and nothing else —
+// no decision of its own, so no tomo.decided, no perception ask, no routing.
+func TestOpenSubtaskDecidesNothing(t *testing.T) {
 	s := openTestStore(t)
-	registerFakeProvider(t, "fake-a", &fakeSplitAdapter{name: "fake-a"})
-	registerFakeProvider(t, "fake-b", &fakeSplitAdapter{name: "fake-b"})
 
-	fake := &countingTaskExtract{semantic: map[string]string{"lang": "go"}}
-	tp := newTaskPerception("split this up", fake.fn)
-
-	if _, _, _, err := openSubtask(s, io.Discard, "auto", "implement", "", "sub one", "parent", tp); err != nil {
+	sid, err := openSubtask(s, "implement", "sub one", "parent")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := openSubtask(s, io.Discard, "auto", "implement", "", "sub two", "parent", tp); err != nil {
+	if n := countEventsOfTypeInSession(t, s, sid, "tomo.decided"); n != 0 {
+		t.Errorf("opening a child must not decide anything, got %d tomo.decided", n)
+	}
+	evs, err := s.EventsBySession(sid)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if fake.calls != 1 {
-		t.Errorf("both children share the parent's holder — extraction should run once, got %d calls", fake.calls)
+	var types []string
+	for _, e := range evs {
+		types = append(types, e.Type)
+	}
+	if len(types) != 2 || types[0] != "task.started" || types[1] != "capability.started" {
+		t.Errorf("a child's opening is exactly the two session events, got %v", types)
+	}
+	if evs[0].Payload["parent"] != "parent" {
+		t.Errorf("the parent link is what makes it a child, got %v", evs[0].Payload["parent"])
 	}
 }
 

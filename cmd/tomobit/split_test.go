@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/Rererr/tomobit/internal/core"
 	"github.com/Rererr/tomobit/internal/executor"
 	"github.com/Rererr/tomobit/internal/store"
 )
@@ -78,8 +76,8 @@ func TestRunSplitAcceptedRunsWholeGroupThenStopsAtGroupBoundary(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "marker",
-		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
+	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("marker"), in, &out, true, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -117,8 +115,8 @@ func TestRunSplitDeclinedRunsSequentialFailStop(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "marker",
-		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
+	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("marker"), in, &out, true, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -149,8 +147,8 @@ func TestRunSplitNonInteractiveNeverParallels(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "marker",
-		"implement", "", "", 0, in, &out, false, extractor, nil); err != nil {
+	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("marker"), in, &out, false, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -180,8 +178,8 @@ func TestRunSplitFlatProposalSkipsGate(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
-		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
+	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("fake-split"), in, &out, true, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -236,8 +234,8 @@ func TestRunSplitRecordsGatePayload(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
-		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
+	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("fake-split"), in, &out, true, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -265,8 +263,8 @@ func TestRunSplitParallelGroupWiderThanCapCompletesEveryMember(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "fake-split",
-		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
+	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("fake-split"), in, &out, true, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -284,32 +282,24 @@ func TestRunSplitParallelGroupWiderThanCapCompletesEveryMember(t *testing.T) {
 	}
 }
 
-// W3b: when --provider auto routes a wide group's members to the human executor,
-// they run off the goroutine path — a human has no stream — and still complete
-// (ADR-0028 Decision 4). An empty providers map plus a known human (ADR-0043
-// Decision 4: human is a candidate only in a context that already holds a
-// human capability connection) makes "human" the only candidate, so the
-// routing is deterministic; the all-human group exercises exactly the human
-// branch of runGroupParallel (the mixed provider+human case cannot be pinned
-// deterministically, since auto's per-member lottery is nondeterministic).
-func TestRunGroupParallelRunsAutoRoutedHumanMembers(t *testing.T) {
+// W3b: a wide group whose parent is the human runs off the goroutine path — a
+// human has no stream — and still completes (ADR-0028 Decision 4). Since
+// ADR-0054 Decision 1 the whole split shares the parent's one relationship, so
+// a group is all-human or all-provider; there is no mixed case left to pin.
+func TestRunGroupParallelRunsHumanMembersOneAtATime(t *testing.T) {
 	s := openTestStore(t)
-	knowHuman(t, s, "cap=implement")
-	saved := providers
-	providers = map[string]executor.Adapter{} // no adapters → auto can only route to human
-	t.Cleanup(func() { providers = saved })
 
 	const parentSID = "parent-human-group"
 	openParentTask(t, s, parentSID)
 
-	groups := [][]string{{"h1", "h2"}} // a wide group, both auto-routed to human
+	groups := [][]string{{"h1", "h2"}} // a wide group, the parent is the human
 	// gate "y", then one line per human member (runHuman reads and discards it).
 	in := bufio.NewReader(strings.NewReader("y\n\n\n"))
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "auto",
-		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
+	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		subtaskWiring{human: true, capability: "implement"}, in, &out, true, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -330,19 +320,15 @@ func TestRunGroupParallelRunsAutoRoutedHumanMembers(t *testing.T) {
 	}
 }
 
-// ADR-0040 Decision 1 applies to every subtask, not just the parent: a flat
-// proposal (no declared groups) always takes runSubtasksSequential regardless
-// of the gate answer (parallelGate itself never fires without declared
-// groups), so under --view ndjson each subtask's own --provider auto call
-// must emit its own "decided" — carrying that subtask's own sid, distinct
-// from its sibling's and from the parent's — the correlation a GUI running
-// several subtasks needs.
-func TestExecuteSplitViewEmitsOneDecidedPerSubtaskWithItsOwnSID(t *testing.T) {
+// The view stream carries no per-subtask "decided" any more (ADR-0054
+// Decision 1): a split is one task, so the one decision was announced when the
+// parent task opened. This test used to pin the opposite — one decided per
+// subtask, each with its own sid — and inverting it is the point: a GUI that
+// grew a per-child decision badge would be showing a lottery draw, not a
+// judgment.
+func TestExecuteSplitViewEmitsNoPerSubtaskDecision(t *testing.T) {
 	s := openTestStore(t)
-	knowHuman(t, s, "cap=implement") // ADR-0043 Decision 4: a blank human is no candidate
-	saved := providers
-	providers = map[string]executor.Adapter{} // auto's only candidate is human — deterministic
-	t.Cleanup(func() { providers = saved })
+	registerFakeProvider(t, "fake-split", &fakeSplitAdapter{name: "fake-split", line: "done"})
 	const parentSID = "parent-view-split"
 	openParentTask(t, s, parentSID)
 
@@ -352,8 +338,8 @@ func TestExecuteSplitViewEmitsOneDecidedPerSubtaskWithItsOwnSID(t *testing.T) {
 	groups := [][]string{{"sub one"}, {"sub two"}} // flat: parallelGate never fires
 
 	if _, _, err := executeSplit(context.Background(), s, parentSID, groups, "big task",
-		"auto", "implement", "", "", 0, bufio.NewReader(strings.NewReader("")),
-		noteWriter{s: stream}, false, newView, nil); err != nil {
+		namedWiring("fake-split"), bufio.NewReader(strings.NewReader("")),
+		noteWriter{s: stream}, false, newView); err != nil {
 		t.Fatalf("executeSplit: %v", err)
 	}
 
@@ -361,28 +347,19 @@ func TestExecuteSplitViewEmitsOneDecidedPerSubtaskWithItsOwnSID(t *testing.T) {
 	if len(subs) != 2 {
 		t.Fatalf("want 2 subtask sessions, got %d", len(subs))
 	}
-
-	var decided []map[string]any
 	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
 		var ev map[string]any
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			t.Fatalf("stream line not JSON: %q: %v", line, err)
 		}
 		if ev["type"] == "decided" {
-			decided = append(decided, ev)
+			t.Errorf("a subtask announced a decision of its own: %v", ev)
 		}
 	}
-	if len(decided) != 2 {
-		t.Fatalf("one decided per subtask, got %d: %v", len(decided), decided)
-	}
-	for i, ev := range decided {
-		if ev["sid"] != subs[i] {
-			t.Errorf("subtask %d decided sid = %v, want its own session %q — never the parent %q",
-				i, ev["sid"], subs[i], parentSID)
+	for _, sid := range subs {
+		if n := countEventsOfTypeInSession(t, s, sid, "tomo.decided"); n != 0 {
+			t.Errorf("child %s recorded %d tomo.decided, want 0", sid, n)
 		}
-	}
-	if decided[0]["sid"] == decided[1]["sid"] {
-		t.Errorf("sibling subtasks must not share a decided sid: %v", decided)
 	}
 }
 
@@ -419,8 +396,8 @@ func TestRunSplitParallelCancellationRecordsAllChildrenAndParent(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(ctx, s, parentSID, groups, "big task", "pc",
-		"implement", "", "", 0, in, &out, true, extractor, nil); err != nil {
+	if err := runSplit(ctx, s, parentSID, groups, "big task",
+		namedWiring("pc"), in, &out, true, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -444,14 +421,14 @@ func TestRunSplitParallelCancellationRecordsAllChildrenAndParent(t *testing.T) {
 	}
 }
 
-// 並列分岐でも親のTask Perception holderを引き回す（ADR-0036 Decision 2b）。
-// sequential側のテストは単要素groupだけなのでrunGroupParallelに入らず、
-// この経路だけtpを落とす呼び出しを検出できない。
-func TestRunGroupParallelSharesTheParentTaskPerceptionHolder(t *testing.T) {
+// 並列分岐でも子は自分の決定を持たない（ADR-0054 Decision 1）。sequential 側の
+// テストは単要素 group だけなので runGroupParallel に入らず、この経路だけが
+// 「並列の子が勝手に選び直す」退行を捕まえられる。
+func TestRunGroupParallelChildrenDecideNothing(t *testing.T) {
 	s := openTestStore(t)
 	// Replace the registry rather than adding to it: registerFakeProvider only
-	// inserts, so the real claude-code/codex adapters would stay in the auto
-	// lottery and a win would launch the actual CLI from a unit test.
+	// inserts, so the real claude-code/codex adapters would stay reachable and
+	// a stray lookup could launch an actual CLI from a unit test.
 	saved := providers
 	providers = map[string]executor.Adapter{
 		"fake-a": &fakeSplitAdapter{name: "fake-a", line: "did a"},
@@ -459,27 +436,16 @@ func TestRunGroupParallelSharesTheParentTaskPerceptionHolder(t *testing.T) {
 	}
 	t.Cleanup(func() { providers = saved })
 
-	const parentSID = "parent-parallel-tp"
+	const parentSID = "parent-parallel-decide"
 	openParentTask(t, s, parentSID)
-	// Human Executorも同じ台帳で競合する（ADR-0018 Decision 2）。
-	// 勝つと実stdinを読むため、このテストでは失敗記録で候補から外す。
-	now := time.Now().UnixMilli()
-	if err := s.UpsertConnection(&core.Connection{
-		Kind: core.ConnCapability, ScopeKey: "cap=implement", Target: "human",
-		Alpha: 1, Beta: 20, LastUpdate: now, BornTS: now, PriorA: 1, PriorB: 1,
-	}); err != nil {
-		t.Fatal(err)
-	}
 
 	groups := [][]string{{"x", "y"}} // 2要素の1グループなので並列経路に入る。
 	in := bufio.NewReader(strings.NewReader("y\n"))
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
-	fake := &countingTaskExtract{semantic: map[string]string{"lang": "go"}}
-	tp := newTaskPerception("big task", fake.fn)
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task", "auto",
-		"implement", "", "", 0, in, &out, true, extractor, tp); err != nil {
+	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("fake-a"), in, &out, true, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -487,10 +453,13 @@ func TestRunGroupParallelSharesTheParentTaskPerceptionHolder(t *testing.T) {
 	if split["parallel_accepted"] != true {
 		t.Fatalf("this test only says something if the parallel gate was accepted, got %v", split)
 	}
-	if len(subtaskSessionIDs(t, s, parentSID)) != 2 {
+	subs := subtaskSessionIDs(t, s, parentSID)
+	if len(subs) != 2 {
 		t.Fatal("expected two subtask sessions to have run in parallel")
 	}
-	if fake.calls != 1 {
-		t.Errorf("two parallel --provider auto subtasks must share the parent's one extraction, got %d calls", fake.calls)
+	for _, sid := range subs {
+		if n := countEventsOfTypeInSession(t, s, sid, "tomo.decided"); n != 0 {
+			t.Errorf("parallel child %s decided for itself: %d tomo.decided", sid, n)
+		}
 	}
 }

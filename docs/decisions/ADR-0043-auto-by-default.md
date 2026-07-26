@@ -223,3 +223,24 @@ Context の分布表は `decide.Choose` を実台帳の Connection 形状で 400
 回して得た。台帳そのものは読み書きせず、`connections` を一度 TSV に
 書き出して純関数へ流している（実台帳への副作用ゼロ）。プローブは
 `tools/dogfood/replay/autoprobe`（本ADR採択時にハーネスへ収める）。
+
+---
+
+## 追記（2026-07-27）: auto が効く場所は「タスク」であって「実行」ではない
+
+[ADR-0054](ADR-0054-a-child-is-the-breakdown.md) Decision 1 が、分割の子から
+`autoDecide` を外した。**1タスク = 1決定 = 1 `tomo.decided`** になる。
+
+実装を読んで判ったのは、子ごとの `autoDecide` が**子を見ていなかった**ことである。
+渡していた `taskPerception` は**親の intent** から作ったもので、K人の子は全員
+同じトークンで引かれていた — 違いは Thompson サンプリングの乱数だけ。
+「Redis のサブタスクだから codex」のような適材適所は起きていない。
+
+さらに記帳の側は `perceiveSession` が**子自身のイベントから意味を取り直す**ので、
+決定が読んだ棚と結果が載る棚が食い違っていた。Thompson サンプリングは
+「引いた腕の結果でその腕を更新する」から収束するので、この形では収束しない。
+
+Decision 1〜4 は不変である。auto は既定のまま、human も候補のまま
+（Decision 4 のブートストラップ条件も不変）— 変わったのは**どの単位で1回呼ぶか**
+だけで、その単位がタスクだという点は Decision 1 が最初から書いていた
+「タスクの stakes で決める」と一致している。

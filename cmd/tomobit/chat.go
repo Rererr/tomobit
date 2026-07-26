@@ -156,6 +156,11 @@ type chat struct {
 	threadID  string
 	turns     int
 	completed bool // a turn ran to completion — there is something to judge
+	// workspace は開くターンで Provider が宣言した隔離（ADR-0050 Decision 2）。
+	// 分割の子はここで働く (ADR-0054 Decision 3) ので、記帳のついでに持っておく —
+	// 台帳を読み直すより、宣言を読んだその場の値を渡す方が短い。nil は
+	// 「宣言が無かった」で、隔離できなかったことも含む正常な姿。
+	workspace *workspace.Declaration
 	// perception is this task's Task Perception holder (ADR-0036 Decision
 	// 2b), built fresh in startTask and cleared in closeTask along with the
 	// rest of the task's fields — its lifetime is one task, same as sid.
@@ -753,7 +758,7 @@ func (c *chat) run(prompt string, opening bool) error {
 		// a failed run — a declaration reports where results are, and a run
 		// that broke halfway still put them somewhere (ADR-0050 Decision 2).
 		if isolate {
-			recordWorkspace(c.s, c.sid, texts)
+			c.workspace = recordWorkspace(c.s, c.sid, texts)
 		}
 	}
 
@@ -787,9 +792,18 @@ func (c *chat) run(prompt string, opening bool) error {
 // produced — the conversation continues over the integrated result, not over the
 // split JSON it stalled on.
 func (c *chat) splitAndFold(ctx context.Context, groups [][]string, parentIntent string) error {
-	subs, cancelled, err := executeSplit(ctx, c.s, c.sid, groups, parentIntent,
-		c.providerName, c.capability, c.size, c.permMode, c.timeout, c.in, c.out, c.interactive,
-		c.newSubtaskView(), c.perception)
+	// 子はこのタスクの内訳なので、相手も場所も親のものをそのまま継ぐ
+	// (ADR-0054 Decision 1 / 3)。隔離が宣言されていればそこが子の cwd になり、
+	// 無ければ /cd の値 — どちらにせよ、親が働いている場所である。
+	// addDirs は人が /add-dir で宣言した場所だけ: 隔離先の親ディレクトリは葉を
+	// 作るための足場で、その葉の中で働く子には要らない。
+	w := subtaskWiring{
+		adapter: c.adapter, human: c.human, capability: c.capability,
+		permMode: c.permMode, timeout: c.timeout,
+		workDir: subtaskWorkDir(c.workspace, c.workDir), addDirs: c.addDirs,
+	}
+	subs, cancelled, err := executeSplit(ctx, c.s, c.sid, groups, parentIntent, w,
+		c.in, c.out, c.interactive, c.newSubtaskView())
 	if err != nil {
 		return err
 	}
@@ -908,6 +922,9 @@ func (c *chat) closeTask() error {
 	sid, completed := c.sid, c.completed
 	c.sid, c.threadID, c.turns = "", "", 0
 	c.adapter, c.human, c.completed = nil, false, false
+	// 隔離の宣言もタスク1つ分 (ADR-0050 Decision 5: 作業場はタスクが生まれる時に
+	// 決まる)。次のタスクは自分の隔離先を宣言し直す。
+	c.workspace = nil
 	// 許した道具はタスクの区切りまで (ADR-0053 Decision 3)。次のタスクへ
 	// 持ち越さないのは、許可が「この仕事のための」判断だからで、覚えたままだと
 	// 次に人が見ていない時にも効く。

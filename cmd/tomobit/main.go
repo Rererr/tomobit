@@ -708,8 +708,9 @@ func cmdDo(args []string) error {
 	// Where the work went is recorded before anything downstream reads it: the
 	// first-layer observation (ADR-0052) follows this path when it is present,
 	// so the ledger must know it by the time finishTask runs.
+	var decl *workspace.Declaration
 	if result.Started {
-		recordWorkspace(s, sid, texts)
+		decl = recordWorkspace(s, sid, texts)
 	}
 
 	// A clean run's output is read for a split proposal (ADR-0023 Decision
@@ -720,8 +721,20 @@ func cmdDo(args []string) error {
 	// and the joined text would no longer contain it.
 	if splitProtocol && runErr == nil && result.ExitCode == 0 {
 		if groups := readSplitProposal(texts); groups != nil {
-			return runSplit(ctx, s, sid, groups, prompt, *providerName, *capability, *size,
-				perm, *timeout, stdin, os.Stdout, isTTY(os.Stdin) && isTTY(os.Stdout), extractor, tp)
+			// The children inherit this run's decision and its place, both
+			// already settled above (ADR-0054 Decisions 1 and 3). do has no /cd
+			// of its own, so the parent's place is this process's cwd unless the
+			// isolation declaration moved it. The isolation *parent* directory
+			// is deliberately not passed on: it was scope for creating the leaf,
+			// and a child that already works inside the leaf needs nothing
+			// outside it (ADR-0050 Decision 4).
+			w := subtaskWiring{
+				adapter: adapter, human: human, capability: *capability,
+				permMode: perm, timeout: *timeout,
+				workDir: subtaskWorkDir(decl, ""),
+			}
+			return runSplit(ctx, s, sid, groups, prompt, w,
+				stdin, os.Stdout, isTTY(os.Stdin) && isTTY(os.Stdout), extractor)
 		}
 	}
 
@@ -782,38 +795,26 @@ func recordEvent(s *store.Store, sid string, ev executor.Event, ts int64) error 
 // a reuse of openTask — that one resolves --provider human by itself and
 // returns nothing to link a parent, both wrong for a subtask.
 //
-// Provider resolution keeps openTask's ordering discipline: an explicit
-// provider is already a validated name (the same one the parent run resolved
-// before recording anything), so it needs no second check; auto is resolved
-// after task.started/capability.started are recorded, exactly like a
-// top-level do, so its decision lands in the session it decided for.
-//
-// tp is the parent task's own Task Perception holder, handed down unchanged
-// (ADR-0036 Decision 2b: a split child is the parent's own decomposition, not
-// a second task — it reads the same tokens, never re-perceives).
-func openSubtask(s *store.Store, out io.Writer, providerName, capability, size, sub, parentSID string, tp *taskPerception) (subSID string, adapter executor.Adapter, human bool, err error) {
+// **It resolves no Provider.** Whoever opens a child already knows which
+// Provider it runs on: a split's children all run on the one the parent's task
+// boundary chose (ADR-0054 Decision 1 — one task, one decision, so one
+// tomo.decided), and a duel names both sides itself (ADR-0026). Deciding again
+// here used to call autoDecide per child on the *parent's* perception tokens,
+// which drew the same lottery K times and then filed each result under the
+// child's own re-perceived scope — the arm pulled and the arm updated were
+// different ones.
+func openSubtask(s *store.Store, capability, sub, parentSID string) (subSID string, err error) {
 	now := time.Now().UnixMilli()
 	subSID = store.NewID(now)
 	if err = s.AppendEvent(subSID, "task.started", now,
 		map[string]any{"intent": sub, "source": "production", "parent": parentSID}); err != nil {
-		return "", nil, false, err
+		return "", err
 	}
 	if err = s.AppendEvent(subSID, "capability.started", now,
 		map[string]any{"capability": capability}); err != nil {
-		return "", nil, false, err
+		return "", err
 	}
-
-	if providerName != "auto" {
-		return subSID, providers[providerName], false, nil
-	}
-	dec, err := autoDecide(s, out, subSID, capability, size, tp)
-	if err != nil {
-		return "", nil, false, err
-	}
-	if dec.Provider == "human" {
-		return subSID, nil, true, nil
-	}
-	return subSID, providers[dec.Provider], false, nil
+	return subSID, nil
 }
 
 // runSplit executes an accepted split proposal (ADR-0023, groups and
@@ -825,17 +826,15 @@ func openSubtask(s *store.Store, out io.Writer, providerName, capability, size, 
 // sequential order. Either way each subtask becomes its own task session — same
 // ledger, same rehabilitation as any other task.
 //
-// Subtasks carry no subjective Feedback (ADR-0028 Decision 5): each child's
-// task.finished is empty, like a duel child — only objective signals
-// (provider.error / exit≠0) become its experience, so per-provider learning
-// stays unblurred without a question per subtask. judged=false on the closing
-// finishTask: the parent's own artifact was the split proposal itself, not
-// something to grade.
+// Subtasks carry no Feedback and, since ADR-0054 Decision 2, no experience at
+// all: a split is one task's breakdown, so the task's one experience is the
+// parent's. Their events stay in the ledger; only the projection skips them.
+// judged=false on the closing finishTask: the parent's own artifact was the
+// split proposal itself, not something to grade.
 func runSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]string,
-	parentIntent, providerName, capability, size string, permMode executor.Permission, timeout time.Duration,
-	in *bufio.Reader, out io.Writer, interactive bool, extractor perceive.Extractor, tp *taskPerception) error {
-	_, cancelled, err := executeSplit(ctx, s, parentSID, groups, parentIntent,
-		providerName, capability, size, permMode, timeout, in, out, interactive, nil, tp)
+	parentIntent string, w subtaskWiring,
+	in *bufio.Reader, out io.Writer, interactive bool, extractor perceive.Extractor) error {
+	_, cancelled, err := executeSplit(ctx, s, parentSID, groups, parentIntent, w, in, out, interactive, nil)
 	if err != nil {
 		return err
 	}
@@ -930,18 +929,45 @@ func isolationDir(sid string) (parent, child string, err error) {
 // of one; a declaration is a report of *where the work went*, and a run that
 // failed halfway still moved its work somewhere. Telling the human their
 // results are missing would be worse than telling them where to look.
-func recordWorkspace(s *store.Store, sid string, texts []string) {
+// It returns what was declared (nil when nothing was, or when it was broken)
+// so the caller can hand a split's children the same place to work in
+// (ADR-0054 Decision 3) without re-reading the ledger.
+func recordWorkspace(s *store.Store, sid string, texts []string) *workspace.Declaration {
 	decl, err := workspace.Parse(strings.Join(texts, "\n"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "workspace:", err, "— 宣言は記帳しない")
-		return
+		return nil
 	}
 	if decl == nil {
-		return
+		return nil
 	}
 	if err := s.AppendEvent(sid, "task.workspace", time.Now().UnixMilli(), decl.Payload()); err != nil {
 		fmt.Fprintln(os.Stderr, "workspace: 記帳に失敗:", err)
 	}
+	return decl
+}
+
+// subtaskWorkDir is where a split's children work (ADR-0054 Decision 3): the
+// isolated workspace the parent declared, or — when there is none — the parent's
+// own working place, unchanged (ADR-0047). A split is one task's breakdown, so
+// its children never work somewhere the parent is not.
+//
+// The declared path is checked for being a directory, and only that. Whether it
+// really is a worktree stays unverified and unverifiable (ADR-0050 Decision 2);
+// this is the same check /cd already runs before accepting a place, and it is
+// here because a broken declaration should not turn every child into a chdir
+// failure. Falling back is loud — silently working in the original repository is
+// exactly the bug this Decision closes, so it must never happen quietly.
+func subtaskWorkDir(decl *workspace.Declaration, parentDir string) string {
+	if decl == nil || !decl.Isolated || decl.Path == "" {
+		return parentDir
+	}
+	if fi, err := os.Stat(decl.Path); err != nil || !fi.IsDir() {
+		fmt.Fprintf(os.Stderr,
+			"workspace: 宣言された隔離先 %q が見つからないので、サブタスクは親の作業場所で走る\n", decl.Path)
+		return parentDir
+	}
+	return decl.Path
 }
 
 // declaresGroups reports whether the proposal declared any independent group —

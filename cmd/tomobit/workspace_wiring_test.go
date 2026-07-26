@@ -1,12 +1,19 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Rererr/tomobit/internal/config"
+	"github.com/Rererr/tomobit/internal/executor"
 	"github.com/Rererr/tomobit/internal/store"
+	"github.com/Rererr/tomobit/internal/workspace"
 )
 
 func workspacePayload(t *testing.T, s *store.Store, sid string) map[string]any {
@@ -124,5 +131,132 @@ func TestIsolateProtocolKillSwitch(t *testing.T) {
 	cfg = config.Config{IsolateProtocol: &no}
 	if isolateProtocolEnabled() {
 		t.Errorf("an explicit false must stop the protocol")
+	}
+}
+
+// ---- ADR-0054 Decision 3: a split's children work where the parent works ----
+
+// The declared isolated workspace becomes the children's cwd. Before this, the
+// child's Request carried no WorkDir at all, so it ran in tomobit's own process
+// cwd — under the GUI, a different repository entirely, where it would not fail
+// but would quietly work on the wrong code.
+func TestSubtaskWorkDirFollowsTheDeclaredIsolation(t *testing.T) {
+	iso := t.TempDir()
+	decl := &workspace.Declaration{Isolated: true, Kind: "git worktree", Path: iso}
+
+	if got := subtaskWorkDir(decl, "/parent/repo"); got != iso {
+		t.Errorf("children work inside the isolated workspace: got %q, want %q", got, iso)
+	}
+}
+
+// No isolation declared — including an honest isolated:false — leaves the
+// parent's own place in charge (ADR-0047). "Nowhere in particular" stays
+// nowhere in particular: an empty parent place keeps the process cwd, which is
+// what a run with no /cd already used.
+func TestSubtaskWorkDirFallsBackToTheParentsPlace(t *testing.T) {
+	for name, decl := range map[string]*workspace.Declaration{
+		"nothing declared": nil,
+		"declined":         {Isolated: false, Reason: "no version control here"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := subtaskWorkDir(decl, "/parent/repo"); got != "/parent/repo" {
+				t.Errorf("got %q, want the parent's place", got)
+			}
+			if got := subtaskWorkDir(decl, ""); got != "" {
+				t.Errorf("an empty parent place must stay empty (process cwd), got %q", got)
+			}
+		})
+	}
+}
+
+// A declared path that is not a directory we can enter falls back rather than
+// turning every child into a chdir failure. This is not verification — whether
+// it really is a worktree stays unknown and unknowable (ADR-0050 Decision 2) —
+// it is the same existence check /cd already runs.
+func TestSubtaskWorkDirFallsBackWhenTheDeclaredPathIsNotThere(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "never-created")
+	decl := &workspace.Declaration{Isolated: true, Path: missing}
+	if got := subtaskWorkDir(decl, "/parent/repo"); got != "/parent/repo" {
+		t.Errorf("a path that is not there must not be used: got %q", got)
+	}
+
+	// A file is not a place to work either.
+	file := filepath.Join(t.TempDir(), "a-file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := subtaskWorkDir(&workspace.Declaration{Isolated: true, Path: file}, "/parent/repo"); got != "/parent/repo" {
+		t.Errorf("a regular file is not a workspace: got %q", got)
+	}
+}
+
+// pwdAdapter launches `pwd`, so a child's real working directory comes back as
+// its own provider.output — the assertion lands on where the process actually
+// ran, not on the struct that was supposed to describe it. That distinction is
+// the whole bug: the wiring existed on the parent and simply never reached the
+// child's Request.
+type pwdAdapter struct{}
+
+func (pwdAdapter) Name() string { return "pwd-adapter" }
+
+func (pwdAdapter) Command(executor.Request) (string, []string, []string) {
+	return "sh", []string{"-c", "pwd"}, nil
+}
+
+func (pwdAdapter) Translate(line []byte) ([]executor.Event, error) {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return nil, nil
+	}
+	return []executor.Event{{
+		Type: executor.EventProviderOutput, Payload: map[string]any{"text": string(line)},
+	}}, nil
+}
+
+func TestSplitChildrenRunInTheParentsPlace(t *testing.T) {
+	s := openTestStore(t)
+	place, err := filepath.EvalSymlinks(t.TempDir()) // macOS: /var → /private/var
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerFakeProvider(t, "pwd-adapter", pwdAdapter{})
+
+	const parentSID = "parent-place"
+	if err := s.AppendEvent(parentSID, "task.started", 1000,
+		map[string]any{"intent": "big task", "source": "production"}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := namedWiring("pwd-adapter")
+	w.workDir = place
+	// A lone group and a wide one, so the sequential and the parallel launch
+	// are both covered.
+	if err := runSplit(context.Background(), s, parentSID,
+		[][]string{{"one"}, {"two", "three"}}, "big task", w,
+		bufio.NewReader(strings.NewReader("y\n")), io.Discard, true,
+		&fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}); err != nil {
+		t.Fatalf("runSplit: %v", err)
+	}
+
+	kids := subtaskSessionIDs(t, s, parentSID)
+	if len(kids) != 3 {
+		t.Fatalf("three children, got %d", len(kids))
+	}
+	for _, sid := range kids {
+		evs, err := s.EventsBySession(sid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ran string
+		for _, e := range evs {
+			if e.Type == "provider.output" {
+				if text, ok := e.Payload["text"].(string); ok {
+					ran = text
+				}
+			}
+		}
+		if ran != place {
+			t.Errorf("child %s ran in %q, want the parent's place %q", sid, ran, place)
+		}
 	}
 }

@@ -139,3 +139,35 @@ func TestChatIsolationKillSwitch(t *testing.T) {
 		t.Errorf("an explicit false must stop the protocol:\n%s", a.prompts[0])
 	}
 }
+
+// The declaration outlives the turn that read it, so a split later in the same
+// task can hand its children the same place (ADR-0054 Decision 3) — and dies at
+// the task boundary, because a workspace belongs to one task (ADR-0050
+// Decision 5). Without the first half, children of an isolated task would work
+// in the original repository; without the second, the next task would inherit a
+// worktree that was never declared for it.
+func TestChatKeepsTheDeclarationForTheTaskAndDropsItAtTheBoundary(t *testing.T) {
+	s := openTestStore(t)
+	iso := t.TempDir()
+	a := &declaringAdapter{
+		answer: `{"tomobit_workspace": {"isolated": true, "kind": "git worktree", "path": "` + iso + `"}}`,
+	}
+	c := newDeclaringChat(t, s, a)
+
+	if err := c.turn("first task"); err != nil {
+		t.Fatal(err)
+	}
+	if c.workspace == nil || c.workspace.Path != iso {
+		t.Fatalf("the declaration must stay on the chat, got %v", c.workspace)
+	}
+	if got := subtaskWorkDir(c.workspace, c.workDir); got != iso {
+		t.Errorf("a split's children would run in %q, want the isolated %q", got, iso)
+	}
+
+	if err := c.closeTask(); err != nil {
+		t.Fatal(err)
+	}
+	if c.workspace != nil {
+		t.Errorf("the next task must declare its own workspace, got %v", c.workspace)
+	}
+}

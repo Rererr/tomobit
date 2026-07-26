@@ -438,6 +438,18 @@ func (s *Store) ChildSessions(parentSID string) ([]string, error) {
 func (s *Store) PendingSessions(ver int) ([]string, error) {
 	// ORDER BY id references a column outside the DISTINCT projection —
 	// rejected by strict SQL, accepted by SQLite (fixed backend, ADR-0004).
+	//
+	// The last clause is ADR-0054 Decision 2: a session opened under a parent is
+	// that parent task's breakdown, not a task of its own, so it produces no
+	// experience — one task, one experience. Its events stay in the ledger
+	// untouched (One Ledger: only the projection changes).
+	//
+	// The exception is written as an opt-in rather than "exclude split
+	// children": a duel's two sides ARE independent commissions — the whole
+	// point is comparing them (ADR-0026) — so they name themselves out by the
+	// task.duel their parent recorded. Any future parent/child relationship
+	// therefore defaults to "breakdown", which is the side the Decision falls
+	// on; treating one as independent has to be an explicit choice.
 	rows, err := s.DB.Query(`
 		SELECT DISTINCT session_id FROM events e
 		WHERE type IN ('task.finished','task.cancelled')
@@ -446,6 +458,16 @@ func (s *Store) PendingSessions(ver int) ([]string, error) {
 		  )
 		  AND session_id NOT IN (
 		    SELECT session_id FROM events WHERE type IN ('user.forgot','user.amended')
+		  )
+		  AND session_id NOT IN (
+		    SELECT c.session_id FROM events c
+		    WHERE c.type = 'task.started'
+		      AND json_extract(c.payload, '$.parent') IS NOT NULL
+		      AND NOT EXISTS (
+		        SELECT 1 FROM events p
+		        WHERE p.session_id = json_extract(c.payload, '$.parent')
+		          AND p.type = 'task.duel'
+		      )
 		  )
 		ORDER BY id`, ver)
 	if err != nil {
