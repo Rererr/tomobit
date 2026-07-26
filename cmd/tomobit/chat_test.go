@@ -805,8 +805,17 @@ func TestChatWorkingPlacesRideOnTheRequest(t *testing.T) {
 	if len(a.workDirs) != 1 || a.workDirs[0] != work {
 		t.Errorf("work dir on the request: got %v, want [%s]", a.workDirs, work)
 	}
-	if len(a.addDirs) != 1 || len(a.addDirs[0]) != 1 || a.addDirs[0][0] != extra {
-		t.Errorf("add dirs on the request: got %v, want [[%s]]", a.addDirs, extra)
+	// The user's declaration must arrive first and intact. The opening turn
+	// also carries the session's isolation dir (ADR-0050 Decision 4), which is
+	// per-session wiring rather than something the person asked for — so it
+	// rides alongside without displacing or reordering /add-dir.
+	if len(a.addDirs) != 1 || len(a.addDirs[0]) == 0 || a.addDirs[0][0] != extra {
+		t.Errorf("add dirs on the request: got %v, want [%s] first", a.addDirs, extra)
+	}
+	// c.addDirs is the user's list and must not have grown: the isolation dir
+	// belongs to one turn's Request, not to their declaration.
+	if len(c.addDirs) != 1 || c.addDirs[0] != extra {
+		t.Errorf("the user's /add-dir list must stay theirs: %v", c.addDirs)
 	}
 }
 

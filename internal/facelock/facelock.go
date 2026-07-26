@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // ErrHeld reports that another process already holds the lock — a face is
@@ -35,6 +36,39 @@ func DefaultPath() (string, error) {
 
 // openLockFile creates ~/.tomobit (if absent) and opens the lock file — the
 // shared prelude both platforms' Acquire runs before taking the OS lock. The
+// AcquireWithin waits up to d for the lock, polling because flock's blocking
+// mode has no timeout and a boundary must not hang on one.
+//
+// The third user of this primitive (after the face window and presence) is the
+// perception queue: several `tomobit chat` processes can reach their boundary
+// at once — one per GUI pane (GUI ADR-0009 Decision 5) — and each would fire
+// its own local model run. Serialising them costs nothing the ledger cares
+// about, since out-of-order perception is already handled (ADR-0041).
+//
+// ErrHeld comes back when d elapses with the lock still taken. That is not a
+// failure: the caller leaves the session pending, exactly as it does when the
+// model is unreachable, and `tomobit perceive` picks it up later.
+func AcquireWithin(path string, d time.Duration) (*Lock, error) {
+	deadline := time.Now().Add(d)
+	for {
+		lock, err := Acquire(path)
+		if err == nil {
+			return lock, nil
+		}
+		if !errors.Is(err, ErrHeld) {
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			return nil, ErrHeld
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+// pollInterval is short enough that a queued boundary starts promptly once the
+// one ahead finishes, and long enough not to spin.
+const pollInterval = 150 * time.Millisecond
+
 // path is an explicit argument (not DefaultPath baked in) for the same
 // testability reason config.LoadFile takes one — a test drives a temp path.
 func openLockFile(path string) (*os.File, error) {

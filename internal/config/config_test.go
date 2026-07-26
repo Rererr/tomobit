@@ -169,11 +169,61 @@ func TestResolveBackend(t *testing.T) {
 // struct. A new field left out of it would make a machine wired only through
 // that field look virgin — and silently move it off Ollama, the exact
 // regression ResolveBackend's legacy branch exists to prevent. When this
-// fails: add the new field to hasAnyOtherFieldSet, then bump the count.
+// fails: add the new field to hasAnyOtherFieldSet, then bump the count —
+// UNLESS the new field postdates perceive_backend, in which case it must be
+// left out and counted below instead (see postDatesBackendChoice).
 func TestHasAnyOtherFieldSetEnumeratesEveryConfigField(t *testing.T) {
-	const known = 12 // 3 checked by ResolveBackend + 9 in hasAnyOtherFieldSet
+	// 3 checked by ResolveBackend + 9 in hasAnyOtherFieldSet + 3 deliberately
+	// excluded (postDatesBackendChoice).
+	const known = 15
 	if n := reflect.TypeOf(Config{}).NumField(); n != known {
 		t.Errorf("Config grew to %d fields (knew %d): update hasAnyOtherFieldSet and this count together", n, known)
+	}
+}
+
+// postDatesBackendChoice is the counter-guard to the test above: fields added
+// after perceive_backend existed must NOT join hasAnyOtherFieldSet. That
+// function is a fossil marker for "this config predates the backend choice",
+// not a "config is non-empty" check — a key that could not possibly appear in
+// a legacy config carries no such evidence.
+//
+// TestCommands / TestTimeoutSec (ADR-0052) are the first such fields. Counting
+// them would make a fresh Mac that only wired a test command resolve to Ollama
+// instead of mlx-lm, which is the mirror image of the regression the other
+// test guards.
+func TestFieldsAddedAfterBackendChoiceStayOutOfTheFossilMarker(t *testing.T) {
+	cmds := Config{TestCommands: map[string]string{"/repo": "go test ./..."}}
+	if cmds.hasAnyOtherFieldSet() {
+		t.Errorf("test_commands must not mark a config as legacy")
+	}
+	if got, err := cmds.ResolveBackend("darwin"); err != nil || got != "mlx-lm" {
+		t.Errorf("a fresh Mac wiring only test_commands stays on mlx-lm: got %q err=%v", got, err)
+	}
+
+	timeout := Config{TestTimeoutSec: 60}
+	if timeout.hasAnyOtherFieldSet() {
+		t.Errorf("test_timeout_sec must not mark a config as legacy")
+	}
+
+	no := false
+	iso := Config{IsolateProtocol: &no}
+	if iso.hasAnyOtherFieldSet() {
+		t.Errorf("isolate_protocol must not mark a config as legacy")
+	}
+}
+
+// TestIsolateProtocolDefaultsOn pins ADR-0050's kill switch against ADR-0049's
+// asymmetry: unlike quota_observe, an absent key here means ON. The protocol
+// only adds text to a prompt and asks the Provider to move its own work — it
+// reads no credential and calls no undocumented endpoint — so the ADR-0028
+// shape (opt-out, never opt-in) applies rather than the ADR-0049 one.
+func TestIsolateProtocolDefaultsOn(t *testing.T) {
+	if c := (Config{}); c.IsolateProtocol != nil {
+		t.Errorf("an absent key must stay nil, not default to a value")
+	}
+	no := false
+	if c := (Config{IsolateProtocol: &no}); c.IsolateProtocol == nil || *c.IsolateProtocol {
+		t.Errorf("an explicit false must survive as the opt-out")
 	}
 }
 

@@ -29,6 +29,7 @@ import (
 	"github.com/Rererr/tomobit/internal/store"
 	"github.com/Rererr/tomobit/internal/subtask"
 	"github.com/Rererr/tomobit/internal/voice"
+	"github.com/Rererr/tomobit/internal/workspace"
 )
 
 // chatPrompt hangs the marker one column in (gutter 1); everything else the
@@ -631,8 +632,27 @@ func (c *chat) run(prompt string, opening bool) error {
 	runPrompt := prompt
 	var texts []string
 	if split {
-		runPrompt = subtask.Instruction(prompt)
+		runPrompt = subtask.Instruction(runPrompt)
 	}
+	// The isolation protocol rides the same opening turn and for the same
+	// reason (ADR-0050 Decision 5): a workspace is decided when the task is
+	// born. A continuing turn that wanted a different place would be a new
+	// task, which is what /new is for. Unlike the split protocol there is no
+	// recursion to stop — isolation does not beget isolation — so the "read
+	// only the opening turn" discipline here is about meaning, not depth.
+	isolate := opening && isolateProtocolEnabled() && !c.human
+	var isoParent string
+	if isolate {
+		p, child, err := isolationDir(c.sid)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "workspace: 隔離先を用意できないので隔離せずに走る:", err)
+			isolate = false
+		} else {
+			isoParent = p
+			runPrompt = workspace.Instruction(runPrompt, child)
+		}
+	}
+	collect := split || isolate
 
 	v := c.newView(c.adapter.Name())
 	sink := func(ev executor.Event, ts int64) error {
@@ -643,7 +663,7 @@ func (c *chat) run(prompt string, opening bool) error {
 			c.threadID = id
 		}
 		v.show(ev)
-		if split && ev.Type == executor.EventProviderOutput {
+		if collect && ev.Type == executor.EventProviderOutput {
 			if text, ok := ev.Payload["text"].(string); ok && text != "" {
 				texts = append(texts, text)
 			}
@@ -664,12 +684,20 @@ func (c *chat) run(prompt string, opening bool) error {
 	// typed; another after it (below) sets it off from the next prompt.
 	c.gap()
 	v.begin()
+	addDirs := c.addDirs
+	if isoParent != "" {
+		// The scope must name a directory that exists, so AddDirs gets the
+		// parent while the prompt names the leaf (ADR-0050 Decision 4). Appended
+		// to a copy: c.addDirs is the user's /add-dir declaration and outlives
+		// this turn, and the isolation dir is per-session wiring, not theirs.
+		addDirs = append(append([]string(nil), c.addDirs...), isoParent)
+	}
 	result, runErr := ex.Run(ctx, executor.Request{
 		Prompt: runPrompt, ResumeID: c.threadID,
 		PermissionMode: c.permMode, Timeout: c.timeout,
 		// 働く場所 (ADR-0047): /cd と /add-dir がタスク境界で置いた値。
 		// 空なら従来どおり tomobit 自身の cwd を継ぐ。
-		WorkDir: c.workDir, AddDirs: c.addDirs,
+		WorkDir: c.workDir, AddDirs: addDirs,
 	}, sink)
 	v.end(result)
 
@@ -691,6 +719,13 @@ func (c *chat) run(prompt string, opening bool) error {
 	}
 	if result.Started {
 		c.completed = true
+		// Where the work went, recorded before the boundary reads it: the
+		// first-layer observation (ADR-0052) follows this path. Read even from
+		// a failed run — a declaration reports where results are, and a run
+		// that broke halfway still put them somewhere (ADR-0050 Decision 2).
+		if isolate {
+			recordWorkspace(c.s, c.sid, texts)
+		}
 	}
 
 	// A clean opening turn's output may be a split proposal (ADR-0028 Decision
@@ -860,7 +895,7 @@ func (c *chat) closeTask() error {
 		out = newIndentWriter(c.out, gutter)
 	}
 	c.gap()
-	if err := finishTask(c.s, sid, c.in, out, true, c.humanPresent, c.extractor); err != nil {
+	if err := finishTask(c.s, sid, c.in, out, true, c.humanPresent, c.extractor, c.workDir); err != nil {
 		return err
 	}
 	// task.finished closes the stream's task after the boundary organs have run

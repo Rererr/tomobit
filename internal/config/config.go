@@ -63,6 +63,30 @@ type Config struct {
 	// one organ that reads a credential and touches a network endpoint the
 	// vendor never documented, so "the user never said yes" must not mean yes.
 	QuotaObserve *bool `json:"quota_observe,omitempty"`
+	// IsolateProtocol is the ADR-0050 kill switch, shaped exactly like
+	// SplitProtocol and defaulting the same way: nil = key absent = the
+	// isolation protocol rides every eligible run, an explicit false stops it.
+	// Opt-out, not a reversion to opt-in — a machine either asks Providers to
+	// split their workspace off or it does not, and that is not a per-run
+	// judgment anyone should have to make.
+	IsolateProtocol *bool `json:"isolate_protocol,omitempty"`
+	// TestCommands maps a working directory to the command that observes whether
+	// its tests pass (ADR-0052 Decision 2). "How this project runs its tests" is
+	// wiring, in the same sense ADR-0047 gave the word: it describes this machine
+	// and this checkout, not an experience, so it lives here and never in the DB.
+	//
+	// tomobit holds one string per place and knows no test runner — `go`, `npm`
+	// and `pytest` are outside its vocabulary, the way ADR-0050 keeps VCS names
+	// outside it. An absent map (or no matching place) means nothing runs: the
+	// feature is opt-in by construction, so silence stays silence (ADR-0049).
+	//
+	// The command runs at every task boundary of a matching place, through
+	// `sh -c`, and only its exit code is read.
+	TestCommands map[string]string `json:"test_commands,omitempty"`
+	// TestTimeoutSec bounds that command (ADR-0052 Decision 4 / 実装時ノブ). 0 or
+	// absent means the default; a timeout records nothing, since a runner that
+	// never finished observed nothing about the deliverable.
+	TestTimeoutSec int `json:"test_timeout_sec,omitempty"`
 }
 
 // QuotaObserveEnabled resolves the ADR-0049 gate: absent key = off. Kept on
@@ -114,6 +138,13 @@ func (c Config) ResolveBackend(goos string) (string, error) {
 // the already-checked Ollama fields carries a value — the signal that this
 // config was written before perceive_backend existed (a config nobody has
 // ever touched is exactly zero in every field).
+//
+// Fields added AFTER perceive_backend must NOT be listed here: they cannot
+// appear in a config that predates it, so counting them would misread a fresh
+// Mac that only set the new key as a legacy Ollama machine and silently pin it
+// to the wrong backend. TestCommands / TestTimeoutSec (ADR-0052) are excluded
+// for exactly this reason — this list is a fossil marker, not a "config is
+// non-empty" check.
 func (c Config) hasAnyOtherFieldSet() bool {
 	return c.ClaudeConfigDir != nil ||
 		len(c.ClaudeArgs) > 0 ||

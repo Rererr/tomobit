@@ -2,13 +2,16 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Rererr/tomobit/internal/core"
 	"github.com/Rererr/tomobit/internal/curiosity"
+	"github.com/Rererr/tomobit/internal/executor"
 	"github.com/Rererr/tomobit/internal/store"
 )
 
@@ -406,4 +409,83 @@ func sessionsWithEvent(t *testing.T, s *store.Store, typ string) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+// TestRunDuelGivesEachChildItsOwnWorkspace: a duel is the one place where a
+// shared tree is most corrosive — the same prompt runs twice at once, so each
+// side can see and overwrite the other's work, and an experiment whose two arms
+// edit one checkout is not an experiment (ADR-0050 Decision 3).
+//
+// The two prompts must stay isomorphic in the sense ADR-0026 cares about: the
+// task text identical, only the harness's own path differing.
+func TestRunDuelGivesEachChildItsOwnWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // never build worktrees under the real home
+	a := &promptCapturingAdapter{name: "prov-a"}
+	z := &promptCapturingAdapter{name: "prov-z"}
+	registerFakeProvider(t, "prov-a", a)
+	registerFakeProvider(t, "prov-z", z)
+	s := openTestStore(t)
+
+	gap := curiosity.Gap{A: "prov-a", B: "prov-z", Scope: core.NewScope("cap=implement")}
+	noInput := bufio.NewReader(strings.NewReader(""))
+	if err := runDuel(context.Background(), s, gap, "do the thing", "implement", "", "", 0, noInput, io.Discard, nil); err != nil {
+		t.Fatalf("runDuel: %v", err)
+	}
+
+	if len(a.prompts) != 1 || len(z.prompts) != 1 {
+		t.Fatalf("each side runs once: %d / %d", len(a.prompts), len(z.prompts))
+	}
+	for _, p := range []string{a.prompts[0], z.prompts[0]} {
+		if !strings.Contains(p, "tomobit_workspace") {
+			t.Errorf("both arms must carry the protocol:\n%s", p)
+		}
+		if !strings.Contains(p, "do the thing") {
+			t.Errorf("the task text must survive intact:\n%s", p)
+		}
+	}
+	if a.prompts[0] == z.prompts[0] {
+		t.Errorf("each child must be pointed at its own place, got identical prompts")
+	}
+
+	// The paths must differ by session, which is what keeps the two arms from
+	// landing in one directory.
+	children := subtaskSessionIDs(t, s, sessionsWithEvent(t, s, "task.duel")[0])
+	if len(children) != 2 {
+		t.Fatalf("two children expected, got %d", len(children))
+	}
+	for _, sid := range children {
+		if !strings.Contains(a.prompts[0]+z.prompts[0], sid) {
+			t.Errorf("child %s has no place of its own in either prompt", sid)
+		}
+	}
+}
+
+// promptCapturingAdapter records the prompt it was handed and answers with a
+// fixed line, so a test can compare what two concurrent arms were actually
+// asked. Launching through sh keeps it a real child process, like the other
+// fakes here.
+type promptCapturingAdapter struct {
+	name    string
+	mu      sync.Mutex
+	prompts []string
+}
+
+func (f *promptCapturingAdapter) Name() string { return f.name }
+
+func (f *promptCapturingAdapter) Command(req executor.Request) (string, []string, []string) {
+	f.mu.Lock()
+	f.prompts = append(f.prompts, req.Prompt)
+	f.mu.Unlock()
+	return "sh", []string{"-c", "echo ran"}, nil
+}
+
+func (f *promptCapturingAdapter) Translate(line []byte) ([]executor.Event, error) {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return nil, nil
+	}
+	return []executor.Event{{
+		Type:    executor.EventProviderOutput,
+		Payload: map[string]any{"text": string(line)},
+	}}, nil
 }

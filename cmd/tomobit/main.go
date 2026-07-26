@@ -29,12 +29,15 @@ import (
 	"github.com/Rererr/tomobit/internal/executor/claudecode"
 	"github.com/Rererr/tomobit/internal/executor/codex"
 	"github.com/Rererr/tomobit/internal/face"
+	"github.com/Rererr/tomobit/internal/facelock"
+	"github.com/Rererr/tomobit/internal/observe"
 	"github.com/Rererr/tomobit/internal/perceive"
 	"github.com/Rererr/tomobit/internal/plan"
 	"github.com/Rererr/tomobit/internal/reflection"
 	"github.com/Rererr/tomobit/internal/store"
 	"github.com/Rererr/tomobit/internal/subtask"
 	"github.com/Rererr/tomobit/internal/voice"
+	"github.com/Rererr/tomobit/internal/workspace"
 	"golang.org/x/term"
 )
 
@@ -591,6 +594,12 @@ func cmdDo(args []string) error {
 	// never gets it either, but those frame their prompts elsewhere (runSplit /
 	// runDuel), so depth stays 1 (ADR-0023 Decision 4).
 	splitProtocol := splitProtocolEligible(splitProtocolEnabled(), human, planName)
+	// The isolation protocol has one exclusion the split protocol also has —
+	// human, which returns no stream to declare in — but rides plan runs too:
+	// a plan's steps all work in the same tree, so isolating it once at the
+	// start is exactly as meaningful as isolating a plain run (ADR-0050
+	// Decision 5 excludes only --provider human).
+	isolateProtocol := isolateProtocolEnabled() && !human
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -607,8 +616,26 @@ func cmdDo(args []string) error {
 		runPrompt := prompt
 		var collect *[]string
 		if splitProtocol {
-			runPrompt = subtask.Instruction(prompt)
+			runPrompt = subtask.Instruction(runPrompt)
 			collect = &texts
+		}
+		// The isolation protocol rides the same run (ADR-0050 Decision 5). It
+		// is appended after the split protocol so that a Provider deciding to
+		// split — which means doing no work at all (ADR-0023 Decision 1) — has
+		// already read that instruction; there is no workspace to isolate for a
+		// run that only proposes, and Parse simply finds no declaration.
+		var isoParent, isoChild string
+		if isolateProtocol {
+			p, c, err := isolationDir(sid)
+			if err != nil {
+				// A place that cannot be prepared is not a reason to refuse the
+				// work: the run goes ahead unisolated, loudly.
+				fmt.Fprintln(os.Stderr, "workspace: 隔離先を用意できないので隔離せずに走る:", err)
+			} else {
+				isoParent, isoChild = p, c
+				runPrompt = workspace.Instruction(runPrompt, isoChild)
+				collect = &texts
+			}
 		}
 		sink := providerSink(s, sid, os.Stdout, collect)
 
@@ -630,9 +657,16 @@ func cmdDo(args []string) error {
 			if len(steps) > 1 {
 				fmt.Printf("-- plan %d/%d: %s --\n", i+1, len(steps), step)
 			}
-			result, runErr = ex.Run(ctx, executor.Request{
+			req := executor.Request{
 				Prompt: stepPrompt(runPrompt, step, i, len(steps)), PermissionMode: *permMode, Timeout: *timeout,
-			}, sink)
+			}
+			if isoParent != "" {
+				// The scope has to name a directory that exists, so AddDirs
+				// gets the parent while the prompt names the leaf the Provider
+				// will create (ADR-0047 wiring + ADR-0050 Decision 4).
+				req.AddDirs = append(req.AddDirs, isoParent)
+			}
+			result, runErr = ex.Run(ctx, req, sink)
 			if ctx.Err() != nil || runErr != nil || result.ExitCode != 0 {
 				break
 			}
@@ -664,6 +698,13 @@ func cmdDo(args []string) error {
 		}
 	}
 
+	// Where the work went is recorded before anything downstream reads it: the
+	// first-layer observation (ADR-0052) follows this path when it is present,
+	// so the ledger must know it by the time finishTask runs.
+	if result.Started {
+		recordWorkspace(s, sid, texts)
+	}
+
 	// A clean run's output is read for a split proposal (ADR-0023 Decision
 	// 1): a broken run (runErr, non-zero exit, already excluded by ctx.Err()
 	// above) never reaches here, so its output is never trusted as one. The
@@ -681,7 +722,7 @@ func cmdDo(args []string) error {
 	// argument was rejected as YAGNI): it hands finishTask the same
 	// isTTY(os.Stdin) the function used to read for itself, so behavior here is
 	// unchanged.
-	return finishTask(s, sid, stdin, os.Stdout, result.Started, isTTY(os.Stdin), extractor)
+	return finishTask(s, sid, stdin, os.Stdout, result.Started, isTTY(os.Stdin), extractor, "")
 }
 
 // providerSink builds the Executor Sink shared by a plain `do` run and each
@@ -791,7 +832,7 @@ func runSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]
 	// runSplit is do-only (chat's own split path, splitAndFold, folds back into
 	// the conversation instead of calling finishTask) — the same isTTY(os.Stdin)
 	// cmdDo's own call passes (ADR-0035 Decision 2).
-	return finishTask(s, parentSID, in, out, false, isTTY(os.Stdin), extractor)
+	return finishTask(s, parentSID, in, out, false, isTTY(os.Stdin), extractor, "")
 }
 
 // flattenGroups turns the Provider's declared group structure into the flat
@@ -832,6 +873,64 @@ func splitProtocolEnabled() bool {
 	return *cfg.SplitProtocol
 }
 
+// isolateProtocolEnabled resolves the ADR-0050 kill switch (config
+// isolate_protocol, default true), shaped exactly like splitProtocolEnabled:
+// an absent key must never read as "disabled" and silently downgrade a machine
+// that predates it.
+func isolateProtocolEnabled() bool {
+	if cfg.IsolateProtocol == nil {
+		return true
+	}
+	return *cfg.IsolateProtocol
+}
+
+// isolationDir prepares the place this session's Provider is told to build its
+// workspace in, returning the parent to hand to AddDirs and the child path to
+// name in the instruction (ADR-0050 Decision 4).
+//
+// Only the parent is created. `git worktree add` (and its equivalents) want to
+// make the leaf themselves — pre-creating it would hand every Provider a
+// "directory already exists" to work around on the very first step. The parent
+// must exist because that is what goes into AddDirs, and a permission scope
+// naming a directory that isn't there is not a scope.
+//
+// Measured 2026-07-26: this exact split — AddDirs on the parent, the child
+// named in the prompt — is what claude followed on the first try.
+func isolationDir(sid string) (parent, child string, err error) {
+	child, err = workspace.Dir(sid)
+	if err != nil {
+		return "", "", err
+	}
+	parent = filepath.Dir(child)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return "", "", err
+	}
+	return parent, child, nil
+}
+
+// recordWorkspace reads the isolation declaration out of a run's output and
+// files it (ADR-0050 Decision 2). Absent is the ordinary case and says nothing;
+// malformed warns and continues, exactly as a broken split proposal does.
+//
+// Unlike a split proposal, this is read even when the run failed. A proposal is
+// an instruction to act on, so ADR-0023 refuses to trust a broken run's version
+// of one; a declaration is a report of *where the work went*, and a run that
+// failed halfway still moved its work somewhere. Telling the human their
+// results are missing would be worse than telling them where to look.
+func recordWorkspace(s *store.Store, sid string, texts []string) {
+	decl, err := workspace.Parse(strings.Join(texts, "\n"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "workspace:", err, "— 宣言は記帳しない")
+		return
+	}
+	if decl == nil {
+		return
+	}
+	if err := s.AppendEvent(sid, "task.workspace", time.Now().UnixMilli(), decl.Payload()); err != nil {
+		fmt.Fprintln(os.Stderr, "workspace: 記帳に失敗:", err)
+	}
+}
+
 // declaresGroups reports whether the proposal declared any independent group —
 // a group wider than one subtask (ADR-0028 Decision 2). A flat proposal (every
 // element a lone subtask) declares none, and its task.split omits groups.
@@ -858,7 +957,17 @@ func declaresGroups(groups [][]string) bool {
 // direct isTTY(os.Stdin) read here: a chat holds context (its own --view
 // ndjson) that this function cannot see, so the caller resolves the
 // predicate and hands it in.
-func finishTask(s *store.Store, sid string, in *bufio.Reader, out io.Writer, judged, humanPresent bool, extractor perceive.Extractor) error {
+// workDir is where this task worked (a chat's /cd, ADR-0047; "" for do, which
+// means the process's own cwd). It reaches here only to find the first-layer
+// command wired for that place (ADR-0052) — the boundary organs themselves are
+// place-blind.
+func finishTask(s *store.Store, sid string, in *bufio.Reader, out io.Writer, judged, humanPresent bool, extractor perceive.Extractor, workDir string) error {
+	// The first layer of Outcome, observed before the human is asked (ADR-0052
+	// Decision 5): a red suite is a fact the person grading deserves to have,
+	// and ADR-0026 Decision 3 already allowed the signal as 補助表示 so long as
+	// the decision stays theirs.
+	observeFirstLayer(s, sid, out, workDir)
+
 	// The Feedback question runs at the end of every completed task (ADR-0006
 	// Decision 4): exit 0 is not a verdict, and even a failed run may have
 	// produced something the user keeps.
@@ -869,6 +978,10 @@ func finishTask(s *store.Store, sid string, in *bufio.Reader, out io.Writer, jud
 	if err := s.AppendEvent(sid, "task.finished", time.Now().UnixMilli(), payload); err != nil {
 		return err
 	}
+	// 分け方の評価 (ADR-0051). Runs right after Feedback because it reads that
+	// answer: a session graded 文句なし needs no second question, so the extra
+	// friction lands only on the days it earns.
+	recordSplitVerdict(s, sid, in, out, judged, payload)
 
 	// The reflection snapshot is taken before perception so that whatever
 	// the coming Apply batch discovers (Split, 逆転, Questioned, 名誉回復)
@@ -890,6 +1003,213 @@ func finishTask(s *store.Store, sid string, in *bufio.Reader, out io.Writer, jud
 		reflectWithIO(s, snap, extras, sid, in, out, humanPresent, time.Now().UnixMilli())
 	}
 	return nil
+}
+
+// splitOf reports whether this session proposed a split, and which Provider
+// did the proposing — the one whose 分け方 is about to be judged.
+func splitOf(s *store.Store, sid string) (provider string, split bool) {
+	events, err := s.EventsBySession(sid)
+	if err != nil {
+		return "", false
+	}
+	for _, e := range events {
+		switch e.Type {
+		case "task.split":
+			split = true
+		case "provider.selected":
+			if p, ok := e.Payload["provider"].(string); ok {
+				provider = p
+			}
+		}
+	}
+	return provider, split
+}
+
+// recordSplitVerdict files how the 分け方 was judged (ADR-0051).
+//
+// Splitting is the one thing a Provider does that no layer of the ledger has
+// been able to see: the children's outcomes belong to the children, and the
+// parent's own Feedback — where it has one — mixes 采配, 統合 and the whole
+// conversation into a single grade. This separates the one strand out.
+//
+// The verdict comes from one of two places, never both:
+//
+//	相乗り    a session graded 文句なし says the split was fine too. That is not
+//	          a guess: the human saw the whole session, including how it was cut
+//	          up, and called it good. ADR-0028 Decision 5 already treats this
+//	          grade as covering 「分割という采配 + 統合 + 会話全体」; recording it
+//	          separately only splits out a strand that was always in there.
+//	追加の問い a session that went less than well gets one more question, because
+//	          that is the case where "was it the split's fault?" has an answer
+//	          worth having. `do` has no Feedback to ride on (ADR-0023 Decision 5),
+//	          so it asks its own.
+//
+// A session that split is always recorded, even with no signal: without a row,
+// 「聞かなかった」 and 「答えなかった」 would look identical later.
+func recordSplitVerdict(s *store.Store, sid string, in *bufio.Reader, out io.Writer, judged bool, feedback map[string]any) {
+	provider, split := splitOf(s, sid)
+	if !split {
+		return
+	}
+	verdict, source := "", "feedback"
+	switch {
+	case judged && feedback["adopted"] == "as-is":
+		verdict = "good"
+	case judged && (feedback["adopted"] == "with-edits" || feedback["reverted"] == true):
+		verdict, source = askSplitBlame(in, out), "question"
+	case judged:
+		// Enter/EOF — the human declined to grade the session at all. Pressing
+		// them for a second opinion on the split would be asking twice for
+		// something they just said they could not say.
+	default:
+		// `do`'s split parent: no Feedback exists to ride on, so the only
+		// question asked here is about the 分け方 itself.
+		verdict, source = askSplitQuality(in, out, provider), "question"
+	}
+
+	payload := map[string]any{"sid": sid, "provider": provider, "verdict": verdict, "source": source}
+	if err := s.AppendEvent(sid, "user.split_verdict", time.Now().UnixMilli(), payload); err != nil {
+		fmt.Fprintln(os.Stderr, "split verdict: 記帳に失敗:", err)
+	}
+}
+
+// askSplitBlame is the follow-up on a session that did not go well. It asks
+// whether the split was the cause — not whether it was good — because that is
+// the question a disappointing session can actually answer. 「関係なかった」 is a
+// real positive signal about the 分け方, not an absence of one.
+func askSplitBlame(in *bufio.Reader, out io.Writer) string {
+	fmt.Fprint(out, "分け方は関係あった? [1=分け方が悪かった / 2=分け方のせいではない / Enter=わからない] ")
+	line, err := in.ReadString('\n')
+	if err != nil {
+		return ""
+	}
+	switch strings.TrimSpace(line) {
+	case "1":
+		return "bad"
+	case "2":
+		return "good"
+	default:
+		return ""
+	}
+}
+
+// askSplitQuality is `do`'s own question. ADR-0023 Decision 5 gave the split
+// parent no Feedback because 「親の実行の成果物は分割提案であり、判定対象の
+// 作業物がない」— the first half stays true, and the second is what ADR-0051
+// revisits: the proposal itself is the artifact being judged here.
+func askSplitQuality(in *bufio.Reader, out io.Writer, provider string) string {
+	who := provider
+	if who == "" {
+		who = "Provider"
+	}
+	fmt.Fprintf(out, "分けたのは %s。この分け方、よかった? [1=よかった / 2=微妙だった / Enter=まだ言えない] ", who)
+	line, err := in.ReadString('\n')
+	if err != nil {
+		return ""
+	}
+	switch strings.TrimSpace(line) {
+	case "1":
+		return "good"
+	case "2":
+		return "bad"
+	default:
+		return ""
+	}
+}
+
+// isolatedPath returns the workspace this session declared, or "" when there
+// is none to follow.
+//
+// The existence check here is NOT the verification ADR-0050 Decision 2 refuses.
+// The ledger keeps saying exactly what the Provider declared, unchanged and
+// unchecked; this is the observer picking a directory it can actually run a
+// command in. A declared path that isn't there would make the runner fail to
+// start, which records nothing at all (ADR-0052 Decision 4) — so falling back
+// to the wired place, loudly, keeps a first-layer signal instead of losing one
+// to a declaration nobody could follow.
+func isolatedPath(s *store.Store, sid string) string {
+	events, err := s.EventsBySession(sid)
+	if err != nil {
+		return ""
+	}
+	for _, e := range events {
+		if e.Type != "task.workspace" {
+			continue
+		}
+		if isolated, _ := e.Payload["isolated"].(bool); !isolated {
+			return ""
+		}
+		path, _ := e.Payload["path"].(string)
+		if path == "" {
+			return ""
+		}
+		if fi, err := os.Stat(path); err != nil || !fi.IsDir() {
+			fmt.Fprintf(os.Stderr, "test: 宣言された作業場が見つからないので元の場所で観測する (%s)\n", path)
+			return ""
+		}
+		return path
+	}
+	return ""
+}
+
+// observeFirstLayer runs the command the user wired for this place and records
+// what its exit code says (ADR-0052). It is the only writer of test.result —
+// ADR-0006 Decision 3 left the type without one, because a test running inside
+// someone else's process cannot be identified from outside. Running the command
+// ourselves removes the need to identify anything.
+//
+// Everything here is best-effort and silent by default: a place with no entry
+// runs nothing, and a runner that will not start or will not finish records
+// nothing (ADR-0052 Decision 4) — neither says a thing about the deliverable,
+// and a broken test setup must never be filed as the Provider's failure.
+// Diagnostics go to the human-facing stderr面, never to the ledger.
+func observeFirstLayer(s *store.Store, sid string, out io.Writer, workDir string) {
+	command, dir, ok := observe.Lookup(cfg.TestCommands, workDir)
+	if !ok {
+		return
+	}
+	// Follow the work if it moved (ADR-0050 + ADR-0052 Consequences). When the
+	// Provider isolated its workspace, the results are in the worktree and the
+	// original checkout is untouched — testing the latter would report a
+	// serene green about work nobody did there. Which command to run is still
+	// a property of the place the user wired; only where it runs moves.
+	if isolated := isolatedPath(s, sid); isolated != "" {
+		dir = isolated
+	}
+	res, ran, err := observe.Run(context.Background(), command, dir,
+		time.Duration(cfg.TestTimeoutSec)*time.Second)
+	if !ran {
+		fmt.Fprintf(os.Stderr, "test: 観測できなかったので記帳しない (%s): %v\n", command, err)
+		return
+	}
+	if err := s.AppendEvent(sid, "test.result", time.Now().UnixMilli(), res.Payload()); err != nil {
+		fmt.Fprintln(os.Stderr, "test: 記帳に失敗:", err)
+		return
+	}
+	// One line of fact, no recommendation: the grade stays the human's
+	// (ADR-0018 経験主権). "だめだったのでは?" would be the harness voting.
+	verdict := "通った"
+	if !res.Passed {
+		verdict = "落ちた"
+	}
+	fmt.Fprintf(out, "テスト: %s (%s / %.1fs)\n", verdict, command, float64(res.DurationMs)/1000)
+}
+
+// perceiveSlotGrace bounds how long a boundary waits for the machine's one
+// perception slot. Long enough to outlast an ordinary local model run, short
+// enough that a person at the boundary is not left staring.
+const perceiveSlotGrace = 90 * time.Second
+
+// acquirePerceiveSlot takes the machine-wide perception lock. A home directory
+// that cannot be resolved is not a reason to refuse to learn: it returns
+// (nil, nil) and perception runs unserialised, which is exactly today's
+// behaviour.
+func acquirePerceiveSlot() (*facelock.Lock, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, nil
+	}
+	return facelock.AcquireWithin(filepath.Join(home, ".tomobit", "perceive.lock"), perceiveSlotGrace)
 }
 
 // reflectBestEffort runs the mirror at the do boundary (ADR-0015):
@@ -1538,6 +1858,21 @@ func perceiveLive(en *core.Engine, batch, beforeCurrent []*core.Experience, curE
 // the one spoken line (ADR-0009) replaces it, since a do session's user
 // wants to hear what Tomo learned, not read an extraction trace.
 func perceiveBestEffort(s *store.Store, out io.Writer, extractor perceive.Extractor) []reflection.Candidate {
+	// 知覚は機械に1本ずつ (GUI ADR-0009 Decision 5)。窓が4つあれば境界も4つ
+	// 同時に来うるが、ローカルのモデルは1つしかない — 同時に4本走らせても
+	// 速くならず、機械によっては全部が遅くなる。順序を落としても台帳は嘘を
+	// つかない（ADR-0041 が out-of-order 知覚を扱っている）ので、待つ。
+	//
+	// 待ちきれなければ知覚を諦める: セッションは pending のまま残り、
+	// `tomobit perceive` が後で消化する。境界を人質に取らないための降り方で、
+	// モデルが落ちている時の既存の劣化と同じ結末になる。
+	if lock, err := acquirePerceiveSlot(); err != nil {
+		fmt.Fprintln(out, "perception pending — 他の会話が知覚中: run `tomobit perceive` later")
+		return nil
+	} else if lock != nil {
+		defer lock.Release()
+	}
+
 	p := &perceive.Perceiver{
 		Store:     s,
 		Extractor: extractor,

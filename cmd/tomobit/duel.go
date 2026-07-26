@@ -23,6 +23,7 @@ import (
 	"github.com/Rererr/tomobit/internal/perceive"
 	"github.com/Rererr/tomobit/internal/store"
 	"github.com/Rererr/tomobit/internal/voice"
+	"github.com/Rererr/tomobit/internal/workspace"
 )
 
 // duelEligible reports whether a `do` may offer an A/B experiment (ADR-0026
@@ -195,10 +196,38 @@ func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, cap
 		childSID[i], adapter[i] = sid, a
 	}
 
+	// Each child gets its own workspace (ADR-0050 Decision 3). A duel is the
+	// one place where a shared tree is most corrosive: the same prompt runs
+	// twice at once, so each side can see — and overwrite — the other's work,
+	// and an experiment whose two arms edit one checkout is not an experiment.
+	// Splitting them costs nothing here because the two arms never depend on
+	// each other, which is exactly why split subtasks are NOT given separate
+	// workspaces.
+	//
+	// The prompts stay isomorphic in the sense ADR-0026 cares about: the task
+	// text is identical, and only the harness's own wiring (a path per child)
+	// differs.
+	isolate := isolateProtocolEnabled()
+	childPrompt := [2]string{prompt, prompt}
+	isoParent := [2]string{}
+	if isolate {
+		for i := range pair {
+			p, child, err := isolationDir(childSID[i])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "workspace: 隔離先を用意できないので隔離せずに走る:", err)
+				isolate = false
+				break
+			}
+			isoParent[i] = p
+			childPrompt[i] = workspace.Instruction(prompt, child)
+		}
+	}
+
 	var mu sync.Mutex // guards the shared terminal, not the store
 	var wg sync.WaitGroup
 	result := [2]executor.Result{}
 	runErr := [2]error{}
+	texts := [2][]string{}
 	for i := range pair {
 		wg.Add(1)
 		go func(i int) {
@@ -207,12 +236,27 @@ func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, cap
 			if os.Getenv("TOMOBIT_DEBUG") != "" {
 				ex.Debug = os.Stderr
 			}
-			result[i], runErr[i] = ex.Run(ctx, executor.Request{
-				Prompt: prompt, PermissionMode: permMode, Timeout: timeout,
-			}, duelSink(s, childSID[i], out, &mu, pair[i]))
+			req := executor.Request{
+				Prompt: childPrompt[i], PermissionMode: permMode, Timeout: timeout,
+			}
+			var collect *[]string
+			if isolate {
+				req.AddDirs = append(req.AddDirs, isoParent[i])
+				collect = &texts[i]
+			}
+			result[i], runErr[i] = ex.Run(ctx, req,
+				duelSink(s, childSID[i], out, &mu, pair[i], collect))
 		}(i)
 	}
 	wg.Wait()
+
+	if isolate {
+		for i := range pair {
+			if result[i].Started {
+				recordWorkspace(s, childSID[i], texts[i])
+			}
+		}
+	}
 
 	// SIGINT hit both children; record the cancellation on each started child
 	// and the parent, and skip the (future) judgment — there is nothing to
@@ -354,13 +398,20 @@ func scopeToContext(scope core.Scope) map[string]string {
 // streams stay readable (ADR-0026 Decision 4). The store side is unsynchronized
 // on purpose — its single connection already serializes — so the mutex guards
 // only the io.Writer.
-func duelSink(s *store.Store, sid string, out io.Writer, mu *sync.Mutex, label string) executor.Sink {
+// collect, when non-nil, gathers this child's assistant text for the workspace
+// declaration (ADR-0050). It is owned by the one goroutine driving this child,
+// so the shared mutex above it guards only the terminal — appending here needs
+// no lock of its own.
+func duelSink(s *store.Store, sid string, out io.Writer, mu *sync.Mutex, label string, collect *[]string) executor.Sink {
 	return func(ev executor.Event, ts int64) error {
 		if ev.Type == executor.EventProviderOutput {
 			if text, ok := ev.Payload["text"].(string); ok && text != "" {
 				mu.Lock()
 				fmt.Fprintf(out, "[%s] %s\n", label, text)
 				mu.Unlock()
+				if collect != nil {
+					*collect = append(*collect, text)
+				}
 			}
 		}
 		return recordEvent(s, sid, ev, ts)
