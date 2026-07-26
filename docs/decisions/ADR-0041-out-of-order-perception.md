@@ -2,9 +2,9 @@
 
 - Status: **Accepted**（2026-07-24 起草・goal 指示の自律セッションが先行適用、同日所有者が配備裁定で追認）
 - Date: 2026-07-24
-- 関連: [ADR-0005](ADR-0005-perception-implementation.md)（知覚の実装）,
+- 関連: [ADR-0005](ADR-0005-perception-model-and-schema-boundary.md)（知覚の実装）,
   [ADR-0029](ADR-0029-perception-backend-choice.md)（バックエンド停止時は pending に積まれる — 本件の露出条件）,
-  [ADR-0033](ADR-0033-forgetting-organ.md)（forget が自動 rebuild する前例）
+  [ADR-0033](ADR-0033-organ-of-forgetting.md)（forget が自動 rebuild する前例）
 
 ---
 

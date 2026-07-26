@@ -3,7 +3,7 @@
 - Status: **Accepted**
 - Date: 2026-07-25
 - 関連: [ADR-0020](ADR-0020-face-window.md)（顔窓=第二のレンダラ / 資産は窓が持つ）,
-  [ADR-0025](ADR-0025-terminal-avatar-retirement.md)（成長と気分は顔窓が担う）,
+  [ADR-0025](ADR-0025-face-autolaunch.md)（成長と気分は顔窓が担う）,
   [ADR-0032](ADR-0032-pipe-chat-first-class.md)（Decision 1: `--view` の語彙）,
   [ADR-0039](ADR-0039-status-machine-view.md)（相棒ビューの機械可読view — 同じ型の先例）,
   [ADR-0001(GUI)](https://github.com/Rererr/tomobit-gui/blob/main/docs/decisions/ADR-0001-gui-architecture.md)（Decision 5: 姿は顔窓のまま）

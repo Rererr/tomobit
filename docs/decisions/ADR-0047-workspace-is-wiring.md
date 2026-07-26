@@ -4,8 +4,8 @@
   claude 固有の `TOMOBIT_CLAUDE_ARGS_APPEND` 経由で注入していたのを、所有者の指摘
   「ClaudeCodeだけに依存している点・次回チャットからじゃないと動かない点」を受けて本体へ引き上げた）
 - Date: 2026-07-25
-- 関連: [ADR-0006](ADR-0006-executor-adapter.md)（Adapterは1つのCLIを知るだけ・共通の器はExecutor）,
-  [ADR-0021](ADR-0021-wiring-is-not-experience.md)（配線は経験ではない）,
+- 関連: [ADR-0006](ADR-0006-executor-integration.md)（Adapterは1つのCLIを知るだけ・共通の器はExecutor）,
+  [ADR-0021](ADR-0021-onboarding.md)（配線は経験ではない）,
   [ADR-0022](ADR-0022-chat-session.md)（1セッション=1タスク・区切りは人間が宣言する）,
   [ADR-0043](ADR-0043-auto-by-default.md)（Provider選択も同じ「タスク境界で替える配線」）,
   tomobit-gui [ADR-0004](https://github.com/Rererr/tomobit-gui/blob/main/docs/decisions/ADR-0004-workspace-scope.md)（GUIの作業バー）

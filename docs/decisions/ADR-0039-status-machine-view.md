@@ -3,8 +3,8 @@
 - Status: **Accepted**（2026-07-24 起草・goal 指示の自律セッションが先行適用、同日所有者が配備裁定で追認）
 - Date: 2026-07-24
 - 関連: [ADR-0001(GUI)](https://github.com/Rererr/tomobit-gui/blob/main/docs/decisions/ADR-0001-gui-architecture.md)（Decision 5: テキストViewの移植を暫定許容）,
-  [ADR-0017](ADR-0017-stage-function-revision.md)（ステージ関数の改版 — 較正ノブは動く）,
-  [ADR-0025](ADR-0025-terminal-avatar-retirement.md)（成長と気分は顔窓が担う）,
+  [ADR-0017](ADR-0017-stage-function-calibration.md)（ステージ関数の改版 — 較正ノブは動く）,
+  [ADR-0025](ADR-0025-face-autolaunch.md)（成長と気分は顔窓が担う）,
   [ADR-0032](ADR-0032-pipe-chat-first-class.md)（Decision 1: `--view ndjson` の語彙）
 
 ---
