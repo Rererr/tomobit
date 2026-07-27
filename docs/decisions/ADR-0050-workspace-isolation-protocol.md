@@ -414,6 +414,20 @@ codex はそこで**別の隔離手段（ローカル clone）へ自分で切り
 未確認（更新）: `isolated:false` を返す現場（VCS 無しのプロジェクト）、
 `--provider auto` 経由、duel の実機。
 
+**2026-07-27 追記: 上の2つが同じ1回で潰れた。** GUI から `--provider auto` で
+流したところ codex が選ばれ、共有 `.git` へのメタデータ作成を環境に拒否されて、
+Decision 2 の正直な出口をそのまま使った:
+
+```json
+{"isolated":false,"reason":"Gitの共通.git配下へのworktreeメタデータ作成が環境制限で拒否されたため"}
+```
+
+VCS が無い現場ではなく**VCS はあるが書けない現場**だったが、Decision 2 が
+「隔離できない現場」として想定した形そのものである（同 Decision が列挙した
+submodule / LFS / 権限、のうち3つ目）。理由の文が具体的で、人が読んで何が
+起きたか分かる — 閉語彙にしなかった `reason` の効き目でもある。
+残る未確認: duel の実機。
+
 ---
 
 ## 実装フェーズ（Proposed）
