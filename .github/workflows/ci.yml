@@ -16,10 +16,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # cross-repoリンク（GUIのADRや実装ファイルを指すURL）の参照先を見るため、
+      # 隣のリポジトリも並べる。checkout は workspace の外へ置けないので、
+      # $ADR_LINK_SIBLINGS で探す場所をここへ向ける。
+      - uses: actions/checkout@v4
+        with:
+          repository: Rererr/tomobit-gui
+          path: _siblings/tomobit-gui
+
       # ADRの `関連:` ブロックは参照先の表題の記憶から書かれがちで、
       # ファイル名とずれても人間の目には読めてしまう。機械で見る。
       - name: ADRリンクの参照先
         run: make docs-check
+        env:
+          ADR_LINK_SIBLINGS: _siblings
 
   test:
     strategy:
