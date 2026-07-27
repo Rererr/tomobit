@@ -203,6 +203,7 @@ func TestObserveFirstLayerIgnoresADeclinedIsolation(t *testing.T) {
 // OutcomeWeight lets a passing suite score y=0.9. This is the first objective
 // signal a `do` split parent has ever been able to receive.
 func TestSplitParentReachesTheFirstLayerThroughFinishTask(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // 境界の知覚は機械共通の perceive.lock を取る — 実HOMEを掴ませない
 	s := openTestStore(t)
 	dir := wireFirstLayer(t, "exit 0")
 	const sid = "split-parent"

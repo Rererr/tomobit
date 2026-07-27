@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Rererr/tomobit/internal/config"
 	"github.com/Rererr/tomobit/internal/quota"
 )
 
@@ -44,6 +45,20 @@ func (doer429ForTest) Do(*http.Request) (*http.Response, error) {
 // quota-specific tests install their own fixtures locally.
 func TestMain(m *testing.M) {
 	collectQuotaFn = func(context.Context) []quotaStatus { return nil }
+	// この機械の実 config を、テストに持ち込ませない。
+	//
+	// cfg は main.go の**パッケージ変数の初期化子**（`var cfg, cfgErr =
+	// config.Load()`）なので、テストバイナリでも走って ~/.tomobit/config.json を
+	// 読む。ここを空にしないと、開発者が自分の機械に何を配線したかでテストの
+	// 挙動が変わる。
+	//
+	// 実害を1つ踏んだ (2026-07-27): ADR-0052 の test_commands を tomobit 自身の
+	// リポジトリへ向けると、**第1層が再帰する** — 境界がテストを走らせ、その
+	// テストが finishTask に届いて第1層を起動し、それがまたテストを走らせる。
+	// `go test ./cmd/tomobit/` が10分のタイムアウトで落ちた。
+	//
+	// 配線を読むテストは自分で cfg を建てて後片付けする（wireFirstLayer など）。
+	cfg = config.Config{}
 	os.Exit(m.Run())
 }
 

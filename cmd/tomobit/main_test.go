@@ -310,6 +310,7 @@ func appendFinishedSessionAt(t *testing.T, s *store.Store, sid string, baseTS in
 }
 
 func TestPerceiveBestEffortAppliesExperiencesLive(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // 境界の知覚は機械共通の perceive.lock を取る — 実HOMEを掴ませない
 	s := openTestStore(t)
 	appendFinishedSession(t, s, "sess")
 
@@ -343,6 +344,7 @@ func TestPerceiveBestEffortAppliesExperiencesLive(t *testing.T) {
 // finish successfully even if Ollama is unreachable, with the session left
 // for a later `tomobit perceive`.
 func TestPerceiveBestEffortLeavesSessionPendingOnExtractorFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // 境界の知覚は機械共通の perceive.lock を取る — 実HOMEを掴ませない
 	s := openTestStore(t)
 	appendFinishedSession(t, s, "sess")
 
@@ -363,6 +365,7 @@ func TestPerceiveBestEffortLeavesSessionPendingOnExtractorFailure(t *testing.T) 
 // already went live must log the one honest rebuild line, not diverge
 // silently.
 func TestPerceiveBestEffortLogsOnOutOfOrderBatch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // 境界の知覚は機械共通の perceive.lock を取る — 実HOMEを掴ませない
 	s := openTestStore(t)
 	appendFinishedSessionAt(t, s, "recent", 5_000_000)
 	perceiveBestEffort(s, io.Discard, &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}})

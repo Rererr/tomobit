@@ -178,6 +178,7 @@ func TestSplitVerdictIgnoresASessionThatNeverSplit(t *testing.T) {
 // (ADR-0003 Decision 2's reasoning), and mixing them into one envelope would
 // make them inseparable at rebuild.
 func TestSplitVerdictStaysOutOfTaskFinished(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // 境界の知覚は機械共通の perceive.lock を取る — 実HOMEを掴ませない
 	s := openTestStore(t)
 	const sid = "sv-envelope"
 	openSplitSession(t, s, sid, "claude-code")

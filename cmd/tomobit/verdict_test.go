@@ -367,6 +367,7 @@ func TestVerdictIsLastWinsAndClearFallsThroughToTheLayersBelow(t *testing.T) {
 // 位置が要である — recordSplitVerdict の隣、perceiveBestEffort の前でなければ、
 // 判定は最初の知覚に乗らない。
 func TestBoundaryVerdictLandsBeforePerception(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // 境界の知覚は機械共通の perceive.lock を取る — 実HOMEを掴ませない
 	s := openTestStore(t)
 	dir := wireFirstLayer(t, "exit 1") // 赤いスイート
 	const sid = "boundary-veto"

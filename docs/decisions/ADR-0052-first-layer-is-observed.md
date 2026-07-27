@@ -357,3 +357,67 @@ ADR-0055 はそこに1問だけ置く: **赤テスト × 1=文句なし**のと�
 **Decision 3「分割の子には走らせない」の帰結も1つ増えた。** 子は第1層を持たず、
 [ADR-0054](ADR-0054-a-child-is-the-breakdown.md) で経験も持たなくなったので、
 ★も第2層も子には無縁である。ADR-0055 の verdict コマンドは分割の子を断る。
+
+---
+
+## 実測（2026-07-27 配線時）: 自分のリポジトリへ向けると第1層が再帰する
+
+所有者の機械で初めて `test_commands` を配線したとき、tomobit 自身のリポジトリを
+`go test ./...` へ向けた。**境界が5分（`observe.DefaultTimeout`）で必ず打ち切られ、
+`test.result` が1件も記帳されない**状態になった。
+
+原因は `cmd/tomobit/main.go` の1行にある:
+
+```go
+var cfg, cfgErr = config.Load()
+```
+
+**パッケージ変数の初期化子なので、テストバイナリでも走る。** `go test ./cmd/tomobit/`
+はこの機械の実 `~/.tomobit/config.json` を読み、そこに書いたばかりの
+`test_commands` を持つ。そして `cmd/tomobit` のテストには `finishTask` を呼ぶものが
+あるので:
+
+```text
+境界 → observeFirstLayer → go test ./...
+        → テストバイナリが実 config を読む
+        → finishTask を呼ぶテスト → observeFirstLayer → go test ./...
+```
+
+**第1層が第1層を呼ぶ。** 単体で `go test ./cmd/tomobit/` を回すと Go 自身の
+10分タイムアウトで落ち、`os/exec.(*Cmd).Start` を含むゴルーチンダンプが出た。
+
+### tomobit 自身は正しく壊れた
+
+記録に値するのはこちらである。再帰している間、境界はこう振る舞った:
+
+```text
+test: 観測できなかったので記帳しない (go test ./...): context deadline exceeded
+```
+
+**Decision 4 が設計どおりに働いた。** タイムアウトは成果物についての判定では
+ないので `passed:false` を書かず、台帳には1バイトも残さず、stderr で理由を言い、
+境界は Feedback と知覚へ進んだ。壊れたテスト環境が Provider の失敗として記録
+される、という同 Decision が防ごうとした嘘は起きていない。
+
+### 直し方: テストバイナリに機械の config を持ち込ませない
+
+`TestMain` で `cfg = config.Config{}` を置いた。配線を読むテストは自分で `cfg` を
+建てて後片付けする（`wireFirstLayer` が既にそうしている）。再帰は構造的に起きなく
+なり、`go test -count=1 ./...` は 30秒で全緑に戻った。
+
+**これは第1層固有の問題ではない。** 開発者が自分の機械に何を配線したかで
+テストの挙動が変わる、という形そのものが誤りで、たまたま第1層が最初に踏んだ。
+
+あわせて、`finishTask` / `perceiveBestEffort` を呼ぶテスト6本へ使い捨ての `HOME` を
+与えた。あれらは機械共通の `~/.tomobit/perceive.lock`（猶予90秒）を掴みにいく —
+テストが開発者の実環境を掴むのは、再帰とは別の衛生の問題である。
+
+### 配線後の実測
+
+```text
+go test ./...        19.5秒   test.result {passed:true} 記帳
+境界の総所要          22秒
+```
+
+`test_timeout_sec` を 180 に置いた。**既定の5分は境界が待つには長すぎる** —
+観測できないなら早く諦めて、人を待たせない方がよい。
