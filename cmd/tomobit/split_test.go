@@ -100,23 +100,29 @@ func TestRunSplitAcceptedRunsWholeGroupThenStopsAtGroupBoundary(t *testing.T) {
 	}
 }
 
-// (b) A declined gate falls back to the flat sequential order with the ADR-0023
-// fail-stop: the first (failing) subtask stops the run before the second opens,
-// so a wide group is not run to completion here — the observable opposite of (a)
-// (ADR-0028 Decision 3: n でも作業は失われない, but it is sequential).
-func TestRunSplitDeclinedRunsSequentialFailStop(t *testing.T) {
+// (b) The kill switch is the only way back to sequential (ADR-0056 Decision 3).
+// With parallel_subtasks=false a declared wide group takes the flat order and
+// the ADR-0023 fail-stop, so the first (failing) subtask stops the run before
+// the second opens — the observable opposite of (a).
+//
+// 独立宣言は記帳され続ける: 止めていても、判断を開き直すための証拠は貯まる。
+func TestRunSplitKillSwitchRunsSequentialFailStop(t *testing.T) {
 	s := openTestStore(t)
 	registerFakeProvider(t, "marker", &markerFailAdapter{name: "marker", failMarker: "FAILSUB"})
-	const parentSID = "parent-decline"
+	saved := cfg
+	t.Cleanup(func() { cfg = saved })
+	no := false
+	cfg.ParallelSubtasks = &no
+
+	const parentSID = "parent-killswitch"
 	openParentTask(t, s, parentSID)
 
 	groups := [][]string{{"FAILSUB alpha", "beta"}, {"gamma"}}
-	in := bufio.NewReader(strings.NewReader("n\n"))
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
-		namedWiring("marker"), in, &out, true, extractor); err != nil {
+		namedWiring("marker"), bufio.NewReader(strings.NewReader("")), &out, true, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -127,40 +133,41 @@ func TestRunSplitDeclinedRunsSequentialFailStop(t *testing.T) {
 	if n := countEventsOfTypeInSession(t, s, subs[0], "provider.error"); n != 1 {
 		t.Errorf("the failed subtask should record provider.error, got %d", n)
 	}
-	split := payloadOf(t, s, "task.split")
-	if split["parallel_offered"] != true || split["parallel_accepted"] != false {
-		t.Errorf("a declined wide-group gate: offered=true, accepted=false — got %v", split)
+	if strings.Contains(out.String(), "並走") {
+		t.Errorf("止めているのに並走を告知した: %q", out.String())
 	}
 }
 
-// (c) A non-interactive run never sees the gate, so it stays sequential even
-// though a "y" is waiting on the reader — the pipe/CI determinism ADR-0028
-// Consequences requires. Same observable as (b): one session, fail-stop.
-func TestRunSplitNonInteractiveNeverParallels(t *testing.T) {
+// (c) A run with nobody at the terminal parallelises exactly like one with a
+// person there (ADR-0056 Decision 1). This is the whole point of the
+// retraction: the GUI and every pipe were the entries that could never reach
+// the old gate, and they are where tomobit actually runs.
+func TestRunSplitParallelsWithNobodyAtTheTerminal(t *testing.T) {
 	s := openTestStore(t)
 	registerFakeProvider(t, "marker", &markerFailAdapter{name: "marker", failMarker: "FAILSUB"})
 	const parentSID = "parent-noninteractive"
 	openParentTask(t, s, parentSID)
 
 	groups := [][]string{{"FAILSUB alpha", "beta"}, {"gamma"}}
-	in := bufio.NewReader(strings.NewReader("y\n")) // must be ignored: no terminal
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
+	// interactive=false, and nothing on the reader — nobody to ask.
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
-		namedWiring("marker"), in, &out, false, extractor); err != nil {
+		namedWiring("marker"), bufio.NewReader(strings.NewReader("")), &out, false, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
-	if n := len(subtaskSessionIDs(t, s, parentSID)); n != 1 {
-		t.Fatalf("non-interactive must stay sequential (fail-stop after the first), got %d sessions", n)
+	// 群は走り切る (ADR-0028 Decision 4): 隣が失敗しても群の中は最後まで走り、
+	// 止まるのは次の群である。逐次なら1件しか開かない。
+	if n := len(subtaskSessionIDs(t, s, parentSID)); n != 2 {
+		t.Fatalf("宣言された2本が並走して走り切るはず, got %d sessions", n)
 	}
-	if strings.Contains(out.String(), "並走") {
-		t.Errorf("no gate line may be shown non-interactively, got %q", out.String())
+	if !strings.Contains(out.String(), "並走") {
+		t.Errorf("並走することは言う: %q", out.String())
 	}
-	split := payloadOf(t, s, "task.split")
-	if split["parallel_offered"] != false || split["parallel_accepted"] != false {
-		t.Errorf("non-interactive: the gate is neither offered nor accepted — got %v", split)
+	if strings.Contains(out.String(), "[y/N]") {
+		t.Errorf("許可は訊かない (ADR-0056): %q", out.String())
 	}
 }
 
@@ -219,10 +226,12 @@ func TestParallelCostEstimate(t *testing.T) {
 	}
 }
 
-// (f) The gate's presentation and answer are recorded on task.split for the
-// Decision 1 metric: parallel_offered / parallel_accepted / est_cost_usd
-// (ADR-0028 Decision 3, SCHEMA.md R4).
-func TestRunSplitRecordsGatePayload(t *testing.T) {
+// (f) task.split records what the Provider declared and what the run said it
+// would cost — and nothing about an offer or an answer, because there is
+// neither (ADR-0056 Decision 4, SCHEMA.md R4).
+//
+// 人へ言った数字を記帳する規律は、文言が問いから事実に変わっても同じである。
+func TestRunSplitRecordsDeclarationAndEstimateButNoGate(t *testing.T) {
 	s := openTestStore(t)
 	registerFakeProvider(t, "fake-split", &fakeSplitAdapter{name: "fake-split", line: "done"})
 	const parentSID = "parent-payload"
@@ -230,22 +239,48 @@ func TestRunSplitRecordsGatePayload(t *testing.T) {
 	seedProviderCosts(t, s, 0.10, 0.30, 0.20) // median 0.20
 
 	groups := [][]string{{"x", "y"}} // width 2 → est 0.40
-	in := bufio.NewReader(strings.NewReader("y\n"))
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
-		namedWiring("fake-split"), in, &out, true, extractor); err != nil {
+		namedWiring("fake-split"), bufio.NewReader(strings.NewReader("")), &out, true, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
 	split := payloadOf(t, s, "task.split")
-	if split["parallel_offered"] != true || split["parallel_accepted"] != true {
-		t.Errorf("an accepted gate records offered=accepted=true, got %v", split)
+	for _, gone := range []string{"parallel_offered", "parallel_accepted"} {
+		if _, ok := split[gone]; ok {
+			t.Errorf("%s は記帳しない — 提示も回答も無い (ADR-0056 D4): %v", gone, split)
+		}
 	}
 	est, ok := split["est_cost_usd"].(float64)
 	if !ok || est != 0.40 {
 		t.Errorf("est_cost_usd = %v, want median(0.20) × width(2) = 0.40", split["est_cost_usd"])
+	}
+	// 告知した数字と記帳した数字は同じでなければならない。
+	if !strings.Contains(out.String(), "$0.40") {
+		t.Errorf("記帳した概算を人にも言うこと: %q", out.String())
+	}
+}
+
+// 概算が取れないときは、金額を作らずに幅だけ言う (ADR-0028 Decision 3 の
+// 「作り話の金額を出さない」は、問いが事実の告知に変わっても不変)。
+func TestParallelNoticeSaysNoFigureWhenThereIsNoSample(t *testing.T) {
+	withFigure := parallelNotice(2, 1, 3, 0.40, true)
+	if !strings.Contains(withFigure, "$0.40") || !strings.Contains(withFigure, "2本を並走") {
+		t.Errorf("概算があるときは幅と金額を言う: %q", withFigure)
+	}
+	without := parallelNotice(2, 1, 3, 0, false)
+	if strings.Contains(without, "$") {
+		t.Errorf("標本が無いのに金額を出した: %q", without)
+	}
+	if !strings.Contains(without, "2本を並走") {
+		t.Errorf("金額が無くても、並走することは言う: %q", without)
+	}
+	for _, s := range []string{withFigure, without} {
+		if strings.Contains(s, "?") || strings.Contains(s, "[y/N]") {
+			t.Errorf("これは告知であって問いではない: %q", s)
+		}
 	}
 }
 
@@ -450,8 +485,8 @@ func TestRunGroupParallelChildrenDecideNothing(t *testing.T) {
 	}
 
 	split := payloadOf(t, s, "task.split")
-	if split["parallel_accepted"] != true {
-		t.Fatalf("this test only says something if the parallel gate was accepted, got %v", split)
+	if split["groups"] == nil {
+		t.Fatalf("this test only says something if the group actually ran in parallel, got %v", split)
 	}
 	subs := subtaskSessionIDs(t, s, parentSID)
 	if len(subs) != 2 {

@@ -272,35 +272,45 @@ func TestChatSplitFeedListsFailedAndUnstartedSubtasks(t *testing.T) {
 	}
 }
 
-// (W2) An interactive chat can accept the parallelism gate and fold a wide
-// group back in flat order (ADR-0028 Decision 3/5). Group 0 runs its two members
-// in parallel to completion (走り切り); one fails, which fail-stops group 1 (lone
-// C) before it starts — the feed lists all three honestly: the succeeded member,
-// the failed one, and the 未着手 lone.
-func TestChatSplitInteractiveParallelAcceptFoldsBackInFlatOrder(t *testing.T) {
+// (W2) A wide group runs in parallel and folds back in flat order (ADR-0028
+// Decision 5, ADR-0056 Decision 1). Group 0 runs its two members in parallel to
+// completion (走り切り); one fails, which fail-stops group 1 (lone C) before it
+// starts — the feed lists all three honestly: the succeeded member, the failed
+// one, and the 未着手 lone.
+//
+// Nothing is typed at the prompt: the gate that used to read a y/N here was
+// retracted, so a declared group runs on the Provider's word alone.
+func TestChatSplitParallelRunsWithoutAskingAndFoldsBackInFlatOrder(t *testing.T) {
 	s := openTestStore(t)
 	a := &splitChatAdapter{
 		proposal: `{"tomobit_split": [["para A", "FAILSUB para B"], "lone C"]}`,
 		failSub:  "FAILSUB",
 		feedOut:  "統合レポート",
 	}
-	c, out := newSplitChat(t, s, a, "y\n") // the gate answer
-	c.interactive = true                   // drive the accept path without a real terminal
+	c, out := newSplitChat(t, s, a, "") // 誰も何も答えない — それでも並走する
 
 	if err := c.turn("big parallel build"); err != nil {
 		t.Fatal(err)
 	}
 
 	if !strings.Contains(out.String(), "並走") {
-		t.Errorf("an interactive wide proposal must show the gate: %q", out.String())
+		t.Errorf("並走することは言う（訊きはしない）: %q", out.String())
+	}
+	if strings.Contains(out.String(), "[y/N]") {
+		t.Errorf("並走の許可はもう訊かない (ADR-0056): %q", out.String())
 	}
 	// Both parallel members opened and ran to completion; lone C never started.
 	if n := len(subtaskSessionIDs(t, s, c.sid)); n != 2 {
 		t.Fatalf("both wide members open (走り切り), lone C stays 未着手 — want 2, got %d", n)
 	}
 	split := payloadOf(t, s, "task.split")
-	if split["parallel_offered"] != true || split["parallel_accepted"] != true {
-		t.Errorf("an accepted gate records offered=accepted=true, got %v", split)
+	for _, gone := range []string{"parallel_offered", "parallel_accepted"} {
+		if _, ok := split[gone]; ok {
+			t.Errorf("提示も回答も無いので %s は記帳しない (ADR-0056 D4): %v", gone, split)
+		}
+	}
+	if split["groups"] == nil {
+		t.Errorf("並走したことは groups から読めなければならない: %v", split)
 	}
 	feed := feedLaunch(t, a)
 	if feed.resume != "th-parent" {
@@ -477,13 +487,22 @@ func TestChatSplitViewEmitsTypedSubtaskEvents(t *testing.T) {
 	}
 }
 
-// (i) A Provider that declares an independent group under --view ndjson still
-// produces the same typed shape as a flat proposal: the parallel gate never
-// fires off a terminal (ADR-0028 Decision 3), so the declaration collapses to
-// the same sequential path, and the terminal's [n:provider] labeling
-// (ADR-0028 Decision 4, splitSink) — layout, not the view's vocabulary — must
-// never reach the stream.
-func TestChatSplitViewWideGroupStaysSequentialAndTyped(t *testing.T) {
+// (i) A declared group runs in parallel under --view ndjson too (ADR-0056
+// Decision 1) — the entry that never saw the old gate is exactly the one that
+// now parallelises.
+//
+// **This test pins a known degradation on purpose.** A parallel child has no
+// view of its own: ndjsonView's types carry nothing that says which child spoke,
+// so K concurrent emitters would interleave frames. Its output therefore reaches
+// the stream through splitSink's `[n:provider]` terminal labeling, framed as
+// note lines — readable, attributable, but not typed. ADR-0056 records this as
+// the remaining homework, and pinning it here keeps the debt visible instead of
+// letting a future reader mistake it for the intended shape.
+//
+// The inverse of this test used to exist: "a wide group must not degrade
+// subtask output to a note". It held only because the gate could never fire off
+// a terminal.
+func TestChatSplitViewParallelChildrenArriveAsLabelledNotes(t *testing.T) {
 	s := openTestStore(t)
 	a := &splitChatAdapter{
 		proposal: `{"tomobit_split": [["alpha task", "beta task"]]}`,
@@ -496,23 +515,33 @@ func TestChatSplitViewWideGroupStaysSequentialAndTyped(t *testing.T) {
 	}
 
 	evs := viewEvents(t, buf) // fails on any non-JSON line
-	texts := 0
+	labelled := 0
+	for _, e := range evs {
+		if e["type"] != "note" {
+			continue
+		}
+		if txt, ok := e["text"].(string); ok && strings.Contains(txt, "subtask ran") {
+			if !strings.Contains(txt, ":fake]") {
+				t.Errorf("並走の子の行は、どの子かが読めなければならない: %v", e)
+			}
+			labelled++
+		}
+	}
+	if labelled != 2 {
+		t.Errorf("両方の子の出力が届くこと（ラベル付きの note で）, got %d: %v", labelled, viewTypes(evs))
+	}
+	// 逐次の子だけが型付きのフレームを持つ。並走の子がそれを持たないことは
+	// 上の doc comment のとおり既知で、持ってしまったら設計が変わった合図。
 	for _, e := range evs {
 		if e["type"] == "text" && e["text"] == "subtask ran" {
-			texts++
+			t.Errorf("並走の子が型付きで届いた — 相関キーを足したなら、この期待も更新すること: %v", e)
 		}
-		if txt, ok := e["text"].(string); ok && strings.Contains(txt, "[1:fake]") {
-			t.Errorf("the terminal's [n:provider] label must never reach the view: %v", e)
-		}
-	}
-	if texts != 2 {
-		t.Errorf("both members of the declared group must run sequentially with typed text, got %d", texts)
-	}
-	if anyNoteContains(evs, "subtask ran") {
-		t.Errorf("a wide group must not degrade subtask output to a note: %v", viewTypes(evs))
 	}
 	split := payloadOf(t, s, "task.split")
-	if split["parallel_offered"] != false {
-		t.Errorf("a non-interactive view session never offers the gate, got %v", split)
+	if split["groups"] == nil {
+		t.Errorf("独立宣言は記帳される: %v", split)
+	}
+	if _, ok := split["parallel_offered"]; ok {
+		t.Errorf("提示は無くなった (ADR-0056 D4): %v", split)
 	}
 }

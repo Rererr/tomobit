@@ -173,9 +173,9 @@ func TestResolveBackend(t *testing.T) {
 // UNLESS the new field postdates perceive_backend, in which case it must be
 // left out and counted below instead (see postDatesBackendChoice).
 func TestHasAnyOtherFieldSetEnumeratesEveryConfigField(t *testing.T) {
-	// 3 checked by ResolveBackend + 9 in hasAnyOtherFieldSet + 3 deliberately
+	// 3 checked by ResolveBackend + 9 in hasAnyOtherFieldSet + 4 deliberately
 	// excluded (postDatesBackendChoice).
-	const known = 15
+	const known = 16
 	if n := reflect.TypeOf(Config{}).NumField(); n != known {
 		t.Errorf("Config grew to %d fields (knew %d): update hasAnyOtherFieldSet and this count together", n, known)
 	}
@@ -253,3 +253,17 @@ func TestSaveFileCreatesParentDir(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// ParallelSubtasks (ADR-0056) is the fourth such field. Same reasoning as
+// above: a config that only turned parallelism off is a *current* config with
+// one opinion, not a config from before the backend choice existed.
+func TestParallelSubtasksStaysOutOfTheFossilMarker(t *testing.T) {
+	no := false
+	c := Config{ParallelSubtasks: &no}
+	if c.hasAnyOtherFieldSet() {
+		t.Errorf("parallel_subtasks must not mark a config as legacy")
+	}
+	if got, err := c.ResolveBackend("darwin"); err != nil || got != "mlx-lm" {
+		t.Errorf("a fresh Mac that only turned parallelism off stays on mlx-lm: got %q err=%v", got, err)
+	}
+}

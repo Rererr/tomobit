@@ -84,33 +84,26 @@ func median(xs []float64) float64 {
 	return (sorted[n/2-1] + sorted[n/2]) / 2
 }
 
-// parallelGate asks, once, whether to run the declared wide groups in parallel
-// (ADR-0028 Decision 3). It fires only when the Provider actually declared a
-// wide group and a human is watching: a pipe or CI (non-interactive) never sees
-// it, so those stay sequential and deterministic. The default is N (Enter/EOF);
-// only an explicit y/yes accepts. This is a machine line (ADR-0009), not Tomo's
-// voice — a work confirmation, not a question — so it records nothing and spends
-// no curiosity budget. subs (the flat order) and est/haveEst are the ones the
-// caller already computed, so the gate's presentation and the task.split record
-// cannot drift apart.
-func parallelGate(groups [][]string, subs []string, in *bufio.Reader, out io.Writer, interactive bool, est float64, haveEst bool) (offered, accepted bool) {
-	if !interactive || !declaresGroups(groups) {
-		return false, false
-	}
-	width := parallelWidth(groups)
-	cost := "（概算なし — 費用の実測がまだない）"
+// parallelNotice is the line a wide group prints before it starts (ADR-0056
+// Decision 2). It says what is about to happen and what it is expected to cost
+// — **it does not ask**.
+//
+// The question it replaced (ADR-0028 Decision 3's y/N gate) was retracted for
+// two reasons: it asked a person who had not read the subtask texts and had no
+// basis for judging independence, and it second-guessed exactly one judgment of
+// a Provider the human had already trusted with the whole task. What survives
+// is the number: a run that is about to spend K× at once should say so, the way
+// GUI ADR-0009 decided to state a shared working place as a fact rather than a
+// verdict.
+//
+// An empty cost sample yields no dollar figure at all rather than a made-up one
+// (ADR-0028 Decision 3's 作り話の金額を出さない, unchanged).
+func parallelNotice(members, gi, total int, est float64, haveEst bool) string {
 	if haveEst {
-		cost = fmt.Sprintf("（概算 $%.2f = 直近実測の中央値 × %d本）", est, width)
+		return fmt.Sprintf("-- group %d/%d: %d本を並走（概算 $%.2f = 直近実測の中央値 × 並走幅）--\n",
+			gi, total, members, est)
 	}
-	fmt.Fprintf(out, "split: %d個を%d群で実行。独立宣言された%d本を並走できる — 並走する?\n%s [y/N] ",
-		len(subs), len(groups), width, cost)
-	line, _ := in.ReadString('\n')
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "y", "yes":
-		return true, true
-	default:
-		return true, false
-	}
+	return fmt.Sprintf("-- group %d/%d: %d本を並走 --\n", gi, total, members)
 }
 
 // recordSubtaskOutcome writes a finished subtask's objective signals (ADR-0028
@@ -190,31 +183,28 @@ func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups 
 	subs, idxGroups := flattenGroups(groups)
 	now := time.Now().UnixMilli()
 
-	// The cost estimate is computed once, so the number shown at the gate is the
-	// same one recorded on task.split (Decision 1's metric reads it). It is
-	// gated on interactive too: the gate only ever fires when a human is
-	// watching, so a pipe/CI run skips the RecentProviderCosts read it could
-	// never use — keeping the deterministic non-TTY path free of a wasted query.
-	wide := declaresGroups(groups)
+	// 独立宣言された群は訊かずに並走する (ADR-0056 Decision 1)。走るかどうかが
+	// 人の答えに依らなくなったので、費用の概算は「見せるために」ではなく
+	// 「言うために」計算する — 並走が起きるときは常に一度だけ。
+	wide := declaresGroups(groups) && parallelSubtasksEnabled()
 	est, haveEst := 0.0, false
-	if wide && interactive {
+	if wide {
 		est, haveEst = parallelCostEstimate(s, groups)
 	}
-	offered, accepted := parallelGate(groups, subs, in, out, interactive, est, haveEst)
 
 	payload := map[string]any{"subtasks": subs}
 	// A flat proposal records subtasks alone — SCHEMA.md R4 omits "groups 以降"
-	// (groups and the gate fields) when no independence was declared, since a
-	// flat proposal's index groups would be [[0],[1],…] and its gate never fires.
-	// A wide proposal records the index groups (the audit signal that
-	// parallelism was declared — Decision 1's metric reads it), the gate's
-	// offer/answer (whether it was even offered, so non-TTY reads as offered=
-	// false), and est_cost_usd when a real cost was measured (omitted otherwise —
-	// Decision 3 refuses to fabricate one).
+	// when no independence was declared, since a flat proposal's index groups
+	// would be [[0],[1],…] and it never runs anything in parallel. A wide
+	// proposal records the index groups (the audit signal that parallelism was
+	// declared, and — since ADR-0056 — that it ran) and est_cost_usd when a real
+	// cost was measured (omitted otherwise: no fabricated figure).
+	//
+	// parallel_offered / parallel_accepted are gone (ADR-0056 Decision 4): there
+	// is no offer and no answer to record, and writing false forever would read
+	// as "offered and declined". Old rows keep them; readers handle both.
 	if wide {
 		payload["groups"] = idxGroups
-		payload["parallel_offered"] = offered
-		payload["parallel_accepted"] = accepted
 		if haveEst {
 			payload["est_cost_usd"] = est
 		}
@@ -224,8 +214,8 @@ func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups 
 	}
 	fmt.Fprintf(out, "split: %d個のサブタスクとして実行\n", len(subs))
 
-	if accepted {
-		cancelled, err = runGroups(ctx, s, parentSID, groups, subs, parentIntent, w, in, out)
+	if wide {
+		cancelled, err = runGroups(ctx, s, parentSID, groups, subs, parentIntent, w, in, out, est, haveEst)
 	} else {
 		cancelled, err = runSubtasksSequential(ctx, s, parentSID, subs, parentIntent, w, in, out, newView)
 	}
@@ -273,12 +263,14 @@ func (w subtaskWiring) request(prompt string) executor.Request {
 // after which the children and parent already hold task.cancelled and the
 // caller skips finishTask.
 func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][]string, subs []string,
-	parentIntent string, w subtaskWiring, in *bufio.Reader, out io.Writer) (cancelled bool, err error) {
+	parentIntent string, w subtaskWiring, in *bufio.Reader, out io.Writer,
+	est float64, haveEst bool) (cancelled bool, err error) {
 	var mu sync.Mutex // guards the shared terminal, not the store (its single connection serializes writes)
 	base := 0
 	for gi, g := range groups {
 		if len(g) > 1 {
-			fmt.Fprintf(out, "-- group %d/%d: %d本を並走 --\n", gi+1, len(groups), len(g))
+			// 訊かずに、始める前に言う (ADR-0056 Decision 2)。
+			fmt.Fprint(out, parallelNotice(len(g), gi+1, len(groups), est, haveEst))
 			failed, canc, err := runGroupParallel(ctx, s, parentSID, g, base, len(subs),
 				parentIntent, w, in, out, &mu)
 			base += len(g)

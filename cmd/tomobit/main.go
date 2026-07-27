@@ -903,6 +903,18 @@ func isolateProtocolEnabled() bool {
 	return *cfg.IsolateProtocol
 }
 
+// parallelSubtasksEnabled resolves the ADR-0056 kill switch (config
+// parallel_subtasks, default true), shaped like the two above. An explicit
+// false is the 「信じない」 position — every split runs sequentially — and
+// needs no other change: the declaration is still recorded in task.split's
+// groups, so the evidence for reopening the decision keeps accumulating.
+func parallelSubtasksEnabled() bool {
+	if cfg.ParallelSubtasks == nil {
+		return true
+	}
+	return *cfg.ParallelSubtasks
+}
+
 // isolationDir prepares the place this session's Provider is told to build its
 // workspace in, returning the parent to hand to AddDirs and the child path to
 // name in the instruction (ADR-0050 Decision 4).

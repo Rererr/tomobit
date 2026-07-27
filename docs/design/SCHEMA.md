@@ -346,12 +346,17 @@ R4. eventsのtype初期カタログ（14種で確定）
       n, q, fallback, tokens[...]} と劣化時のみ perception_degraded、
       または手動指定時 {plan, cap, manual: true}。tokens / perception_degraded
       の意味は tomo.decided と同じ
-    - task.split（ADR-0023、ADR-0028で拡張）: 受理した分割提案の記帳。
-      payload = {subtasks: [...], groups: [[...]], parallel_offered,
-      parallel_accepted, est_cost_usd}。subtasks はフラットな実行順、
-      groups は subtasks のインデックス群（例 [[0],[1,2],[3]] — Providerが
-      独立と宣言した群。ADR-0028）、parallel_* / est_cost_usd は並走許可
-      ゲートの提示・回答・概算（フラット提案では groups 以降を省略）。
+    - task.split（ADR-0023、ADR-0028で拡張、ADR-0056で縮小）: 受理した分割提案の
+      記帳。payload = {subtasks: [...], groups: [[...]], est_cost_usd}。
+      subtasks はフラットな実行順、groups は subtasks のインデックス群
+      （例 [[0],[1,2],[3]] — Providerが独立と宣言した群。ADR-0028）、
+      est_cost_usd は並走を始める前に人へ告知した概算（フラット提案では
+      groups 以降を省略）。
+      **parallel_offered / parallel_accepted は ADR-0056 で記帳をやめた**:
+      独立宣言は訊かずに信じるので提示も回答も存在せず、false を書き続けるのは
+      「提示したが断られた」と読める嘘になる。**並走したかどうかは groups から
+      導出する**（2要素以上の群があれば並走した）。古い行は両キーを持ったまま
+      残る（One Ledger）ので、読み手は両方の形を扱う。
       サブタスクは独立セッションで、その task.started は payload に
       parent: <親session_id> を持つ（source は production のまま）。
       知覚は task.split を読まず、抽出プロンプト/schemaも不変なので

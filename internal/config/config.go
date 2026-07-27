@@ -70,6 +70,15 @@ type Config struct {
 	// split their workspace off or it does not, and that is not a per-run
 	// judgment anyone should have to make.
 	IsolateProtocol *bool `json:"isolate_protocol,omitempty"`
+	// ParallelSubtasks is the ADR-0056 kill switch, shaped like the two above.
+	// nil = key absent = a group the Provider declared independent runs in
+	// parallel without asking; an explicit false makes every split sequential.
+	//
+	// The switch exists even though ADR-0056 chose to trust the declaration:
+	// deciding to trust and being able to stop are different things. An explicit
+	// false is exactly the 「信じない」 position that ADR was weighed against, so
+	// reverting needs no redesign — only this key.
+	ParallelSubtasks *bool `json:"parallel_subtasks,omitempty"`
 	// TestCommands maps a working directory to the command that observes whether
 	// its tests pass (ADR-0052 Decision 2). "How this project runs its tests" is
 	// wiring, in the same sense ADR-0047 gave the word: it describes this machine
