@@ -9,6 +9,18 @@ permissions:
   contents: read
 
 jobs:
+  # ドキュメント検査はGoに依存しないので、test行列とは別ジョブにする。
+  # 2OSで同じ結果を2度出す意味も無い。
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ADRの `関連:` ブロックは参照先の表題の記憶から書かれがちで、
+      # ファイル名とずれても人間の目には読めてしまう。機械で見る。
+      - name: ADRリンクの参照先
+        run: make docs-check
+
   test:
     strategy:
       fail-fast: false

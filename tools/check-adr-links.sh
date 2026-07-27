@@ -14,7 +14,14 @@
 #   - 絶対パス(/で始まる)
 set -uo pipefail
 
-cd "$(git rev-parse --show-toplevel)" || exit 1
+# gitが読めないと ls-files が空を返し、「壊れたリンクは無い」と
+# 区別がつかなくなる。空振りを成功と呼ばないよう、ここで落とす。
+root=$(git rev-parse --show-toplevel 2>/dev/null) || root=
+if [ -z "$root" ]; then
+  echo "gitリポジトリの中で実行してください。" >&2
+  exit 1
+fi
+cd "$root" || exit 1
 
 # インラインリンク中の ADR-NNNN…md への相対リンクのうち、
 # 参照先が実在しないものを "  file -> target" の形で出す。
@@ -35,6 +42,12 @@ scan_broken_links() {
   done < <(git ls-files -z '*.md')
 }
 
+scanned=$(git ls-files '*.md' | wc -l | tr -d ' ')
+if [ "$scanned" -eq 0 ]; then
+  echo "*.md が1つも見つからない。検査が空振りしている。" >&2
+  exit 1
+fi
+
 broken=$(scan_broken_links)
 
 if [ -n "$broken" ]; then
@@ -47,4 +60,4 @@ if [ -n "$broken" ]; then
   exit 1
 fi
 
-echo "ADRリンク: すべて解決した"
+echo "ADRリンク: すべて解決した (${scanned}ファイル)"
