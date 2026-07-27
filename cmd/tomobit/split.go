@@ -1,15 +1,19 @@
 package main
 
-// Split parallelism (ADR-0028 Phase 2): a Provider may declare that some
-// subtasks are independent (a group wider than one — ADR-0028 Decision 2), and
-// when it does, tomobit offers to run that group's members at once. The offer
-// is the one place a human is asked (Decision 3): parallelism front-loads K
-// provider runs and loses the sequential split's fail-stop wallet safety valve
-// (ADR-0023 Decision 4), so it is opted into, never fallen into. A no keeps the
-// whole sequence sequential — the work was asked for; only the parallelism
-// needs a yes. The run mechanism is the duel's (Decision 4): goroutine +
-// WaitGroup, the store's single connection serializes the writes, so only the
-// shared terminal needs a mutex.
+// Split parallelism (ADR-0028 Phase 2, ADR-0056): a Provider may declare that
+// some subtasks are independent (a group wider than one — ADR-0028 Decision 2),
+// and when it does, tomobit runs that group's members at once **without
+// asking**. The y/N gate that used to guard this was retracted (ADR-0056
+// Decision 1): it asked a person who had not read the subtask texts to
+// second-guess one judgment of a Provider they had already trusted with the
+// whole task. What survives is the number — parallelism front-loads K provider
+// runs, so the group says its width and estimated cost before it starts
+// (Decision 2), as a fact rather than a question.
+//
+// The run mechanism is the duel's (ADR-0028 Decision 4): goroutine + WaitGroup,
+// the store's single connection serializes the ledger writes, so only the shared
+// terminal needs a mutex — the NDJSON stream carries its own lock, which is what
+// lets every member hold an open view frame at the same time.
 
 import (
 	"bufio"
@@ -26,6 +30,12 @@ import (
 	"github.com/Rererr/tomobit/internal/store"
 	"github.com/Rererr/tomobit/internal/subtask"
 )
+
+// subtaskViewFactory builds one subtask's view (nil off the NDJSON stream).
+// It takes the subtask's zero-based flat position and the split's total so the
+// frame can name itself — the correlation a consumer needs once a group runs in
+// parallel and K frames are open at the same time (ADR-0056 の宿題).
+type subtaskViewFactory func(name string, gi, total int) view
 
 // parallelWidthCap bounds how many of a group's provider runs launch at once
 // (ADR-0028 実装時ノブ, initial 3): subtask.Max=5 means a group could declare
@@ -157,29 +167,30 @@ func readSplitProposal(texts []string) [][]string {
 }
 
 // executeSplit records the accepted proposal and runs its subtasks — the shared
-// core of the do path (runSplit) and the chat path (chat.splitAndFold). It runs the
-// gate once (only a wide group fires it — Decision 3), records task.split with
-// the SCHEMA.md R4 payload, and executes the subtasks (accepted → group-by-group
-// parallel, declined or non-interactive → the flat sequential fail-stop). It
-// returns the flat subtask list and whether a SIGINT cancelled the run (children
-// and parent already hold task.cancelled — the caller then skips its own boundary
-// work). What happens after is the caller's: do finishes the parent task, chat
-// folds the subtask results back into the thread (Decision 5). Splitting the tail
-// out of runSplit is what keeps the do path's behavior byte-for-byte while chat
-// reuses the same execution — no do-only regression.
+// core of the do path (runSplit) and the chat path (chat.splitAndFold). It
+// records task.split with the SCHEMA.md R4 payload and executes the subtasks
+// (a declared independent group → group-by-group with that group parallel; a
+// flat proposal, or the ADR-0056 kill switch → the flat sequential fail-stop).
+// It returns the flat subtask list and whether a SIGINT cancelled the run
+// (children and parent already hold task.cancelled — the caller then skips its
+// own boundary work). What happens after is the caller's: do finishes the parent
+// task, chat folds the subtask results back into the thread (ADR-0028 Decision
+// 5). Splitting the tail out of runSplit is what keeps the do path's behavior
+// byte-for-byte while chat reuses the same execution — no do-only regression.
 //
-// newView, when non-nil, is a chat's NDJSON view stream reaching down into the
-// sequential path only (ADR-0032 Decision 1): a subtask's Provider output must
-// land in the same typed text/tool/tool_result vocabulary the parent turn uses,
-// not providerSink's raw echo. do and a plain/TTY chat pass nil and see the
-// unchanged echo. It never reaches runGroups/runGroupParallel — the gate that
-// leads there requires interactive, which a view session structurally never is
-// (validateViewFlag forces stdout non-TTY), so there is nothing to wire there.
+// newView, when non-nil, is a chat's NDJSON view stream: a subtask's Provider
+// output must land in the same typed text/tool/tool_result vocabulary the parent
+// turn uses, not providerSink's raw echo. do and a plain/TTY chat pass nil and
+// see the unchanged echo. **It reaches the parallel path too** — the older doc
+// here said it never could, because the gate leading there required a terminal
+// a view session structurally never has. ADR-0056 removed the gate, so the view
+// entry is now the one where parallelism actually happens, and its frames
+// correlate by sub.
 //
 // w carries everything the children share — see subtaskWiring.
 func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]string,
 	parentIntent string, w subtaskWiring,
-	in *bufio.Reader, out io.Writer, interactive bool, newView func(string) view) (subs []string, cancelled bool, err error) {
+	in *bufio.Reader, out io.Writer, interactive bool, newView subtaskViewFactory) (subs []string, cancelled bool, err error) {
 	subs, idxGroups := flattenGroups(groups)
 	now := time.Now().UnixMilli()
 
@@ -215,7 +226,7 @@ func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups 
 	fmt.Fprintf(out, "split: %d個のサブタスクとして実行\n", len(subs))
 
 	if wide {
-		cancelled, err = runGroups(ctx, s, parentSID, groups, subs, parentIntent, w, in, out, est, haveEst)
+		cancelled, err = runGroups(ctx, s, parentSID, groups, subs, parentIntent, w, in, out, newView, est, haveEst)
 	} else {
 		cancelled, err = runSubtasksSequential(ctx, s, parentSID, subs, parentIntent, w, in, out, newView)
 	}
@@ -264,7 +275,7 @@ func (w subtaskWiring) request(prompt string) executor.Request {
 // caller skips finishTask.
 func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][]string, subs []string,
 	parentIntent string, w subtaskWiring, in *bufio.Reader, out io.Writer,
-	est float64, haveEst bool) (cancelled bool, err error) {
+	newView subtaskViewFactory, est float64, haveEst bool) (cancelled bool, err error) {
 	var mu sync.Mutex // guards the shared terminal, not the store (its single connection serializes writes)
 	base := 0
 	for gi, g := range groups {
@@ -272,7 +283,7 @@ func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][
 			// 訊かずに、始める前に言う (ADR-0056 Decision 2)。
 			fmt.Fprint(out, parallelNotice(len(g), gi+1, len(groups), est, haveEst))
 			failed, canc, err := runGroupParallel(ctx, s, parentSID, g, base, len(subs),
-				parentIntent, w, in, out, &mu)
+				parentIntent, w, in, out, &mu, newView)
 			base += len(g)
 			if err != nil {
 				return false, err
@@ -286,13 +297,13 @@ func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][
 			}
 		} else {
 			fmt.Fprintf(out, "-- subtask %d/%d: %s --\n", base+1, len(subs), truncate(g[0], 60))
-			// runGroups only runs once the parallel gate accepted (Decision 3),
-			// which requires interactive — and a chat's NDJSON view stream forces
-			// non-interactive (ADR-0032 Decision 1: view mode assumes every TTY
-			// gate shut). A view is therefore never available on this path; nil
-			// is that structural fact, not a placeholder for future wiring.
+			// A lone group is one subtask, and it gets the same framed view its
+			// flat-proposal twin does. The old comment here said a view was
+			// "structurally never available" on this path because the gate
+			// required a terminal — ADR-0056 removed the gate, so this path is
+			// now the ordinary one under the GUI.
 			failed, canc, err := runSubtaskSequential(ctx, s, parentSID, g[0], base, len(subs),
-				parentIntent, w, in, out, nil)
+				parentIntent, w, in, out, newView)
 			base++
 			if err != nil {
 				return false, err
@@ -309,14 +320,14 @@ func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][
 	return false, nil
 }
 
-// runSubtasksSequential runs the flat proposal order one subtask at a time — the
-// path a declined gate (or a non-interactive run) takes (ADR-0028 Decision 3:
-// "n でも作業は失われない"). It is exactly the ADR-0023 fail-stop: a failed
-// subtask stops the loop before the next one opens, so a task that never started
-// leaves no half-run in the ledger.
+// runSubtasksSequential runs the flat proposal order one subtask at a time —
+// the path a flat proposal takes, and the one the ADR-0056 kill switch falls
+// back to. It is exactly the ADR-0023 fail-stop: a failed subtask stops the
+// loop before the next one opens, so a task that never started leaves no
+// half-run in the ledger.
 func runSubtasksSequential(ctx context.Context, s *store.Store, parentSID string, subs []string,
 	parentIntent string, w subtaskWiring,
-	in *bufio.Reader, out io.Writer, newView func(string) view) (cancelled bool, err error) {
+	in *bufio.Reader, out io.Writer, newView subtaskViewFactory) (cancelled bool, err error) {
 	for i, sub := range subs {
 		fmt.Fprintf(out, "-- subtask %d/%d: %s --\n", i+1, len(subs), truncate(sub, 60))
 		failed, canc, err := runSubtaskSequential(ctx, s, parentSID, sub, i, len(subs),
@@ -351,7 +362,7 @@ func runSubtasksSequential(ctx context.Context, s *store.Store, parentSID string
 // per-run, not per-provider.
 func runSubtaskSequential(ctx context.Context, s *store.Store, parentSID, sub string, gi, total int,
 	parentIntent string, w subtaskWiring,
-	in *bufio.Reader, out io.Writer, newView func(string) view) (failed, cancelled bool, err error) {
+	in *bufio.Reader, out io.Writer, newView subtaskViewFactory) (failed, cancelled bool, err error) {
 	sid, err := openSubtask(s, w.capability, sub, parentSID)
 	if err != nil {
 		return false, false, err
@@ -369,7 +380,7 @@ func runSubtaskSequential(ctx context.Context, s *store.Store, parentSID, sub st
 	} else {
 		var v view
 		if newView != nil {
-			v = newView(w.adapter.Name())
+			v = newView(w.adapter.Name(), gi, total)
 			v.begin()
 		}
 		sink := subtaskSink(s, sid, out, v)
@@ -426,8 +437,16 @@ func subtaskSink(s *store.Store, sid string, out io.Writer, v view) executor.Sin
 // in the flat order, so labels and prompts stay 1/total across the whole split.
 // Returns failed (any member failed — the caller then stops before the next
 // group) and cancelled (SIGINT — children and parent already hold task.cancelled).
+//
+// newView, when non-nil, gives every member its own framed view. The frames are
+// open at the same time, which is exactly why ndjsonView carries `sub`: without
+// it the stream would be K interleaved voices under one turn (ADR-0056's
+// remaining homework, closed here). The stream's own lock — not this mutex —
+// is what keeps those concurrent emits from tearing; mu still guards the
+// terminal's `[n:provider]` fallback, which is a layout concern.
 func runGroupParallel(ctx context.Context, s *store.Store, parentSID string, group []string, base, total int,
-	parentIntent string, w subtaskWiring, in *bufio.Reader, out io.Writer, mu *sync.Mutex) (failed, cancelled bool, err error) {
+	parentIntent string, w subtaskWiring, in *bufio.Reader, out io.Writer, mu *sync.Mutex,
+	newView subtaskViewFactory) (failed, cancelled bool, err error) {
 	type member struct {
 		sid string
 		gi  int
@@ -478,9 +497,19 @@ func runGroupParallel(ctx context.Context, s *store.Store, parentSID string, gro
 				if os.Getenv("TOMOBIT_DEBUG") != "" {
 					ex.Debug = os.Stderr
 				}
+				// 並走の子も自分のフレームを持つ。K本が同時に開くので、
+				// フレームの同一性は sub が運ぶ（ndjsonView.tag）。
+				var v view
+				if newView != nil {
+					v = newView(w.adapter.Name(), m.gi, total)
+					v.begin()
+				}
 				results[k], runErrs[k] = ex.Run(ctx,
 					w.request(subtask.Prompt(parentIntent, m.sub, m.gi, total)),
-					splitSink(s, m.sid, out, mu, m.gi+1, w.adapter.Name()))
+					splitSink(s, m.sid, out, mu, m.gi+1, w.adapter.Name(), v))
+				if v != nil {
+					v.end(results[k])
+				}
 			}(k)
 		}
 		wg.Wait()
@@ -512,8 +541,16 @@ func runGroupParallel(ctx context.Context, s *store.Store, parentSID string, gro
 // and the shape itself marks "work, not experiment". Like duelSink, the store
 // side is unsynchronized on purpose — its single connection already serializes —
 // so the mutex guards only the io.Writer.
-func splitSink(s *store.Store, sid string, out io.Writer, mu *sync.Mutex, n int, provider string) executor.Sink {
+// v non-nil is the NDJSON view stream: the member's events go through its own
+// framed view instead of the terminal's `[n:provider]` prefix, which is layout
+// for a shared terminal and has no meaning to a structured consumer. Same split
+// of responsibilities subtaskSink draws on the sequential path.
+func splitSink(s *store.Store, sid string, out io.Writer, mu *sync.Mutex, n int, provider string, v view) executor.Sink {
 	return func(ev executor.Event, ts int64) error {
+		if v != nil {
+			v.show(ev)
+			return recordEvent(s, sid, ev, ts)
+		}
 		if ev.Type == executor.EventProviderOutput {
 			if text, ok := ev.Payload["text"].(string); ok && text != "" {
 				mu.Lock()

@@ -487,22 +487,16 @@ func TestChatSplitViewEmitsTypedSubtaskEvents(t *testing.T) {
 	}
 }
 
-// (i) A declared group runs in parallel under --view ndjson too (ADR-0056
-// Decision 1) — the entry that never saw the old gate is exactly the one that
-// now parallelises.
+// (i) A declared group runs in parallel under --view ndjson (ADR-0056 Decision
+// 1), and each member arrives as its own typed frame correlated by `sub`.
 //
-// **This test pins a known degradation on purpose.** A parallel child has no
-// view of its own: ndjsonView's types carry nothing that says which child spoke,
-// so K concurrent emitters would interleave frames. Its output therefore reaches
-// the stream through splitSink's `[n:provider]` terminal labeling, framed as
-// note lines — readable, attributable, but not typed. ADR-0056 records this as
-// the remaining homework, and pinning it here keeps the debt visible instead of
-// letting a future reader mistake it for the intended shape.
-//
-// The inverse of this test used to exist: "a wide group must not degrade
-// subtask output to a note". It held only because the gate could never fire off
-// a terminal.
-func TestChatSplitViewParallelChildrenArriveAsLabelledNotes(t *testing.T) {
+// **This test was the inverse of itself yesterday.** It pinned the degradation
+// ADR-0056 shipped with — parallel children reaching the stream as
+// `[n:provider]` note lines, because ndjsonView carried nothing that said which
+// child spoke — and told the next reader to update it when a correlation key
+// arrived. It has. The terminal's label is layout for a shared terminal and now
+// stays out of the view entirely.
+func TestChatSplitViewParallelChildrenArriveAsCorrelatedFrames(t *testing.T) {
 	s := openTestStore(t)
 	a := &splitChatAdapter{
 		proposal: `{"tomobit_split": [["alpha task", "beta task"]]}`,
@@ -515,33 +509,94 @@ func TestChatSplitViewParallelChildrenArriveAsLabelledNotes(t *testing.T) {
 	}
 
 	evs := viewEvents(t, buf) // fails on any non-JSON line
-	labelled := 0
+
+	// 子の本文は型付きで、それぞれ自分の sub を名乗る。
+	subsSeen := map[float64]int{}
 	for _, e := range evs {
-		if e["type"] != "note" {
+		if e["type"] != "text" || e["text"] != "subtask ran" {
 			continue
 		}
-		if txt, ok := e["text"].(string); ok && strings.Contains(txt, "subtask ran") {
-			if !strings.Contains(txt, ":fake]") {
-				t.Errorf("並走の子の行は、どの子かが読めなければならない: %v", e)
-			}
-			labelled++
+		sub, ok := e["sub"].(float64)
+		if !ok {
+			t.Errorf("並走の子の text が sub を持っていない: %v", e)
+			continue
 		}
+		subsSeen[sub]++
 	}
-	if labelled != 2 {
-		t.Errorf("両方の子の出力が届くこと（ラベル付きの note で）, got %d: %v", labelled, viewTypes(evs))
+	if len(subsSeen) != 2 || subsSeen[1] != 1 || subsSeen[2] != 1 {
+		t.Errorf("2本の子がそれぞれ 1/2 として届くこと, got %v", subsSeen)
 	}
-	// 逐次の子だけが型付きのフレームを持つ。並走の子がそれを持たないことは
-	// 上の doc comment のとおり既知で、持ってしまったら設計が変わった合図。
+
+	// フレームも子ごとに開いて閉じる。K本が同時に開くので、対応は sub でしか
+	// 取れない — 開始と終了の数が sub ごとに揃うことがその契約である。
+	opened, closed := map[float64]int{}, map[float64]int{}
 	for _, e := range evs {
-		if e["type"] == "text" && e["text"] == "subtask ran" {
-			t.Errorf("並走の子が型付きで届いた — 相関キーを足したなら、この期待も更新すること: %v", e)
+		sub, ok := e["sub"].(float64)
+		if !ok {
+			continue
+		}
+		switch e["type"] {
+		case "turn.started":
+			opened[sub]++
+			if total, ok := e["sub_total"].(float64); !ok || total != 2 {
+				t.Errorf("フレームは自分が何本中の何本かを名乗る: %v", e)
+			}
+		case "turn.finished":
+			closed[sub]++
 		}
 	}
-	split := payloadOf(t, s, "task.split")
-	if split["groups"] == nil {
-		t.Errorf("独立宣言は記帳される: %v", split)
+	for _, sub := range []float64{1, 2} {
+		if opened[sub] != 1 || closed[sub] != 1 {
+			t.Errorf("sub=%v のフレームが開いて閉じていない: opened=%d closed=%d", sub, opened[sub], closed[sub])
+		}
 	}
-	if _, ok := split["parallel_offered"]; ok {
-		t.Errorf("提示は無くなった (ADR-0056 D4): %v", split)
+
+	// 端末のラベルは view に混ざらない（レイアウトであって語彙ではない）。
+	for _, e := range evs {
+		if txt, ok := e["text"].(string); ok && strings.Contains(txt, ":fake]") {
+			t.Errorf("端末の [n:provider] が view に漏れた: %v", e)
+		}
+	}
+	// 会話そのもののターンは sub を持たない — 「サブタスク0」に見せない。
+	for _, e := range evs {
+		if e["type"] != "turn.started" {
+			continue
+		}
+		if _, ok := e["sub"]; !ok {
+			return // 親のターンが1つ以上あればよい
+		}
+	}
+	t.Error("親のターンが sub 無しで届いていない")
+}
+
+// 並走の子が同時にフレームを持つと、view ストリームは初めて複数のゴルーチンから
+// 書かれる。ADR-0056 まで ndjsonStream が錠を持たなかったのは「並走は非TTYでは
+// 起きない」という前提があったからで、その前提が消えた日から前提だけが嘘に
+// なっていた（実害は splitSink が端末用に持っていた mutex が偶然塞いでいた）。
+// この経路は -race でしか壊れが見えないので、幅を広げて踏みにいく。
+func TestViewStreamSurvivesConcurrentSubtaskFrames(t *testing.T) {
+	s := openTestStore(t)
+	a := &splitChatAdapter{
+		proposal: `{"tomobit_split": [["a", "b", "c", "d", "e"]]}`,
+		feedOut:  "統合レポート",
+	}
+	c, buf := newSplitViewChat(t, s, a, "")
+
+	if err := c.turn("wide parallel build"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 行が壊れていない = どの行も1つの JSON として読める（viewEvents が保証する）。
+	evs := viewEvents(t, buf)
+	frames := 0
+	for _, e := range evs {
+		if e["type"] == "turn.started" {
+			if _, ok := e["sub"]; ok {
+				frames++
+			}
+		}
+	}
+	if frames != 5 {
+		t.Errorf("5本の子がそれぞれフレームを開くこと, got %d", frames)
 	}
 }

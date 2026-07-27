@@ -1314,27 +1314,41 @@ func (c *chat) newView(name string) view {
 // has no view at all; a plain/TTY chat keeps its existing raw echo for split,
 // unchanged by this ADR) it returns nil, and executeSplit falls back to
 // providerSink exactly as it always has.
-func (c *chat) newSubtaskView() func(string) view {
+// It takes the subtask's 1-based flat position and the split's total so each
+// frame can name itself (ADR-0032 の view 契約に足した sub / sub_total)。
+// 逐次でも並走でも同じ工場を通るので、フレームの形が経路で変わらない。
+func (c *chat) newSubtaskView() func(name string, gi, total int) view {
 	if c.stream == nil {
 		return nil
 	}
 	n := c.turns
-	return func(name string) view {
-		return &ndjsonView{s: c.stream, name: name, n: n}
+	return func(name string, gi, total int) view {
+		return &ndjsonView{s: c.stream, name: name, n: n, sub: gi + 1, subTotal: total}
 	}
 }
 
 // ndjsonStream is the single writer of the NDJSON view stream (ADR-0032
 // Decision 1). Every line of stdout — the typed view events and the plain-text
 // notes the organs still print — goes through emit, so the two never interleave
-// mid-line. It carries no lock, deliberately: view mode forces a non-TTY stdout
-// (validated at startup), which forces a non-interactive session, which keeps
-// split sequential — so turnView's spinner and split's parallel goroutines, the
-// only second writers this file has, never run here. show() runs on Run's one
-// synchronous stdout goroutine; the note writer and flush hook run on the main
-// goroutine between turns, and Run never reads our stdin, so the two never
-// overlap. The reasoning turnView records for its unlocked toolBudget, again.
+// mid-line.
+//
+// **It carries a lock, and the reason it did not is worth recording.** The old
+// comment argued the lock away: view mode forces a non-TTY stdout, which forced
+// a non-interactive session, which kept split sequential — so split's parallel
+// goroutines never ran here. [ADR-0056](../../docs/decisions/ADR-0056-independence-is-trusted.md)
+// removed that middle step. A declared independent group now runs in parallel
+// regardless of who is at the terminal, and this is the entry where it happens.
+//
+// Nothing raced in the meantime: the parallel children wrote through splitSink
+// under runGroupParallel's own mutex, which serialized their path into here as
+// a side effect of guarding the terminal. But the *stated* invariant was false
+// from that day, and giving each child its own view (below) removes the mutex
+// from the path — so the lock moves to where the shared state actually is.
+//
+// pending is guarded too: noteWriter appends to it byte by byte while a child's
+// view may be emitting a complete line beside it.
 type ndjsonStream struct {
+	mu      sync.Mutex
 	enc     *json.Encoder
 	pending []byte // a note line written without its terminating newline yet
 }
@@ -1350,7 +1364,15 @@ func newNDJSONStream(w io.Writer) *ndjsonStream {
 // emit writes one view event as a line of JSON. A write error (a closed pipe —
 // the GUI went away) is dropped, as turnView drops its own writes: the stream
 // is a view, and there is nothing left to tell once its reader is gone.
-func (n *ndjsonStream) emit(ev map[string]any) { _ = n.enc.Encode(ev) }
+func (n *ndjsonStream) emit(ev map[string]any) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.emitLocked(ev)
+}
+
+// emitLocked is emit's body for callers already holding the lock (the two
+// flushes, which read pending in the same critical section).
+func (n *ndjsonStream) emitLocked(ev map[string]any) { _ = n.enc.Encode(ev) }
 
 // flushAwait releases a buffered partial note when a read reaches stdin's
 // bottom (ADR-0032 Decision 1: flush-on-read), tagging it await so an
@@ -1363,20 +1385,24 @@ func (n *ndjsonStream) emit(ev map[string]any) { _ = n.enc.Encode(ev) }
 // a breach: whoever batch-wrote the input is not waiting on the signal. A GUI
 // that feeds one line at a time always reaches bottom and always gets await.
 func (n *ndjsonStream) flushAwait() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	if len(n.pending) == 0 {
 		return
 	}
-	n.emit(map[string]any{"type": "note", "text": string(n.pending), "await": true})
+	n.emitLocked(map[string]any{"type": "note", "text": string(n.pending), "await": true})
 	n.pending = n.pending[:0]
 }
 
 // flushClose emits any leftover partial note as the chat ends, so a note
 // written without a trailing newline is not lost when stdout closes.
 func (n *ndjsonStream) flushClose() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	if len(n.pending) == 0 {
 		return
 	}
-	n.emit(map[string]any{"type": "note", "text": string(n.pending)})
+	n.emitLocked(map[string]any{"type": "note", "text": string(n.pending)})
 	n.pending = n.pending[:0]
 }
 
@@ -1394,10 +1420,12 @@ func (n *ndjsonStream) flushClose() {
 type noteWriter struct{ s *ndjsonStream }
 
 func (w noteWriter) Write(p []byte) (int, error) {
+	w.s.mu.Lock()
+	defer w.s.mu.Unlock()
 	for _, b := range p {
 		if b == '\n' {
 			if len(w.s.pending) > 0 {
-				w.s.emit(map[string]any{"type": "note", "text": string(w.s.pending)})
+				w.s.emitLocked(map[string]any{"type": "note", "text": string(w.s.pending)})
 				w.s.pending = w.s.pending[:0]
 			}
 		} else {
@@ -1457,17 +1485,44 @@ func (f flushReader) Read(p []byte) (int, error) {
 // spinner, gutter, mdlite or tool budget — those are terminal physics
 // (ADR-0030/0031); the NDJSON consumer owns its own presentation, so tool_result
 // flows through raw and uncapped, the budget staying on turnView's side.
+// sub / subTotal name which subtask of a split this view speaks for — the same
+// 1-based flat position the fold-back prompt and the terminal's `[n:provider]`
+// label use, so one run's three ways of pointing at a subtask agree.
+//
+// Zero means "not a subtask": the ordinary turn, and the fold-back feed turn.
+// **The field exists because parallel children interleave.** Sequential
+// subtasks never needed it — their frames open and close one at a time, and a
+// consumer could read the repeated n as nesting. Since ADR-0056 a declared
+// independent group runs at once, so K frames are open together and the type
+// alone no longer says whose text this is. Sequential children carry it too:
+// the same fact deserves the same key, and a consumer that groups by sub gets
+// both paths for free.
 type ndjsonView struct {
-	s       *ndjsonStream
-	name    string
-	n       int
-	started time.Time
-	cost    float64
+	s        *ndjsonStream
+	name     string
+	n        int
+	sub      int
+	subTotal int
+	started  time.Time
+	cost     float64
+}
+
+// tag stamps the correlation key onto one event. Absent for the ordinary turn:
+// a consumer reads "no sub" as "this is the conversation itself", and adding a
+// zero would make every plain turn look like subtask 0 of 0.
+func (v *ndjsonView) tag(out map[string]any) map[string]any {
+	if v.sub > 0 {
+		out["sub"] = v.sub
+		if v.subTotal > 0 {
+			out["sub_total"] = v.subTotal
+		}
+	}
+	return out
 }
 
 func (v *ndjsonView) begin() {
 	v.started = time.Now()
-	v.s.emit(map[string]any{"type": "turn.started", "n": v.n, "provider": v.name})
+	v.s.emit(v.tag(map[string]any{"type": "turn.started", "n": v.n, "provider": v.name}))
 }
 
 func (v *ndjsonView) show(ev executor.Event) {
@@ -1482,14 +1537,14 @@ func (v *ndjsonView) show(ev executor.Event) {
 		if m, ok := ev.Payload["model"].(string); ok && m != "" {
 			out["model"] = m
 		}
-		v.s.emit(out)
+		v.s.emit(v.tag(out))
 	case executor.EventProviderOutput:
 		if t, ok := ev.Payload["text"].(string); ok && t != "" {
-			v.s.emit(map[string]any{"type": "text", "text": t})
+			v.s.emit(v.tag(map[string]any{"type": "text", "text": t}))
 			return
 		}
 		if r, ok := ev.Payload[executor.PayloadToolResult].(string); ok && r != "" {
-			v.s.emit(map[string]any{"type": "tool_result", "text": r})
+			v.s.emit(v.tag(map[string]any{"type": "tool_result", "text": r}))
 			return
 		}
 		if tool, ok := ev.Payload["tool"].(string); ok && tool != "" {
@@ -1497,7 +1552,7 @@ func (v *ndjsonView) show(ev executor.Event) {
 			if d, ok := ev.Payload[executor.PayloadDetail].(string); ok && d != "" {
 				out["detail"] = d
 			}
-			v.s.emit(out)
+			v.s.emit(v.tag(out))
 		}
 	case executor.EventProviderFinished:
 		if c, ok := ev.Payload["cost_usd"].(float64); ok {
@@ -1505,7 +1560,7 @@ func (v *ndjsonView) show(ev executor.Event) {
 		}
 	case executor.EventProviderError:
 		if msg, ok := ev.Payload["message"].(string); ok && msg != "" {
-			v.s.emit(map[string]any{"type": "error", "message": msg})
+			v.s.emit(v.tag(map[string]any{"type": "error", "message": msg}))
 		}
 	}
 }
@@ -1520,7 +1575,7 @@ func (v *ndjsonView) end(result executor.Result) {
 	if v.cost > 0 {
 		out["cost_usd"] = v.cost
 	}
-	v.s.emit(out)
+	v.s.emit(v.tag(out))
 }
 
 // permissionAsk is one tool a run was stopped from using, with a one-line

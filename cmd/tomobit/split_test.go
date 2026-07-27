@@ -369,7 +369,9 @@ func TestExecuteSplitViewEmitsNoPerSubtaskDecision(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	stream := newNDJSONStream(buf)
-	newView := func(name string) view { return &ndjsonView{s: stream, name: name, n: 1} }
+	newView := func(name string, gi, total int) view {
+		return &ndjsonView{s: stream, name: name, n: 1, sub: gi + 1, subTotal: total}
+	}
 	groups := [][]string{{"sub one"}, {"sub two"}} // flat: parallelGate never fires
 
 	if _, _, err := executeSplit(context.Background(), s, parentSID, groups, "big task",
