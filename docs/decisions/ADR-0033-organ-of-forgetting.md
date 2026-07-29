@@ -3,6 +3,7 @@
 - Status: **Accepted**
 - Date: 2026-07-19
 - 関連: [ADR-0034](ADR-0034-forgetting-reach.md)（忘却の到達範囲 — Decision 2/5 を改定）,
+  [ADR-0055](ADR-0055-verdict-is-a-veto.md)（verdict — 動詞の分業相手。amend との対比表の正本）,
   [ADR-0018](ADR-0018-experience-sovereignty.md)（経験主権 — 所有者だけが動かせる）,
   [SCHEMA.md](../design/SCHEMA.md)（D3 追記専用トリガー / D4 版数共存 / D10 rebuild）,
   [ADR-0004](ADR-0004-tech-stack.md)（真実と射影の分離）,
@@ -207,15 +208,9 @@ PendingSessions（Deferred Perception のキュー導出）は、このマーカ
 
 [ADR-0055](ADR-0055-verdict-is-a-veto.md) が `tomobit verdict` を足した。
 Decision 2 の「二つの動詞」に3本目を並べるのではなく、**amend の隣に置いて
-役割を割る**形にしてある:
-
-|          | amend                          | verdict                        |
-|----------|--------------------------------|--------------------------------|
-| 対象     | **知覚**（意味も判定も）        | **判定だけ**                    |
-| 機構     | (session,kind) 現行世代を全行   | execution 1行                  |
-| 出自     | `human` に書き換え              | **元のまま**                    |
-| 凍結     | する（`user.amended` → D4）     | **しない**                      |
-| 取消     | 再 amend のみ                   | `clear` で戻せる                |
+役割を割る**形にしてある。対象・機構・出自・凍結・取消の対比表は
+[ADR-0055](ADR-0055-verdict-is-a-veto.md) Decision 3 が正本（分業を決めたのは
+あちらなので、ここには写さない）。
 
 一言でいえば **「後で言えるようになった」は verdict、「意味の取り方が
 間違っていた」は amend**。Decision 2 が forget と amend の間に引いた
