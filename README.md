@@ -51,6 +51,7 @@ tomobit          # 相棒ビュー → そのまま対話へ。単発なら `tom
 - [docs/core/EXPERIENCE.md](docs/core/EXPERIENCE.md) — Experienceモデル
 - [docs/core/CONNECTION_ENGINE.md](docs/core/CONNECTION_ENGINE.md) — Connectionの実体・Split/Merge・ライフサイクル
 - [docs/core/CURIOSITY_ENGINE.md](docs/core/CURIOSITY_ENGINE.md) — 好奇心とLearning候補
+- [docs/core/REFLECTION.md](docs/core/REFLECTION.md) — 気付きを人へ映す双方向のミラー（語る器官）
 
 ### 実行アーキテクチャ
 - [docs/core/EXECUTION_MODEL.md](docs/core/EXECUTION_MODEL.md) — Intent → Plan → Capability → Provider → Executor → Runtime
@@ -72,7 +73,7 @@ tomobit          # 相棒ビュー → そのまま対話へ。単発なら `tom
 - [ADR-0009](docs/decisions/ADR-0009-voice.md) — Tomoの声（発話＝Viewの写像 / LLM不使用 / 語調は確信度のView）
 - [ADR-0010](docs/decisions/ADR-0010-codex-adapter.md) — 2つ目のAdapter（codex / `do --provider` / 写像はエラー経路実採取＋仕様準拠）
 - [ADR-0011](docs/decisions/ADR-0011-meaning-by-model-judgment-by-math.md) — Meaning by Model, Judgment by Math（判断は純関数、LLMの座席はextractorのみ）
-- [ADR-0012](docs/decisions/ADR-0012-decision-rule-thompson-sampling.md) — 決定則＝Thompson Sampling（探索は好みの側で、ミスは構造になる。Decision 3の名誉回復は継承事前下で未解決 — ADR-0037実測／ADR-0038 Proposed）
+- [ADR-0012](docs/decisions/ADR-0012-decision-rule-thompson-sampling.md) — 決定則＝Thompson Sampling（探索は好みの側で、ミスは構造になる。Decision 3の名誉回復は継承事前下では効かず、ADR-0037の実測を経てADR-0038が解決）
 - [ADR-0013](docs/decisions/ADR-0013-prior-inheritance-mean-only.md) — 事前分布の継承（平均だけ継ぎ、確信は継がない）
 - [ADR-0014](docs/decisions/ADR-0014-plan-learning-same-ledger.md) — Plan学習（台帳は賭ける対象を選ばない）
 - [ADR-0015](docs/decisions/ADR-0015-reflection.md) — Reflection（第一級の器官、実体は射影、核は双方向性。発火条件（対人ゲート）はADR-0035が改定）
@@ -99,10 +100,10 @@ tomobit          # 相棒ビュー → そのまま対話へ。単発なら `tom
 - [ADR-0036](docs/decisions/ADR-0036-task-perception-wiring.md) — 判断が読むトークン（判断は`cap=`1トークンしか読まず粒度1のConnectionとSplit子は到達不能だった / Decision 1は決定的に既知の`size`もトークンにする / Decision 2はタスク記述をextractorに通して`lang`/`framework`/`topic`を判断へ配線＝遅延して1タスク1回・誰も読まないなら叩かない・期限ノブは置かない・判断の記録は抽出プロンプトから外す・事前知覚と事後知覚のズレは埋めず監査に残す）
 - [ADR-0037](docs/decisions/ADR-0037-merge-reachability.md) — 継承事前の下での名誉回復を試みるも実測で頓挫（μ<0.48の親から生まれた子は減衰しても悲観ゲートを通らず、選ばれないから経験も来ずmerge判定機会も来ない自己強化デッドロック / merge判定の到達性は修復したが、実測でln BFはThetaMerge=0へ「上から」漸近するのみで実質到達不能（約15年）と判明 — 名誉回復は未解決のままADR-0038へ引き継ぐ）
 - [ADR-0038](docs/decisions/ADR-0038-gate-under-inherited-priors.md) — 継承事前下の能力ゲート（悲観ゲートの基準線を`q−margin`から`min(q, PriorQuantile(q))−margin`へ一般化し、低いμを継いだ子の恒久ゲート落ちを解消 / 一様事前の根では今日と同一判定・継承事前でも今日より厳しくならない片側緩和 / 定数0.20は一様事前のq分位点を書き下したたまたまの値だった — ADR-0012 Decision 3の未解決点への回答、ADR-0037 Decision 1を改版）
-- [ADR-0039](docs/decisions/ADR-0039-status-machine-view.md) — 相棒ビューの機械可読view（`tomobit status --view json` でstage/mood/speakを1オブジェクトで出す / 台帳が無ければ作らず`exists:false` / 顔窓起動・挨拶記帳なし — GUIのstage移植570行を廃し、台帳を書くバイナリ自身が導出する。Proposed）
-- [ADR-0040](docs/decisions/ADR-0040-decision-audit-view.md) — 判断の監査行をviewへ流す（`tomo.decided`に記帳済みのCandidates〈分位点・ゲート・勝ち数〉を`chat --view ndjson`の`decided`イベントとしても流し、GUIが「なぜこのProviderか」を開示可能にする / 声は不変・既定は畳む — ADR-0011根拠3の監査可能性を表示経路へ延伸。Proposed）
-- [ADR-0041](docs/decisions/ADR-0041-out-of-order-perception.md) — 順序外の知覚は正典に立ち返る（遅延知覚がlive射影を減衰重み1.0で汚し無期限に残る実測 / バッチが既知覚より古ければlive Applyを捨ててrebuild — forgetの自動rebuildと同じ姿勢。Proposed）
-- [ADR-0042](docs/decisions/ADR-0042-split-starvation-and-lexical-shadowing.md) — Splitの飢餓と辞書順の遮蔽（均衡混合でexcess surprisalが発火せず、同粒度tie-breakの辞書順でlang=系Connectionが系統的に読まれない — 11連敗Providerが最頻選択される実測 / 対案5件を実測で序列づけ、対案2「選ぶのは一つ、拒否は同粒度の全員」を先行適用。ADR-0013 Decision 2改版。所有者の追認待ち）
+- [ADR-0039](docs/decisions/ADR-0039-status-machine-view.md) — 相棒ビューの機械可読view（`tomobit status --view json` でstage/mood/speakを1オブジェクトで出す / 台帳が無ければ作らず`exists:false` / 顔窓起動・挨拶記帳なし — GUIのstage移植570行を廃し、台帳を書くバイナリ自身が導出する。Accepted・配備済み）
+- [ADR-0040](docs/decisions/ADR-0040-decision-audit-view.md) — 判断の監査行をviewへ流す（`tomo.decided`に記帳済みのCandidates〈分位点・ゲート・勝ち数〉を`chat --view ndjson`の`decided`イベントとしても流し、GUIが「なぜこのProviderか」を開示可能にする / 声は不変・既定は畳む — ADR-0011根拠3の監査可能性を表示経路へ延伸。Accepted・配備済み）
+- [ADR-0041](docs/decisions/ADR-0041-out-of-order-perception.md) — 順序外の知覚は正典に立ち返る（遅延知覚がlive射影を減衰重み1.0で汚し無期限に残る実測 / バッチが既知覚より古ければlive Applyを捨ててrebuild — forgetの自動rebuildと同じ姿勢。Accepted・配備済み）
+- [ADR-0042](docs/decisions/ADR-0042-split-starvation-and-lexical-shadowing.md) — Splitの飢餓と辞書順の遮蔽（均衡混合でexcess surprisalが発火せず、同粒度tie-breakの辞書順でlang=系Connectionが系統的に読まれない — 11連敗Providerが最頻選択される実測 / 対案5件を実測で序列づけ、対案2「選ぶのは一つ、拒否は同粒度の全員」を先行適用。ADR-0013 Decision 2改版。Accepted（対案2）・配備済み。対案3=Split召喚のVoI配線は別ADRの論点として残る）
 - [ADR-0043](docs/decisions/ADR-0043-auto-by-default.md) — 既定をautoへ（実台帳41セッション全てclaude-code・tomo.decided 0件＝判断の器官が既定経路で一度も呼ばれていない実測 / do・chatの`--provider`既定をautoにし、候補は起動できるProviderに限る＝環境の不備をProviderの能力の証拠にしない / 起動できなかった実行は非ゼロ終了・経験にもしない / humanは知っている文脈でのみ候補 / GUIはProviderを明示的に持ち既定auto — ADR-0010 Decision 1・ADR-0018 Decision 2を改版。Accepted・配備済み）
 - [ADR-0044](docs/decisions/ADR-0044-provider-quota-observation.md) — Providerの残量観測（公式手段は無いが、自分のOAuthトークンでベンダー自身のusage端点を読む経路が実在する〈着想元CodexBar・MIT・独立実装〉— 所有者許可の下で実測済み・両端点200 / claudeの資格情報はプロファイル依存Keychain（サービス名=sha256(configDir)先頭8桁）・取り違えは401でなく429に化ける実測→エラーに資格情報の出所を必ず載せる / 経路A採用を推奨・PTYスクレイプとブラウザcookie読みとcodexbar依存は却下 / 取れないときは「不明」＝推定値を出さない・決定則には混ぜない / curiosity予算への残量ゲートと`quota.observed`記帳は将来ADRへ保留。Accepted・経路A採用し`status --view json`／人間view／GUIへ配線済み・実端点疎通のみ所有者確認待ち）
 - [ADR-0045](docs/decisions/ADR-0045-stage-needs-a-real-choice.md) — 鋭さは選択肢が無ければ測れない（候補1つだとWobbleが構造的に常に0で「おとな」へ素通り・2Providerだと90セッションでも未到達の正反対の病理を合成dogfoodで実測 / 鋭さは競争のある島でのみ測る・較正判定に標本数を要求〈ThetaCalMin=8.0実測較正〉・S5「あいぼう」は自分との比較を知っていること — ADR-0017の3ゲートを精密化。Accepted・配備済み）
