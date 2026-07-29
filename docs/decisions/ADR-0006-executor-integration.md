@@ -4,6 +4,12 @@
 - Date: 2026-07-15
 - 関連: [ADR-0004](ADR-0004-tech-stack.md)（Decision 4 段階論）, [EXECUTION_MODEL.md](../core/EXECUTION_MODEL.md), [SCHEMA.md](../design/SCHEMA.md)（R3/R4）, [ADR-0003](ADR-0003-outcome-and-preference.md)（第1層Outcome）
 
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - Decision 3 → [ADR-0052](ADR-0052-first-layer-is-observed.md)
+<!-- 改版:end -->
+
 ---
 
 ## Context

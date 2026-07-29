@@ -4,6 +4,7 @@
   ただしデフォルトがその設定なだけで、オプションで意図的に消すまで常駐も可能に」。
   `status` 単体は約3秒の一瞥で消える挙動でよい（選択肢A）と確認）
 - Date: 2026-07-17
+- 改版: ADR-0025 D2
 - 関連: [ADR-0025](ADR-0025-face-autolaunch.md)（Decision 2「明示的に止めない限り常駐」の
   *常駐* の意味を本ADRが分化させる）, [ADR-0020](ADR-0020-face-window.md)（顔窓＝第二のレンダラ・
   DBは読み取りのみ）, [ADR-0021](ADR-0021-onboarding.md)（config.json / 解決順 flag > env > config）,

@@ -3,12 +3,20 @@
 - Status: **Accepted**（2026-07-17、本人決定「描画を止める方向で。ただし設定で明示的に
   止めない限り、tomobit起動時にfaceも起動することをデフォルトに」）
 - Date: 2026-07-17
+- 改版: ADR-0008 D4, ADR-0020 D1
 - 関連: [ADR-0008](ADR-0008-appearance.md)（Decision 4の端末描画を本ADRが廃止）,
   [ADR-0020](ADR-0020-face-window.md)（Decision 1「端末レンダラは廃止しない」を改版）,
   [ADR-0021](ADR-0021-onboarding.md)（config.json / `tomobit setup` — 配線は経験ではない）,
   [ADR-0027](ADR-0027-face-lifetime.md)（本ADR Decision 2の「明示的に止めない限り常駐」の
   *常駐* を「出すか」＝`face_auto_launch` と「残すか」＝`face_resident` の二軸へ分化。本ADRは
   「窓を出す」規律として存続し、ADR-0027 が「出した窓の寿命」を足す）
+
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - Decision 2 → [ADR-0027](ADR-0027-face-lifetime.md)
+> - Decision 2 → [ADR-0032](ADR-0032-pipe-chat-first-class.md)
+<!-- 改版:end -->
 
 ---
 

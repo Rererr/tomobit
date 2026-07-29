@@ -6,6 +6,12 @@
   [ADR-0007](ADR-0007-curiosity-question.md)（発火は2つ目のAdapter後）,
   [SCHEMA.md](../design/SCHEMA.md)（R3: Provider名は道具名のみ）
 
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - Decision 1 → [ADR-0043](ADR-0043-auto-by-default.md)
+<!-- 改版:end -->
+
 ---
 
 ## Context

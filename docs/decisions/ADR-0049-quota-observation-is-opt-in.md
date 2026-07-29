@@ -3,6 +3,7 @@
 - Status: **Accepted**（2026-07-25 起草・実装。OSS公開の準備中に、ADR-0044の
   「所有者許可の下で実測済み」という前提が公開後は成立しないと判明したため）
 - Date: 2026-07-25
+- 改版: ADR-0044
 - 関連: [ADR-0044](ADR-0044-provider-quota-observation.md)（Provider残量の観測・経路A採用）,
   [ADR-0018](ADR-0018-experience-sovereignty.md)（経験主権 — 所有者だけが動かせる）,
   [ADR-0021](ADR-0021-onboarding.md)（配線は経験ではない / `tomobit setup`）,

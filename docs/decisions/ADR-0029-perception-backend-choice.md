@@ -2,6 +2,7 @@
 
 - Status: **Accepted**
 - Date: 2026-07-18
+- 改版: ADR-0004 D3
 - 関連: [ADR-0004](ADR-0004-tech-stack.md)（ローカルOllamaの選定 — 本ADRが「ローカル知覚サーバー」へ一般化）,
   [ADR-0005](ADR-0005-perception-model-and-schema-boundary.md)（schema=形・プロンプト=意味 — 本ADRが境界を拡張）,
   [ADR-0021](ADR-0021-onboarding.md)（setupの配線質問）

@@ -4,6 +4,7 @@
   同日の実台帳の観測で否定され、Decision を保ったまま**理由を差し替えて**承諾された
   — Context の訂正注記と「実測」を参照）
 - Date: 2026-07-26
+- 改版: ADR-0023 D5
 - 関連: [ADR-0023](ADR-0023-task-split.md)（Decision 5 を改訂 — `do` の親に問いが1つ乗る）,
   [ADR-0028](ADR-0028-auto-split-parallel.md)（Decision 5 の却下対案「クレジット割当」を**逆向きから**回収する）,
   [ADR-0003](ADR-0003-outcome-and-preference.md)（Outcomeは三層 / 能力と好みの二重Connection — 本ADRの論理の親）,

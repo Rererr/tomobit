@@ -2,6 +2,7 @@
 
 - Status: **Accepted**（2026-07-24 起草。所有者の実感「気づいたらもう"おとな"になっていて、育てている感覚にならない」を合成dogfoodで実測した結果。同日、実台帳が「おとな」→「わかもの」に後退することの了承つきで所有者が配備裁定。配備後の実測でも stage 3「わかもの」を確認）
 - Date: 2026-07-24
+- 改版: ADR-0017
 - 関連: [ADR-0017](ADR-0017-stage-function-calibration.md)（改版元 — Decision の3ゲートを本ADRが精密化）,
   [ADR-0008](ADR-0008-appearance.md)（ステージはView・保存しない。Decision 1/3/4 は不変）,
   [ADR-0002](ADR-0002-surprise-and-split-judgment.md)（較正の計測器）,

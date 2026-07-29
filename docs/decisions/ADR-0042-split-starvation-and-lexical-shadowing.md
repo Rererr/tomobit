@@ -2,6 +2,7 @@
 
 - Status: **Accepted（対案2）**（2026-07-24 起草・実測5案比較と一般性スイープ5形状ののち自律セッションが対案2を先行マージ、同日所有者が配備裁定で追認。対案3=Split召喚のVoI配線は別ADRの論点として残る）
 - Date: 2026-07-24
+- 改版: ADR-0013 D2
 - 関連: [ADR-0002](ADR-0002-surprise-and-split-judgment.md)（Split トリガ = excess surprisal）,
   [ADR-0012](ADR-0012-decision-rule-thompson-sampling.md)（悲観ゲート）,
   [ADR-0013](ADR-0013-prior-inheritance-mean-only.md)（Decision 2: 判断は最細一致のみを読む）,

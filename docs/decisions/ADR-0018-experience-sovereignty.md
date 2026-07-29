@@ -4,6 +4,12 @@
 - Date: 2026-07-15
 - 関連: [VISION.md](../core/VISION.md), [ADR-0004](ADR-0004-tech-stack.md)（単一SQLiteファイル）, [ADR-0006](ADR-0006-executor-integration.md)（Human Executor）, [ADR-0012](ADR-0012-decision-rule-thompson-sampling.md), [ADR-0015](ADR-0015-reflection.md)
 
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - Decision 2 → [ADR-0043](ADR-0043-auto-by-default.md)
+<!-- 改版:end -->
+
 ---
 
 ## Context

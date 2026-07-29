@@ -2,7 +2,14 @@
 
 - Status: **Accepted**
 - Date: 2026-07-15
+- 改版: ADR-0008 D2
 - 関連: [ADR-0008](ADR-0008-appearance.md)（改版元 — Decision 2のみ置換）, [ADR-0002](ADR-0002-surprise-and-split-judgment.md)（Surprise）, [ADR-0016](ADR-0016-curiosity-priority-voi.md)（揺らぎ）, [ADR-0003](ADR-0003-outcome-and-preference.md)（preference）
+
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - 決定全体 → [ADR-0045](ADR-0045-stage-needs-a-real-choice.md)
+<!-- 改版:end -->
 
 ---
 

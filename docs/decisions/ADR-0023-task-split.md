@@ -9,6 +9,14 @@
   [ADR-0018](ADR-0018-experience-sovereignty.md)（humanの台帳）,
   [EXECUTION_MODEL.md](../core/EXECUTION_MODEL.md), [SCHEMA.md](../design/SCHEMA.md)（R4）
 
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - Decision 1 → [ADR-0028](ADR-0028-auto-split-parallel.md)
+> - Decision 4 → [ADR-0028](ADR-0028-auto-split-parallel.md)
+> - Decision 5 → [ADR-0051](ADR-0051-orchestration-is-judged.md)
+<!-- 改版:end -->
+
 ---
 
 ## Context

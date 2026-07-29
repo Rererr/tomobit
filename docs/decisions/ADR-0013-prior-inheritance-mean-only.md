@@ -4,6 +4,12 @@
 - Date: 2026-07-15
 - 関連: [ADR-0001](ADR-0001-connection-granularity.md), [ADR-0003](ADR-0003-outcome-and-preference.md), [ADR-0004](ADR-0004-tech-stack.md), [ADR-0012](ADR-0012-decision-rule-thompson-sampling.md), [CONNECTION_ENGINE.md](../core/CONNECTION_ENGINE.md)
 
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - Decision 2 → [ADR-0042](ADR-0042-split-starvation-and-lexical-shadowing.md)
+<!-- 改版:end -->
+
 ---
 
 ## Context

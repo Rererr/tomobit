@@ -3,6 +3,7 @@
 - Status: **Accepted**（2026-07-19、tomobit-gui BACKLOG「本体側の設計待ち」3件の解決。
   制約: VISION 内・既存 pipe 利用（テスト・スクリプト）の後方互換維持・台帳とSCHEMAは不変）
 - Date: 2026-07-19
+- 改版: ADR-0025 D2
 - 関連: [ADR-0022](ADR-0022-chat-session.md)（Decision 3「非TTYは1行=1ターン」を本ADR Decision 2 が拡張）,
   [ADR-0024](ADR-0024-chat-ux.md)（Decision 5/6 表示専用チャネル — 本ADRはその機械可読の口を足す）,
   [ADR-0025](ADR-0025-face-autolaunch.md)（Decision 2 の TTY ゲートを本ADR Decision 3 が「env 沈黙時の既定」へ改版）,

@@ -14,6 +14,12 @@
   [ADR-0004](ADR-0004-tech-stack.md)（低依存方針・Phase 2デーモン構想）,
   [ADR-0018](ADR-0018-experience-sovereignty.md)（単一SQLite・ローカル完結）
 
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - Decision 1 → [ADR-0025](ADR-0025-face-autolaunch.md)
+<!-- 改版:end -->
+
 ---
 
 ## Context

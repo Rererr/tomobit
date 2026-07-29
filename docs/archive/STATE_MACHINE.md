@@ -1,3 +1,15 @@
+> **退避（2026-07-30）**: この文書は 2026-07-15 の初期構想で、**実装されたことが一度も無い**。
+> ここに出てくる `Workflow` / `WorkflowStep` / `Planning`・`Executing` という状態、
+> Shell/Git/Docker/MCP/Human Approval の各 Executor は、`internal/` にも `cmd/` にも
+> 1つも存在しない。実際に育ったのは Provider → Executor → Runtime の実行層
+> （[EXECUTION_MODEL.md](../core/EXECUTION_MODEL.md)）と、chat セッション・タスク分割・
+> duel・作業場隔離・許可フローという別の骨格である（ADR-0022 / 0023 / 0026 / 0028 /
+> 0050 / 0051 / 0053 / 0054 / 0056）。
+>
+> ADRに追随できていない現行文書ではなく、**採られなかった構想**なので、改訂せず退避する。
+> 「Tomobitが実行できる最小単位のアクション」という WorkflowStep の定義は、
+> 当時どこまで一般的な自動化基盤として考えていたかの記録として残す価値がある。
+
 # STATE_MACHINE.md
 
 # Tomobit State Machine

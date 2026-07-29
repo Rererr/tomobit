@@ -2,6 +2,7 @@
 
 - Status: **Accepted**
 - Date: 2026-07-21
+- 改版: ADR-0033 D2 D5
 - 関連: [ADR-0033](ADR-0033-organ-of-forgetting.md)（忘却の器官 — 本ADRはその Decision 2/5 の到達範囲を確定する）,
   [ADR-0018](ADR-0018-experience-sovereignty.md)（経験主権）,
   [SCHEMA.md](../design/SCHEMA.md)（D4 版数共存 / experiences_current の選択規則）,

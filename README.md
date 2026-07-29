@@ -55,7 +55,8 @@ tomobit          # 相棒ビュー → そのまま対話へ。単発なら `tom
 
 ### 実行アーキテクチャ
 - [docs/core/EXECUTION_MODEL.md](docs/core/EXECUTION_MODEL.md) — Intent → Plan → Capability → Provider → Executor → Runtime
-- [docs/core/STATE_MACHINE.md](docs/core/STATE_MACHINE.md) — 全体ライフサイクル
+- 全体ライフサイクルの初期構想（Workflow / WorkflowStep）は実装されず、
+  [docs/archive/STATE_MACHINE.md](docs/archive/STATE_MACHINE.md) へ退避した
 
 ### 実装設計
 - [docs/design/SCHEMA.md](docs/design/SCHEMA.md) — スキーマ v1.0（**確定** — D1〜D11・R1〜R4レビュー済み）

@@ -4,6 +4,12 @@
 - Date: 2026-07-15
 - 関連: [ADR-0001](ADR-0001-connection-granularity.md)〜[ADR-0003](ADR-0003-outcome-and-preference.md), [EXECUTION_MODEL.md](../core/EXECUTION_MODEL.md)
 
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - Decision 3 → [ADR-0029](ADR-0029-perception-backend-choice.md)
+<!-- 改版:end -->
+
 ---
 
 ## Context

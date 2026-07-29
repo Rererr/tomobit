@@ -4,6 +4,7 @@
   主観Feedbackを廃止し客観信号のみに（Decision 5）、「採用確認」の呼称を
   「Feedback」へ統一（Consequences））
 - Date: 2026-07-17
+- 改版: ADR-0023 D1 D4
 - 関連: [ADR-0023](ADR-0023-task-split.md)（タスク分割 — 本ADRが Decision 1「opt-in」と
   Decision 4「逐次のみ」を改める。深さ1・intent分解・実行者継承・記帳は不変）,
   [ADR-0026](ADR-0026-ab-duel.md)（A/B実走 — 並走機構の流用元・「速度目的の並列化」の一線の読み替え相手）,
@@ -14,6 +15,13 @@
   [ADR-0007](ADR-0007-curiosity-question.md)（好奇心予算 — 並走ゲートはその外）,
   [ADR-0018](ADR-0018-experience-sovereignty.md)（humanもExecutor）,
   [VISION.md](../core/VISION.md), [SCHEMA.md](../design/SCHEMA.md)（R4: task.split）
+
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - Decision 3 → [ADR-0056](ADR-0056-independence-is-trusted.md)
+> - Decision 5 → [ADR-0054](ADR-0054-a-child-is-the-breakdown.md)
+<!-- 改版:end -->
 
 ---
 

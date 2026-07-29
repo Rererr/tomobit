@@ -107,6 +107,14 @@ Session
 Sessionは履歴であり、
 まだ知識ではない。
 
+会話はSessionの単位ではない。**会話は入力の器で、記帳の単位はタスク**である
+（[ADR-0022](../decisions/ADR-0022-chat-session.md)）。1つの対話の中で区切るたびに
+Sessionが閉じ、次が始まる。
+
+Sessionは木になる。Providerがタスクを分ければ子Sessionが生まれ、
+子は親の作業場と親が選んだ相手を継ぐ
+（[ADR-0023](../decisions/ADR-0023-task-split.md) / [ADR-0054](../decisions/ADR-0054-a-child-is-the-breakdown.md)）。
+
 ---
 
 # Experience
@@ -163,6 +171,25 @@ Connectionを育てる。
 
 ---
 
+# Session と Experience は 1:1 ではない
+
+Sessionが閉じても、Experienceになるとは限らない。
+
+- **分割の子は経験にしない。** 子は親タスクの内訳であって、独立した発注ではない。
+  決定はタスクにつき1回で、人は子を1つも見ていない。イベントは残るが、
+  Connectionは動かない（[ADR-0054](../decisions/ADR-0054-a-child-is-the-breakdown.md)）
+- **duel の子だけが例外。** A/B実走の2本は、人が結果を見て判定するので、
+  それぞれが独立した発注として経験になる（[ADR-0026](../decisions/ADR-0026-ab-duel.md)）
+- **起動できなかった実行も経験にしない。** 環境の不備をProviderの能力の証拠にしないため
+  （[ADR-0043](../decisions/ADR-0043-auto-by-default.md)）
+- **配線は経験ではない。** 働く場所・読み取り先・許可は台帳に書かない
+  （[ADR-0047](../decisions/ADR-0047-workspace-is-wiring.md) / [ADR-0053](../decisions/ADR-0053-permission-is-asked.md)）
+
+「片側だけの証拠」を作らないための規律である。失敗だけが `y=0` で乗る形にすると、
+成功率95%のProviderが、一度も計測されていないProviderより下に並ぶ。
+
+---
+
 # Context
 
 Experienceには必ずContextを含める。
@@ -206,6 +233,17 @@ Outcomeは三層の信号から構成される。
 第3層は聞かれた時だけ。
 
 **判定疲れを人間に負わせない。**
+
+三層は当初カタログだけがあり、第1層と第2層は長く書き手を持たなかった。
+
+- **第1層**: tomobit自身がテストを走らせて観測する。Providerに宣言はさせない
+  （自分の成績表を書かせない）。走らせ方は config の「働く場所 → コマンド」で、
+  書かなければ1バイトも動かない（[ADR-0052](../decisions/ADR-0052-first-layer-is-observed.md)）
+- **第2層は「上書き」ではなく拒否権**である。機械が人より上に立つ場所は
+  「赤テスト」ただ1つなので、第2層が要るのは**赤 × 「1=文句なし」**が衝突した1点に特定できる。
+  そこでだけ1問増え、`tomobit verdict <sid> up|down|clear` が「まだ言えない」を受ける。
+  観測は消さず、赤と判定が経験の中で共存する
+  （[ADR-0055](../decisions/ADR-0055-verdict-is-a-veto.md)）
 
 加えて、
 

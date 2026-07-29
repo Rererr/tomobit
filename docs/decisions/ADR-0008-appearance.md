@@ -10,6 +10,13 @@
   [ADR-0007](ADR-0007-curiosity-question.md)（「保存された属性は嘘をつく」の先例）,
   [CONNECTION_ENGINE.md](../core/CONNECTION_ENGINE.md)（Lifecycle is a View）
 
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - Decision 2 → [ADR-0017](ADR-0017-stage-function-calibration.md)
+> - Decision 4 → [ADR-0025](ADR-0025-face-autolaunch.md)
+<!-- 改版:end -->
+
 ---
 
 ## Context

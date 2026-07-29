@@ -10,6 +10,13 @@
   [ADR-0005](ADR-0005-perception-model-and-schema-boundary.md)（知覚の版数）,
   [VISION](../core/VISION.md)（Experience is the Asset）
 
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - Decision 2 → [ADR-0034](ADR-0034-forgetting-reach.md)
+> - Decision 5 → [ADR-0034](ADR-0034-forgetting-reach.md)
+<!-- 改版:end -->
+
 ---
 
 ## Context

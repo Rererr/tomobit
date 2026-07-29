@@ -2,6 +2,7 @@
 
 - Status: **Accepted**（2026-07-24 起草・実台帳の実測が発端。同日、選ばれるProviderが変わることの了承つきで所有者が配備裁定 — ADR-0038 / ADR-0042 と同じ手続き）
 - Date: 2026-07-24
+- 改版: ADR-0010 D1, ADR-0018 D2
 - 関連: [ADR-0010](ADR-0010-codex-adapter.md)（Decision 1 の「既定 claude-code」を本ADRが改版 — 当該Decisionが自ら定めた解除条件に到達した）,
   [ADR-0012](ADR-0012-decision-rule-thompson-sampling.md)（決定則。Decision 2 の非対称性が本ADRの計測対象）,
   [ADR-0007](ADR-0007-curiosity-question.md)（好みの証拠を作る器官 その1）,

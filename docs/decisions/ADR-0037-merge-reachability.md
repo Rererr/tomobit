@@ -2,11 +2,18 @@
 
 - Status: **Accepted（ただし Decision 2 の前提は実測で崩れた — 下記「実測による訂正」）**
 - Date: 2026-07-21
+- 改版: ADR-0002 D2, ADR-0012 D3
 - 関連: [ADR-0012](ADR-0012-decision-rule-thompson-sampling.md)（Decision 3: 名誉回復は減衰だけで行う）,
   [ADR-0013](ADR-0013-prior-inheritance-mean-only.md)（Decision 1: 平均だけ継ぎ、確信は継がない）,
   [ADR-0002](ADR-0002-surprise-and-split-judgment.md)（Split/Merge のヒステリシス）,
   [ADR-0001](ADR-0001-connection-granularity.md)（Split で子が生まれる）,
   [CONNECTION_ENGINE.md](../core/CONNECTION_ENGINE.md)（Dormant / Revived）
+
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - Decision 1 → [ADR-0038](ADR-0038-gate-under-inherited-priors.md)
+<!-- 改版:end -->
 
 ---
 

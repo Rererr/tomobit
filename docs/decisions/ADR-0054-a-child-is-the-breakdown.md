@@ -2,6 +2,7 @@
 
 - Status: **Accepted**（2026-07-27 起草・所有者が方針として選択。派生の決めは下記「所有者が決めたこと / 起草者が決めたこと」を参照）
 - Date: 2026-07-27
+- 改版: ADR-0028 D5
 - 関連: [ADR-0023](ADR-0023-task-split.md)（分割プロトコル）,
   [ADR-0028](ADR-0028-auto-split-parallel.md)（Decision 5: 子は客観信号だけで経験になる — **本ADRが撤回する**）,
   [ADR-0043](ADR-0043-auto-by-default.md)（auto を既定へ — 本ADRは auto が効く場所を親に限る）,

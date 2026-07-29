@@ -2,6 +2,7 @@
 
 - Status: **Accepted**（Decision 1 は先行実装済み。Decision 2 は 2026-07-21 に所有者が採用）
 - Date: 2026-07-21
+- 改版: ADR-0012 D5
 - 関連: [PERCEPTION_ENGINE.md](../core/PERCEPTION_ENGINE.md)（Task Perception — 本ADRが扱う未実装部分）,
   [ADR-0011](ADR-0011-meaning-by-model-judgment-by-math.md)（Decision 3: タスク記述→extractor→Context属性トークン→Decision Engine）,
   [ADR-0013](ADR-0013-prior-inheritance-mean-only.md)（Decision 2: 判断は最細一致のみを読む）,

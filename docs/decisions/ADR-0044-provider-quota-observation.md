@@ -24,6 +24,12 @@
   [ADR-0012](ADR-0012-decision-rule-thompson-sampling.md)（決定則は台帳の上に建つ）,
   [ADR-0039](ADR-0039-status-machine-view.md)（機械viewはレンダラへのデータ供給）
 
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - 決定全体 → [ADR-0049](ADR-0049-quota-observation-is-opt-in.md)
+<!-- 改版:end -->
+
 ---
 
 ## Context

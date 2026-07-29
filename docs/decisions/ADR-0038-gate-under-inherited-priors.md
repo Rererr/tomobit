@@ -2,6 +2,7 @@
 
 - Status: **Accepted**（2026-07-21 所有者が採用を決定）
 - Date: 2026-07-21
+- 改版: ADR-0012 D3, ADR-0037 D1
 - 関連: [ADR-0012](ADR-0012-decision-rule-thompson-sampling.md)（Decision 3: 名誉回復は減衰だけで行う / 悲観ゲートの自己参照性）,
   [ADR-0013](ADR-0013-prior-inheritance-mean-only.md)（Decision 1: 平均だけ継ぎ、確信は継がない）,
   [ADR-0037](ADR-0037-merge-reachability.md)（merge は救済しない — 実測で確定）,

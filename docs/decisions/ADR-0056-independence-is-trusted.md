@@ -2,6 +2,7 @@
 
 - Status: **Accepted**（2026-07-27 起草・壁打ちから設計・所有者が「信じる」を選択・実装済み）
 - Date: 2026-07-27
+- 改版: ADR-0028 D3
 - 関連: [ADR-0028](ADR-0028-auto-split-parallel.md)（Decision 3 の並走ゲート — **本ADRが撤回する**。Decision 2 の群宣言と Decision 4 の実行モデルは不変）,
   [ADR-0023](ADR-0023-task-split.md)（分割プロトコル）,
   [ADR-0054](ADR-0054-a-child-is-the-breakdown.md)（子は経験にならない — 本ADRのリスク計算式を1段軽くした）,

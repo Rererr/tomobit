@@ -3,6 +3,7 @@
 - Status: **Accepted**（2026-07-26 起草・本人承諾・実装済み。同日の使い捨て台帳で
   第1層が初めて Connection を動かすところまで実機確認 — 下記「実測」）
 - Date: 2026-07-26
+- 改版: ADR-0006 D3
 - 関連: [ADR-0003](ADR-0003-outcome-and-preference.md)（Outcomeは三層 — 本ADRが第1層を初めて実装する）,
   [ADR-0006](ADR-0006-executor-integration.md)（Decision 3 が `test.result` を理由つきで先送りした — 本ADRがその理由を無効化する）,
   [ADR-0047](ADR-0047-workspace-is-wiring.md)（働く場所は配線であって経験ではない — 本ADRの論理の親）,
