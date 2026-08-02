@@ -350,9 +350,10 @@ usage:
                    config、更にその既定はconfig未配線ならOSごとに解決(ADR-0029)。
                    providerが「大きすぎる/独立に分けられる」と判断すれば分割提案を
                    受けてサブタスクを実行(ADR-0023/0028、常時ON。--plan・humanでは
-                   付けない。config split_protocol=false で止める)。独立群を宣言されたら
-                   実行直前に y/N で並走可否を聞く(既定N=全逐次。概算コストを実測
-                   中央値から提示。並走ストリームは[n:provider]表示。非TTYは常に逐次)
+                   付けない。config split_protocol=false で止める)。独立宣言された
+                   群は訊かずに並走する(ADR-0056)。概算コストは直近実測の中央値
+                   × 並走幅を始める前に一度だけ告知。並走ストリームは[n:provider]
+                   表示。config parallel_subtasks=false で止める
   tomobit record   --session <id> --type <event.type> [--json '{...}']
   tomobit perceive [--backend ollama|mlx-lm] [--model <name>] [--url <addr>]
   tomobit rebuild
