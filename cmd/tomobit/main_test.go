@@ -23,25 +23,33 @@ import (
 	"github.com/Rererr/tomobit/internal/subtask"
 )
 
+// askedFeedback runs the closing Feedback on a session nobody reacted in — the
+// `do` boundary's shape (ADR-0057 Consequences: do の締めは1バイトも変わらない),
+// and the fallback shape of a chat whose reaction was cleared.
+func askedFeedback(t *testing.T, answer string) map[string]any {
+	t.Helper()
+	return feedbackPayload(openTestStore(t), "unreacted", bufio.NewReader(strings.NewReader(answer)), io.Discard)
+}
+
 // The Feedback question keeps the adopted/reverted payload keys (呼称の統一
 // ADR-0028 changed the name, not the schema): 1/2/3 still map to the same
 // y-value writes rebuild reads.
 func TestFeedbackPayloadOneMeansAsIs(t *testing.T) {
-	got := feedbackPayload(bufio.NewReader(strings.NewReader("1\n")), io.Discard)
+	got := askedFeedback(t, "1\n")
 	if got["adopted"] != "as-is" || got["reverted"] != false {
 		t.Errorf("1: got %v", got)
 	}
 }
 
 func TestFeedbackPayloadTwoMeansWithEdits(t *testing.T) {
-	got := feedbackPayload(bufio.NewReader(strings.NewReader("2\n")), io.Discard)
+	got := askedFeedback(t, "2\n")
 	if got["adopted"] != "with-edits" || got["reverted"] != false {
 		t.Errorf("2: got %v", got)
 	}
 }
 
 func TestFeedbackPayloadThreeMeansReverted(t *testing.T) {
-	got := feedbackPayload(bufio.NewReader(strings.NewReader("3\n")), io.Discard)
+	got := askedFeedback(t, "3\n")
 	if got["adopted"] != "" || got["reverted"] != true {
 		t.Errorf("3: got %v", got)
 	}
@@ -51,14 +59,14 @@ func TestFeedbackPayloadThreeMeansReverted(t *testing.T) {
 // a bare Enter is "まだ言えない", not top-grade praise — the ledger learns
 // nothing rather than being inflated by a mindless keypress.
 func TestFeedbackPayloadEnterCarriesNoSignal(t *testing.T) {
-	got := feedbackPayload(bufio.NewReader(strings.NewReader("\n")), io.Discard)
+	got := askedFeedback(t, "\n")
 	if len(got) != 0 {
 		t.Errorf("Enter: got %v, want empty payload", got)
 	}
 }
 
 func TestFeedbackPayloadUnknownCarriesNoSignal(t *testing.T) {
-	got := feedbackPayload(bufio.NewReader(strings.NewReader("x\n")), io.Discard)
+	got := askedFeedback(t, "x\n")
 	if len(got) != 0 {
 		t.Errorf("unknown: got %v, want empty payload", got)
 	}
@@ -68,7 +76,7 @@ func TestFeedbackPayloadUnknownCarriesNoSignal(t *testing.T) {
 // stdin, e.g. a headless invocation with no terminal attached) fabricating a
 // verdict nobody confirmed — it must stay an empty payload, never a grade.
 func TestFeedbackPayloadEOFCarriesNoSignal(t *testing.T) {
-	got := feedbackPayload(bufio.NewReader(strings.NewReader("")), io.Discard)
+	got := askedFeedback(t, "")
 	if len(got) != 0 {
 		t.Errorf("EOF: got %v, want empty payload", got)
 	}

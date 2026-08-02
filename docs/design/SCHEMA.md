@@ -398,6 +398,22 @@ R4. eventsのtype初期カタログ（14種で確定）
       後から区別できるようにするため。現時点では connections.kind に対応する
       賭け先を作らない（標本が貯まるまで信号だけ貯める — ADR-0051 Decision 1）。
       知覚は読まないので extractor_ver のバンプ不要
+    - user.reaction（ADR-0057）: 会話の中へ先に置かれた**締めの答え**。
+      payload = {n, word}。word は "up" | "meh" | "down" | "clear"、n は
+      turn.started / task.turn と同じターン番号（**n は検証しない** — 範囲外の
+      番号は台帳に残るだけで Outcome を歪めない）。**第2層 user.verdict では
+      ない**: 判定は機械の観測への拒否権なので、観測が立つ境界より前には
+      立てられない（ADR-0055 が却下した「開いているタスクへの判定」は生きて
+      いる）。ここで置かれるのは task.finished の adopted/reverted そのもので、
+      上書きの相手が存在せず**最初から人しか持っていない**一次情報である。
+      締めが読むのは**最後の1件の word だけ**で、up/meh/down なら訊かずに
+      task.finished の payload にする（訳の対応は区切りの問いの 1/2/3 と
+      同じ1枚の表から引く）。"clear" は取り消し＝「答えない」へ戻すので、
+      1件も無い時と同じく従来どおり訊く。n を残すのは「会話のどこで気が
+      変わったか」が Reality だからで、Outcome の粒度は1タスク1つのまま
+      （task.turn が「1セッション=1タスクのまま往復を残す」と決めたのと同じ）。
+      知覚は読まない（Outcome は task.finished から来る）ので
+      extractor_ver のバンプ不要
 
     列追加（ADR-0014）: experiences.plan（機械属性 — ハーネス自身が知って
     いる採用Plan。plan Connectionの賭け先キー）

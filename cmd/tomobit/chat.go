@@ -250,7 +250,7 @@ func cmdChat(args []string) error {
 		stream = newNDJSONStream(os.Stdout)
 		ed.SetReader(flushReader{r: os.Stdin, flush: stream.flushAwait})
 		out = noteWriter{s: stream}
-		stream.emit(map[string]any{"type": "init", "v": viewVersion})
+		stream.emit(initEvent())
 	}
 
 	// ensureClaudeProfile still writes its prompt to os.Stdout directly, but that
@@ -411,6 +411,11 @@ func (c *chat) command(line string) (done bool, err error) {
 		// only bites with --provider auto, where it is the stakes of the
 		// decision (ADR-0012's n).
 		c.setWiring(&c.size, arg, "size", nil)
+	case "/react":
+		// 締めの答えを先に置く口 (ADR-0057)。判定 (第2層) ではないので、
+		// setWiring のようにタスク境界で断ることはしない — むしろ走行中にしか
+		// 置けない。
+		return false, c.react(arg)
 	case "/status":
 		return false, showStatus(c.out, c.s, nil)
 	case "/help":
@@ -424,7 +429,7 @@ func (c *chat) command(line string) (done bool, err error) {
 // completableCommands are what Tab completes for the leading token. /quit is
 // an alias of /exit and stays out — completing to one spelling is enough, and
 // two candidates for the same action would only block the unique-commit path.
-var completableCommands = []string{"/new", "/provider", "/cd", "/add-dir", "/cap", "/size", "/status", "/help", "/exit"}
+var completableCommands = []string{"/new", "/provider", "/cd", "/add-dir", "/cap", "/size", "/react", "/status", "/help", "/exit"}
 
 // complete is the editor's Completer (ADR-0024 Decision 4): the leading token
 // completes to a command, and the second token of /provider or /size to that
@@ -971,6 +976,7 @@ func chatUsage(w io.Writer) {
 /add-dir <dir>    その外で扱わせる場所を足す (clear で全部外す・引数なしで一覧)
 /cap <name>       次のタスクのcapability (既定 implement)
 /size <s|m|l>     次のタスクの判断の温度 (--provider auto のとき効く)
+/react <n> <word> nターン目への反応 (up|meh|down|clear・締めで訊かれない)
 /status           相棒ビュー
 /help             これ
 /exit             終了 (Ctrl-D も同じ)
@@ -1264,6 +1270,19 @@ func (c *chat) sayln(s string) {
 // 1): a consumer ignores unknown types, so adding one is compatible; changing
 // or dropping a meaning bumps this.
 const viewVersion = 1
+
+// initEvent opens the view stream (ADR-0032 Decision 1) and hands the consumer
+// the reaction vocabulary it may offer (ADR-0057 Decision 3): the words are the
+// body's, the look is the consumer's. A consumer talking to an older tomobit
+// receives no `reactions` and shows no reaction mouth — degradation is silence,
+// the same treatment `decided` / `growth` get.
+//
+// Why not let each entry point build its own init map: the emit site and the
+// tests that stand in for it would drift, and a consumer would be told a
+// different vocabulary depending on which door it came through.
+func initEvent() map[string]any {
+	return map[string]any{"type": "init", "v": viewVersion, "reactions": reactionVocabulary()}
+}
 
 // validateViewFlag checks --view and its target (ADR-0032 Decision 1). "" is
 // the plain-text default; "ndjson" the machine stream, which refuses a TTY —

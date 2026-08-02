@@ -46,7 +46,7 @@ func newViewChat(t *testing.T, s *store.Store, a *threadAdapter, stdin string) (
 		providerName: "fake", capability: "implement",
 		extractor: &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}},
 	}
-	stream.emit(map[string]any{"type": "init", "v": viewVersion})
+	stream.emit(initEvent())
 	return c, buf
 }
 
@@ -357,7 +357,7 @@ func TestChatViewAutoRoutingStaysJSON(t *testing.T) {
 		providerName: "auto", capability: "implement",
 		extractor: &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}},
 	}
-	stream.emit(map[string]any{"type": "init", "v": viewVersion})
+	stream.emit(initEvent())
 
 	if err := c.turn("implement it"); err != nil {
 		t.Fatal(err)
@@ -403,7 +403,7 @@ func TestChatViewEmitsDecidedEventMatchingLedger(t *testing.T) {
 		providerName: "auto", capability: "implement",
 		extractor: &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}},
 	}
-	stream.emit(map[string]any{"type": "init", "v": viewVersion})
+	stream.emit(initEvent())
 
 	if err := c.turn("implement it"); err != nil {
 		t.Fatal(err)

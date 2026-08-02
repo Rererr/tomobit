@@ -1031,7 +1031,7 @@ func finishTask(s *store.Store, sid string, in *bufio.Reader, out io.Writer, jud
 	// produced something the user keeps.
 	payload := map[string]any{}
 	if judged {
-		payload = feedbackPayload(in, out)
+		payload = feedbackPayload(s, sid, in, out)
 	}
 	if err := s.AppendEvent(sid, "task.finished", time.Now().UnixMilli(), payload); err != nil {
 		return err
@@ -1855,32 +1855,48 @@ func providerErrorPayload(runErr error, result executor.Result) (payload map[str
 	return map[string]any{"message": msg}, true
 }
 
-// feedbackPayload asks the one closing Feedback question and maps the answer
-// to a task.finished payload (ADR-0006 Decision 4; 呼称の統一 ADR-0028). The
-// question is a verdict on the session's quality, not a retention action: by
-// the time a do finishes the user has already iterated in-dialogue until
+// feedbackPayload produces the closing task.finished payload (ADR-0006
+// Decision 4; 呼称の統一 ADR-0028) — from the reaction the human already placed
+// during the conversation, or, failing that, from the one closing question.
+// The question is a verdict on the session's quality, not a retention action:
+// by the time a do finishes the user has already iterated in-dialogue until
 // satisfied, so "keep it?" is moot — what the ledger still wants is how good
 // the result was. 1/2/3 grade it; Enter and any other input (including EOF on
 // non-interactive stdin) carry no signal, so the payload is empty. The
 // no-signal default is deliberate — a mindless Enter or a headless run must
 // never inflate the ledger with praise. The payload keys stay adopted/reverted
 // (SCHEMA + rebuild unchanged — ADR-0028): only the vocabulary moved.
-func feedbackPayload(in *bufio.Reader, out io.Writer) map[string]any {
-	fmt.Fprint(out, "今回、どうだった? [1=文句なし / 2=まあまあ（手を焼いた） / 3=だめだった / Enter=まだ言えない] ")
+//
+// 反応が置かれていれば訊かない (ADR-0057 Decision 2)。人が答える口が2つに
+// なっただけで、台帳に落ちる形は1つも増えていない — 訳の対応は closingGrades
+// という1枚の表から両方が引く。`do` の締めはこの経路を通らない: 会話が無い
+// のだから反応も1件も無く、従来どおり問いへ落ちる。
+//
+// Why not 反応があっても確認だけ出すか: 押させる儀式が1つ減るだけで、待たせて
+// いる事実は変わらない。反応は clear で取り消せるし、締めた後も第2層
+// (tomobit verdict) が残っている — 可逆な操作に確認を積まない。
+func feedbackPayload(s *store.Store, sid string, in *bufio.Reader, out io.Writer) map[string]any {
+	grade, placed, err := lastReaction(s, sid)
+	if err != nil {
+		// 読めなかったなら訊く側へ落ちる: 反応を読み落として黙って無信号にするより、
+		// 人へもう一度訊く方が安い。失敗自体は隠さない。
+		fmt.Fprintln(os.Stderr, err)
+	}
+	if placed {
+		// 黙って記録しない (ADR-0057 Decision 2): 沈黙で済ませると、人は自分が
+		// いつ採点したかを思い出せない。
+		fmt.Fprintln(out, dim(fmt.Sprintf("今回は %s として記録した（会話中に置いた反応）", grade.label)))
+		return grade.payload()
+	}
+	fmt.Fprintf(out, "今回、どうだった? [%s / Enter=まだ言えない] ", feedbackChoices())
 	line, err := in.ReadString('\n')
 	if err != nil {
 		return map[string]any{}
 	}
-	switch strings.TrimSpace(line) {
-	case "1":
-		return map[string]any{"adopted": "as-is", "reverted": false}
-	case "2":
-		return map[string]any{"adopted": "with-edits", "reverted": false}
-	case "3":
-		return map[string]any{"adopted": "", "reverted": true}
-	default:
-		return map[string]any{}
+	if g, ok := gradeByChoice(strings.TrimSpace(line)); ok {
+		return g.payload()
 	}
+	return map[string]any{}
 }
 
 // perceiveLive sorts a perceive run's batch into the (ts, id) order
