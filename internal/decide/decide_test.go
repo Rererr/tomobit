@@ -483,6 +483,37 @@ func TestPasserTieBreakUsesFinestMatchQuantile(t *testing.T) {
 	}
 }
 
+// 同じ悲観分位点で落ちた同粒度の兄弟が複数居るとき、監査行は辞書順で先頭の
+// 兄弟を名指す (ADR-0042: 行は store の ORDER BY に依存しない)。並びを入れ替え
+// ても同じ行を指すことが規則の中身なので、両方の順で見る。破れると decided の
+// 監査行は台帳の物理順で揺れ、GUI の「なぜ落ちたか」は同じ台帳を二度読んで
+// 違う兄弟を名指す。
+func TestGatedAuditNamesTheSameRefuserWhateverTheRowOrder(t *testing.T) {
+	const wantRefuser = "cap=implement" // "lang=rust" より辞書順で前
+	tokens := []string{"cap=implement", "lang=rust"}
+
+	for _, order := range [][]string{
+		{"cap=implement", "lang=rust"},
+		{"lang=rust", "cap=implement"},
+	} {
+		// 同じ (alpha, beta) なので分位点は同値 — 決めるのは同値の割り方だけ。
+		conns := []*core.Connection{
+			conn(core.ConnCapability, core.NewScope(order[0]).Key(), "claude-code", 1, 12),
+			conn(core.ConnCapability, core.NewScope(order[1]).Key(), "claude-code", 1, 12),
+		}
+
+		d := Choose(conns, []string{"claude-code"}, tokens, "", 1, now)
+
+		got := d.Candidates[0]
+		if got.Passed {
+			t.Fatalf("%v: 両方が自分の下限を割っているのに通った: %+v", order, got)
+		}
+		if got.ScopeKey != wantRefuser {
+			t.Errorf("%v: 監査行は %q を名指す, got %q", order, wantRefuser, got.ScopeKey)
+		}
+	}
+}
+
 // TestGateAllMinAggregationIsLoadBearing is the mutation guard: on the rust
 // ledger the finest-only mutant (the pre-0042 gate) lets claude-code through
 // because cap= shadows lang=rust, while gateAll gates it. So restoring
