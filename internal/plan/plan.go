@@ -137,9 +137,9 @@ func Mutations(steps []string) []Mutation {
 		add("swap", swapped)
 	}
 	for pos := 0; pos <= len(steps); pos++ {
-		for _, cap := range Vocabulary {
+		for _, v := range Vocabulary {
 			inserted := append([]string{}, steps[:pos]...)
-			inserted = append(inserted, cap)
+			inserted = append(inserted, v)
 			inserted = append(inserted, steps[pos:]...)
 			add("insert", inserted)
 		}
