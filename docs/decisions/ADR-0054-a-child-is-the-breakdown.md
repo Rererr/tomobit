@@ -13,6 +13,12 @@
   [ADR-0013](ADR-0013-prior-inheritance-mean-only.md)（Connection の scope の親子 — タスクの親子とは別物）,
   [ADR-0011](ADR-0011-meaning-by-model-judgment-by-math.md)（意味はモデル、判断は数式）
 
+<!-- 改版:begin — tools/sync-adr-superseded.sh が生成する。手で編集しない -->
+> **改版済み** — この決定の一部は後のADRが置き換えた。範囲は各Decisionの改版注記が持つ。
+>
+> - Decision 1 → [ADR-0060](ADR-0060-the-executor-can-be-named.md)
+<!-- 改版:end -->
+
 ---
 
 ## Context
