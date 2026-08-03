@@ -122,8 +122,8 @@ for f in "${files[@]}"; do
     *\ *) errors="${errors}  ADR-${n}: 実装状態の語が複数ある → 索引「${entry_impl}」／本文「${body_impl}」"$'\n'; continue ;;
   esac
   # 未実装かどうかだけを比べる。実装済みと配備済みの差は落とさない。
-  [ "$body_impl" = 未実装 ] && body_impl=未実装 || body_impl=実装あり
-  [ "$entry_impl" = 未実装 ] && entry_impl=未実装 || entry_impl=実装あり
+  case "$body_impl" in 未実装) ;; *) body_impl=実装あり ;; esac
+  case "$entry_impl" in 未実装) ;; *) entry_impl=実装あり ;; esac
   if [ "$body_impl" != "$entry_impl" ]; then
     errors="${errors}  ADR-${n}: 索引は「${entry_impl}」・本文は「${body_impl}」"$'\n'
     continue
@@ -149,7 +149,8 @@ fi
 
 echo "README索引: ADR${#files[@]}本すべてが索引にある (Status一致 ${compared_status}本 / 実装状態一致 ${compared_impl}本)"
 
-# 比べなかったものを、黙って通したことにしない。
+# 比べなかったものを、黙って通したことにしない。実装状態は本文の Status が
+# 「同日実装」のように自由文で書くことが多く、そちら側で落ちる件数が大きい。
 if [ "$silent_status" -gt 0 ] || [ "$silent_impl" -gt 0 ]; then
-  echo "索引が書いていないので比べなかった: Status ${silent_status}本 / 実装状態 ${silent_impl}本"
+  echo "片方が書いていないので比べなかった: Status ${silent_status}本 / 実装状態 ${silent_impl}本"
 fi
