@@ -96,6 +96,45 @@ func TestContradictionAsksOnlyWhenARedTestMeetsNoComplaints(t *testing.T) {
 	}
 }
 
+// 同じセッションが観測を複数持つとき、矛盾を決めるのは最後の観測だけである
+// (ADR-0055 Decision 1)。赤を見て直して緑になった日は矛盾していないので問いは
+// 立たず、緑のあとに壊した日は立つ。過去の赤が残り続ける読み方だと、直した人
+// ほど毎回「文句なし?」と訊かれる。
+func TestContradictionReadsOnlyTheNewestObservation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		passed []bool
+		want   bool
+	}{
+		{"赤→緑（直した）", []bool{false, true}, false},
+		{"緑→赤（壊した）", []bool{true, false}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTestStore(t)
+			sid := "sess-" + tc.name
+			openSessionFor(t, s, sid, func() {
+				for i, passed := range tc.passed {
+					if err := s.AppendEvent(sid, "test.result", 1500+int64(i),
+						map[string]any{"passed": passed, "command": "go test ./..."}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+
+			var out bytes.Buffer
+			askVerdictOnContradiction(s, sid, bufio.NewReader(strings.NewReader("y\n")),
+				&out, true, map[string]any{"adopted": "as-is", "reverted": false})
+
+			if asked := strings.Contains(out.String(), "文句なし?"); asked != tc.want {
+				t.Errorf("訊いたか = %v, want %v (出力: %q)", asked, tc.want, out.String())
+			}
+			if got := len(verdictEvents(t, s, sid)); (got > 0) != tc.want {
+				t.Errorf("user.verdict %d件, 訊くはず=%v", got, tc.want)
+			}
+		})
+	}
+}
+
 // 沈黙は同意ではない (ADR-0049): an unanswered prompt leaves the red standing.
 // It stands as a y=0 the human declined to override, which is a different fact
 // from one they were never asked about — but the recorded outcome is the same.
