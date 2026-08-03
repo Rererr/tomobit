@@ -14,12 +14,12 @@ jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # cross-repoリンク（GUIのADRや実装ファイルを指すURL）の参照先を見るため、
       # 隣のリポジトリも並べる。checkout は workspace の外へ置けないので、
       # $ADR_LINK_SIBLINGS で探す場所をここへ向ける。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: Rererr/tomobit-gui
           path: _siblings/tomobit-gui
@@ -38,7 +38,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
