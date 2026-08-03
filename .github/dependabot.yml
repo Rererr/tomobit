@@ -1,0 +1,32 @@
+version: 2
+
+updates:
+  # 本体の Go モジュール。tools/dogfood/replay/go.mod は本体を replace で参照する
+  # ドッグフード用ハーネスで、直接依存が本体しかない（残りは indirect）ため対象にしない。
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "build"
+    groups:
+      go-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
