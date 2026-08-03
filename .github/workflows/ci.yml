@@ -72,9 +72,13 @@ jobs:
       - name: go build
         run: go build ./...
 
-      - name: go test (macOS — 全パッケージ)
+      # 競合検出器はmacOSジョブだけで走らせる。ADR-0056 が並走を既定にした以上
+      # 守りが要る一方（runGroupParallel の goroutine が ndjsonStream.emit と
+      # turnView を共有する）、競合はOS非依存なので2度見る意味は薄く、検出器は
+      # 実行を数倍遅くする。docs検査を別ジョブにしたのと同じ理由。
+      - name: go test (macOS — 全パッケージ・競合検出つき)
         if: runner.os == 'macOS'
-        run: go test ./...
+        run: go test -race ./...
 
       # Linuxのランナーには表示コンテキストが無く、Ebitenは
       # `panic: glfw: The GLFW library is not initialized` で落ちる(実測)。
