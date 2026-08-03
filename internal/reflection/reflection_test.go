@@ -378,3 +378,52 @@ func TestHumanReversalLine(t *testing.T) {
 		t.Errorf("human reversal should mirror the user's growth: %q", text)
 	}
 }
+
+// 5つのトリガーはどれも、主語を名指した空でない一行を語る。空文字は鏡が黙った
+// まま「どうだった?」だけを差し出すことを意味する — 反応の記帳は残るので、
+// 語っていない一行への反応が経験になる。
+func TestEveryTriggerSpeaksALineNamingItsSubject(t *testing.T) {
+	scope := core.NewScope("lang=go")
+	for _, tc := range []struct {
+		name  string
+		cand  Candidate
+		names []string // 一行が必ず名指す語
+	}{
+		{"split", Candidate{Type: voice.InsightSplit, Scope: scope,
+			Diff: core.NewScope("lang=rust"), Provider: "claude"}, []string{"rust", "claude"}},
+		{"reversal", Candidate{Type: voice.InsightReversal, Scope: scope,
+			Provider: "codex", Other: "claude"}, []string{"go", "codex", "claude"}},
+		{"human reversal", Candidate{Type: voice.InsightReversal, Scope: scope,
+			Provider: "human", Other: "claude"}, []string{"go", "claude"}},
+		{"questioned", Candidate{Type: voice.InsightQuestioned, Scope: scope,
+			Provider: "claude"}, []string{"go", "claude"}},
+		{"rehabilitated", Candidate{Type: voice.InsightRehabilitated, Scope: scope,
+			Provider: "codex"}, []string{"go", "codex"}},
+		{"reperceived", Candidate{Type: voice.InsightReperceived,
+			OldToken: "rust", NewToken: "large"}, []string{"rust", "large"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := tc.cand.Text()
+			if text == "" {
+				t.Fatal("鏡が黙ったまま反応を訊くことになる")
+			}
+			for _, name := range tc.names {
+				if !strings.Contains(text, name) {
+					t.Errorf("一行が %q を名指していない: %q", name, text)
+				}
+			}
+		})
+	}
+}
+
+// 逆転は「敗者より勝者の方がうまくいってる」の向きで語る。入れ替わると Tomo は
+// 台帳が持つ事実の逆を、同じ自信で言う。
+func TestReversalTellsTheWinnerAsTheOneDoingBetter(t *testing.T) {
+	c := Candidate{
+		Type: voice.InsightReversal, Scope: core.NewScope("lang=go"),
+		Provider: "codex", Other: "claude",
+	}
+	if got := c.Text(); !strings.Contains(got, "claudeよりcodex") {
+		t.Errorf("勝者と敗者が入れ替わっている: %q", got)
+	}
+}
