@@ -7,7 +7,7 @@
 > **Tomobit is not built to use AI. Tomobit is built to grow with it.**
 
 *日本語版: [README.md](README.md) — the Japanese README is the canonical one.
-All 49 design records (ADRs) are in Japanese.*
+All design records (ADRs) are in Japanese.*
 
 Tomobit stands in front of your coding AIs — Claude Code, Codex, local models —
 and learns **which one to trust, in which context**, from what actually happened.
@@ -118,7 +118,7 @@ A desktop chat GUI lives in a separate repository:
 
 ## Design records
 
-The 49 ADRs in [`docs/decisions/`](docs/decisions/) are the real artifact of this
+The ADRs in [`docs/decisions/`](docs/decisions/) are the real artifact of this
 project. They are in Japanese, but they are worth a translator: they record the
 judgments that were **overturned by measurement**, not just the ones that
 survived.
