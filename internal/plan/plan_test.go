@@ -172,6 +172,34 @@ func TestFullMenuAcceptsNoProposal(t *testing.T) {
 	}
 }
 
+// 生存上限 K はメニューを引く側の規則でもある (ADR-0014 Decision 5): 提案が
+// 何本記帳されていようと、Live が返すメニューは K 本で打ち切られる。上限を
+// 落とすと ChoosePlan の総当たりが無制限のメニューを回す。生成の事実を直接
+// 積むのは、Propose の予算（1日1本）を通しては上限まで届かないためで、上限は
+// 変種がどう入ったかに依らない。
+func TestLiveStopsAtTheSurvivalCap(t *testing.T) {
+	s := openStore(t)
+	proposed := []string{
+		"analyze>implement", "implement>review", "review>test",
+		"test>commit", "commit>deploy",
+	}
+	for i, name := range proposed {
+		ts := now + int64(i)
+		if err := s.AppendEvent(store.NewID(ts), "plan.generated", ts,
+			map[string]any{"cap": "implement", "plan": name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	menu, err := Live(s, "implement", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(menu) != K {
+		t.Errorf("メニューは上限 K=%d で打ち切られる: %d本 %v", K, len(menu), menu)
+	}
+}
+
 // TestProposalBudgetIsHarnessWide (ADR-0014 implementation note): the
 // proposal budget borrows the question budget's shape (ADR-0007's
 // `tomo.asked` check, which is one gate for the whole log) — it is spent
