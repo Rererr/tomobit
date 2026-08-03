@@ -15,7 +15,7 @@ jobs:
         with:
           fetch-depth: 0 # changelog がタグ間の履歴を読むため
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
