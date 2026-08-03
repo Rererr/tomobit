@@ -741,8 +741,7 @@ func cmdDo(args []string) error {
 				permMode: perm, timeout: *timeout,
 				workDir: subtaskWorkDir(decl, ""),
 			}
-			return runSplit(ctx, s, sid, groups, prompt, w,
-				stdin, os.Stdout, isTTY(os.Stdin) && isTTY(os.Stdout), extractor)
+			return runSplit(ctx, s, sid, groups, prompt, w, stdin, os.Stdout, extractor)
 		}
 	}
 
@@ -827,12 +826,12 @@ func openSubtask(s *store.Store, capability, sub, parentSID string) (subSID stri
 
 // runSplit executes an accepted split proposal (ADR-0023, groups and
 // parallelism since ADR-0028). The proposal arrives as groups a Provider
-// declared independent; a wide group (Decision 2) triggers the one permission
-// gate (Decision 3): a yes runs each wide group's members in parallel (groups
-// still sequential between themselves, fail-stopping the next group), a no — or
-// a non-interactive run — flattens the whole thing back to the ADR-0023
-// sequential order. Either way each subtask becomes its own task session — same
-// ledger, same rehabilitation as any other task.
+// declared independent; a wide group runs its members in parallel, groups stay
+// sequential between themselves and fail-stop the next group. The permission
+// gate ADR-0028 Decision 3 put in front of that is gone (ADR-0056): the
+// declaration is trusted, so the only way back to the flat ADR-0023 order is
+// the parallel_subtasks kill switch. Either way each subtask becomes its own
+// task session — same ledger, same rehabilitation as any other task.
 //
 // Subtasks carry no Feedback and, since ADR-0054 Decision 2, no experience at
 // all: a split is one task's breakdown, so the task's one experience is the
@@ -841,8 +840,8 @@ func openSubtask(s *store.Store, capability, sub, parentSID string) (subSID stri
 // split proposal itself, not something to grade.
 func runSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]string,
 	parentIntent string, w subtaskWiring,
-	in *bufio.Reader, out io.Writer, interactive bool, extractor perceive.Extractor) error {
-	_, cancelled, err := executeSplit(ctx, s, parentSID, groups, parentIntent, w, in, out, interactive, nil)
+	in *bufio.Reader, out io.Writer, extractor perceive.Extractor) error {
+	_, cancelled, err := executeSplit(ctx, s, parentSID, groups, parentIntent, w, in, out, nil)
 	if err != nil {
 		return err
 	}

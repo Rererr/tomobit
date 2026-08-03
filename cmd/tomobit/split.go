@@ -190,7 +190,7 @@ func readSplitProposal(texts []string) [][]string {
 // w carries everything the children share — see subtaskWiring.
 func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]string,
 	parentIntent string, w subtaskWiring,
-	in *bufio.Reader, out io.Writer, interactive bool, newView subtaskViewFactory) (subs []string, cancelled bool, err error) {
+	in *bufio.Reader, out io.Writer, newView subtaskViewFactory) (subs []string, cancelled bool, err error) {
 	subs, idxGroups := flattenGroups(groups)
 	now := time.Now().UnixMilli()
 

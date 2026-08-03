@@ -233,7 +233,7 @@ func TestSplitChildrenRunInTheParentsPlace(t *testing.T) {
 	// are both covered.
 	if err := runSplit(context.Background(), s, parentSID,
 		[][]string{{"one"}, {"two", "three"}}, "big task", w,
-		bufio.NewReader(strings.NewReader("y\n")), io.Discard, true,
+		bufio.NewReader(strings.NewReader("y\n")), io.Discard,
 		&fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}

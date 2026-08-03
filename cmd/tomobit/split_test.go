@@ -77,7 +77,7 @@ func TestRunSplitAcceptedRunsWholeGroupThenStopsAtGroupBoundary(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
-		namedWiring("marker"), in, &out, true, extractor); err != nil {
+		namedWiring("marker"), in, &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -122,7 +122,7 @@ func TestRunSplitKillSwitchRunsSequentialFailStop(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
-		namedWiring("marker"), bufio.NewReader(strings.NewReader("")), &out, true, extractor); err != nil {
+		namedWiring("marker"), bufio.NewReader(strings.NewReader("")), &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -152,9 +152,9 @@ func TestRunSplitParallelsWithNobodyAtTheTerminal(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	// interactive=false, and nothing on the reader — nobody to ask.
+	// nothing on the reader — nobody to ask, and no way to answer if asked.
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
-		namedWiring("marker"), bufio.NewReader(strings.NewReader("")), &out, false, extractor); err != nil {
+		namedWiring("marker"), bufio.NewReader(strings.NewReader("")), &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -186,7 +186,7 @@ func TestRunSplitFlatProposalSkipsGate(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
-		namedWiring("fake-split"), in, &out, true, extractor); err != nil {
+		namedWiring("fake-split"), in, &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -243,7 +243,7 @@ func TestRunSplitRecordsDeclarationAndEstimateButNoGate(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
-		namedWiring("fake-split"), bufio.NewReader(strings.NewReader("")), &out, true, extractor); err != nil {
+		namedWiring("fake-split"), bufio.NewReader(strings.NewReader("")), &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -299,7 +299,7 @@ func TestRunSplitParallelGroupWiderThanCapCompletesEveryMember(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
-		namedWiring("fake-split"), in, &out, true, extractor); err != nil {
+		namedWiring("fake-split"), in, &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -334,7 +334,7 @@ func TestRunGroupParallelRunsHumanMembersOneAtATime(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
-		subtaskWiring{human: true, capability: "implement"}, in, &out, true, extractor); err != nil {
+		subtaskWiring{human: true, capability: "implement"}, in, &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -376,7 +376,7 @@ func TestExecuteSplitViewEmitsNoPerSubtaskDecision(t *testing.T) {
 
 	if _, _, err := executeSplit(context.Background(), s, parentSID, groups, "big task",
 		namedWiring("fake-split"), bufio.NewReader(strings.NewReader("")),
-		noteWriter{s: stream}, false, newView); err != nil {
+		noteWriter{s: stream}, newView); err != nil {
 		t.Fatalf("executeSplit: %v", err)
 	}
 
@@ -434,7 +434,7 @@ func TestRunSplitParallelCancellationRecordsAllChildrenAndParent(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(ctx, s, parentSID, groups, "big task",
-		namedWiring("pc"), in, &out, true, extractor); err != nil {
+		namedWiring("pc"), in, &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
@@ -482,7 +482,7 @@ func TestRunGroupParallelChildrenDecideNothing(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
-		namedWiring("fake-a"), in, &out, true, extractor); err != nil {
+		namedWiring("fake-a"), in, &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
 
