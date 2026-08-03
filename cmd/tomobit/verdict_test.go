@@ -377,6 +377,44 @@ func TestCarryVerdictForwardIsQuietWhenNothingWasPerceived(t *testing.T) {
 	}
 }
 
+// 1セッション1つの execution 行は perceiveSession の不変条件で、この単行コピー
+// はそれに依存している。破れた台帳を渡されたら、先頭を運んで残りを置き去りに
+// するのではなく断る — 運んだ行だけが ver+1 になるので、置き去りの行は現行
+// ビューの max(ver) から外れて静かに消える。人の拒否権が一部にだけ効き、消えた
+// ことは誰の目にも留まらない。
+func TestCarryVerdictForwardRefusesASessionWithTwoExecutionRows(t *testing.T) {
+	s := openTestStore(t)
+	const sid = "sess-doubled"
+	ctx := map[string]string{"lang": "go"}
+	insertExecution(t, s, "e-1", sid, ctx, "fake", core.Outcome{Adopted: "as-is"})
+	insertExecution(t, s, "e-2", sid, ctx, "fake", core.Outcome{Adopted: "as-is"})
+
+	_, carried, err := s.CarryVerdictForward(sid, "down", 5000)
+	if err == nil {
+		t.Fatal("2行あるのに黙って1行だけ運んだ")
+	}
+	if carried {
+		t.Error("断ったのに carried=true")
+	}
+	if !strings.Contains(err.Error(), sid) {
+		t.Errorf("どのセッションが壊れているか分からない: %v", err)
+	}
+
+	cur, err := s.CurrentExperiences()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := 0
+	for _, e := range cur {
+		if e.SessionID == sid && e.Kind == core.KindExecution {
+			rows++
+		}
+	}
+	if rows != 2 {
+		t.Errorf("断ったのに現行ビューが動いた: %d行", rows)
+	}
+}
+
 // 判定を変えられること自体が設計 (Decision 2): the ledger keeps both, and the
 // last one is what the experience shows. clear walks all the way back to the
 // layers below rather than to a third state.
