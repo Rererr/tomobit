@@ -1,6 +1,7 @@
 # ADR-0058: 借りるのは発想だけ — 外部実装を読むときの規律
 
-- Status: **Proposed**（2026-07-30 起票。本人承諾待ち）
+- Status: **Accepted**（2026-07-30 起票・2026-08-08 所有者承諾。規律のみでコード変更は無い。
+  Decision 4 の #2〜#4 は宿題として受理 — 着手時にそれぞれ別ADRを起こす）
 - Date: 2026-07-30
 - 着想元: [LangChain](https://github.com/langchain-ai/langchain)（MIT, LangChain, Inc.）。
   本ADRはその調査そのものを扱う
