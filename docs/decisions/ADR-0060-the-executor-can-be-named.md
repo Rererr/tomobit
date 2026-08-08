@@ -1,8 +1,9 @@
 # ADR-0060: 采配は Provider のもの — 実行者を宣言できるようにする
 
 - Status: **Accepted**（2026-07-30 起票・2026-08-08 所有者承諾・実装済み。
-  Decision 1〜4 をそのまま実装。ADRが決めていなかった点と、実装時に確かめた・
-  確かめていないことは下記「実装の記録」）
+  同日、実 claude-code / codex で**両経路の疎通を確認**〈下記「実測」〉。
+  Decision 1〜4 をそのまま実装。ADRが決めていなかった点は「実装の記録」。
+  **残る未確認は GUI の画面目視だけ**）
 - Date: 2026-07-30
 - 改版: ADR-0054 D1
 - 関連: [ADR-0054](ADR-0054-a-child-is-the-breakdown.md)（子は親の相手で走る —
@@ -178,14 +179,49 @@ kill switch。どれも**その子だけ親継承＋理由を表示**で、提�
 別 Provider の子が同じツリーを踏む経路が最初から無い。ADR-0026 が duel で指摘した
 同型の問題は、隔離が sid で切られている限りここでは再発しない。
 
-**GUI は実機で見ていない。** Consequences は「`subtaskWiring` が子ごとになれば
-チップにそのまま出る（実装時に確認する）」と書いた。コード上は子の相手の名前を
-`newView` と `splitSink` へ渡すようにしたが、**実際の GUI では確認していない**。
-確かめていないものを確かめたとは書かない。
+---
 
-**実 Provider での疎通も未実施。** テストは fake アダプタで、指名された子が別の
-アダプタで走ること・記帳が分離できることまでを固定している。実際の codex を指名して
-端から端まで走らせる確認は、まだしていない。
+## 実測（2026-08-08・claude-code 2.1.224 / codex-cli 0.147.0・計 $0.50）
+
+隔離した台帳（`--db`）と一時リポジトリで、`do` と `chat --view ndjson` の両経路を
+1回ずつ流した。プロンプトは「2つの独立した作業を分割提案してほしい。**(2) は codex に
+実行させてほしい**」。
+
+**Decision 3 は効いた。** claude-code は道具箱へ手を伸ばさず、対の形で宣言した:
+
+```json
+{"tomobit_split": [["hello.txt を作り hello と書く", {"do": "world.txt を作り world と書く", "provider": "codex"}]]}
+```
+
+**台帳が真実を語るようになった** — 本ADRの目的そのものである:
+
+| 子 | `named_provider` | `provider.selected` |
+|---|---|---|
+| hello.txt（継承） | キー無し | claude-code |
+| world.txt（指名） | `codex` | **codex** |
+
+端末には `[1:claude-code]` と `[2:codex]` が並走で並び、両方のファイルが実際に作られた。
+
+**view には子ごとの相手が乗る**（GUI へ届くデータ。`chat --view ndjson` の実出力）:
+
+```json
+{"name":"codex","sub":2,"sub_total":2,"type":"provider"}
+{"n":1,"provider":"codex","sub":2,"sub_total":2,"type":"turn.started"}
+```
+
+**費用の非対称も予告どおり。** codex の子は `cost_usd` を持たない（ADR-0028 が記録した
+既知の非対称）。概算が作り話の金額を出さない規律は、指名経由でもそのまま効く。
+
+### GUI — 経路は追えたが、画面は見ていない
+
+Consequences の「チップにそのまま出る」は**記述が古い**。GUI [ADR-0014](https://github.com/Rererr/tomobit-gui/blob/main/docs/decisions/ADR-0014-speech-and-work-are-separated.md) が常時チップ
+（`chat-turn-provider-chip`）を廃止しており、現在の provider 名は終わったターンの
+**メタ1行**に出る（走行中は GUI ADR-0008 の帯が言う）。
+
+経路は追えた: `viewFold` が `turn.started` の `provider` を `sub` ごとの枠へ保持し、
+`TurnMeta` がそれをラベルに含める。**ただし実際の画面は見ていない。**
+また GUI 側のテストは子の枠が `sub` を持つことは固定しているが、**子ごとに相手が違う
+場合を固定していない**（既存の例はどれも同じ provider で、本ADR以前はそれが正しかった）。
 
 ---
 
