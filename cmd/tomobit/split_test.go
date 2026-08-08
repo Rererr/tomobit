@@ -11,7 +11,23 @@ import (
 
 	"github.com/Rererr/tomobit/internal/executor"
 	"github.com/Rererr/tomobit/internal/store"
+	"github.com/Rererr/tomobit/internal/subtask"
 )
+
+// plain turns the bare-string group shape into elements that name no executor
+// — every proposal before ADR-0060, and what a test writing a subtask as a
+// string still means. Tests about the named executor build their elements
+// directly.
+func plain(groups [][]string) [][]subtask.Element {
+	out := make([][]subtask.Element, len(groups))
+	for i, g := range groups {
+		out[i] = make([]subtask.Element, len(g))
+		for j, s := range g {
+			out[i][j] = subtask.Element{Do: s}
+		}
+	}
+	return out
+}
 
 // markerFailAdapter is a test-only adapter whose exit code depends on the
 // prompt: a subtask whose text contains failMarker exits non-zero, any other
@@ -62,6 +78,151 @@ func seedProviderCosts(t *testing.T, s *store.Store, costs ...float64) {
 	}
 }
 
+// sessionPayloadOf reads one session's first event of a type. The split tests
+// need it per child, which payloadOf (first event repo-wide) cannot give.
+func sessionPayloadOf(t *testing.T, s *store.Store, sid, typ string) map[string]any {
+	t.Helper()
+	var raw string
+	if err := s.DB.QueryRow(`SELECT payload FROM events WHERE session_id = ? AND type = ? ORDER BY id LIMIT 1`,
+		sid, typ).Scan(&raw); err != nil {
+		t.Fatalf("%s/%s: %v", sid, typ, err)
+	}
+	var p map[string]any
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// outputTextOf joins one session's provider.output text. An adapter that
+// echoes its own name turns this into "which provider actually ran this
+// child" — the only observation that distinguishes a routed child from an
+// inherited one without a real CLI.
+func outputTextOf(t *testing.T, s *store.Store, sid string) string {
+	t.Helper()
+	rows, err := s.DB.Query(`SELECT payload FROM events WHERE session_id = ? AND type = 'provider.output' ORDER BY id`, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var texts []string
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var p map[string]any
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		if s, ok := p["text"].(string); ok {
+			texts = append(texts, s)
+		}
+	}
+	return strings.Join(texts, "\n")
+}
+
+// TestNamedExecutorRunsThatChildOnTheDeclaredProvider is ADR-0060 Decisions 2
+// and 4 end to end: the declared child runs on the named adapter, its
+// neighbour in the same group keeps the parent's, and only the declared one
+// carries named_provider on its task.started — the field that keeps a named
+// run separable from one the lottery routed.
+func TestNamedExecutorRunsThatChildOnTheDeclaredProvider(t *testing.T) {
+	s := openTestStore(t)
+	registerFakeProvider(t, "parent-side", &fakeSplitAdapter{name: "parent-side", line: "parent-side"})
+	registerFakeProvider(t, "named-side", &fakeSplitAdapter{name: "named-side", line: "named-side"})
+	const parentSID = "parent-named"
+	openParentTask(t, s, parentSID)
+
+	groups := [][]subtask.Element{{
+		{Do: "alpha", Provider: "named-side"},
+		{Do: "beta"},
+	}}
+	var out bytes.Buffer
+	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+		namedWiring("parent-side"), bufio.NewReader(strings.NewReader("")), &out,
+		&fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}); err != nil {
+		t.Fatalf("runSplit: %v", err)
+	}
+
+	subs := subtaskSessionIDs(t, s, parentSID)
+	if len(subs) != 2 {
+		t.Fatalf("both members of the group should open, got %d", len(subs))
+	}
+	// Sessions open in proposal order — runGroupParallel opens all of them
+	// before any goroutine starts — so subs[0] is the declared one.
+	named, inherited := subs[0], subs[1]
+	if got := outputTextOf(t, s, named); !strings.Contains(got, "named-side") {
+		t.Errorf("the declared child should run on named-side, its output says %q", got)
+	}
+	if got := outputTextOf(t, s, inherited); !strings.Contains(got, "parent-side") {
+		t.Errorf("the neighbour named nobody and must keep the parent's adapter, its output says %q", got)
+	}
+	if got := sessionPayloadOf(t, s, named, "task.started")["named_provider"]; got != "named-side" {
+		t.Errorf("the declaration should be recorded on the child: got %v", got)
+	}
+	if _, ok := sessionPayloadOf(t, s, inherited, "task.started")["named_provider"]; ok {
+		t.Errorf("an inherited child must record no declaration — the field would claim a routing that never happened")
+	}
+}
+
+// TestForElementFallsBackPerChild pins every refusal in one place: each one
+// keeps the parent's wiring for that child alone, records nothing, and says
+// why. A dropped declaration in silence would leave the Provider believing it
+// routed work it did not route.
+func TestForElementFallsBackPerChild(t *testing.T) {
+	registerFakeProvider(t, "parent-side", &fakeSplitAdapter{name: "parent-side", line: "parent-side"})
+	registerFakeProvider(t, "named-side", &fakeSplitAdapter{name: "named-side", line: "named-side"})
+	saved := cfg
+	t.Cleanup(func() { cfg = saved })
+
+	parent := namedWiring("parent-side")
+	human := subtaskWiring{human: true, capability: "implement"}
+
+	cases := []struct {
+		name    string
+		w       subtaskWiring
+		e       subtask.Element
+		off     bool
+		wantWhy string
+	}{
+		{name: "unknown name", w: parent, e: subtask.Element{Do: "a", Provider: "nope"}, wantWhy: "解決できない"},
+		{name: "human is refused", w: parent, e: subtask.Element{Do: "a", Provider: "human"}, wantWhy: "human は指名できない"},
+		{name: "human parent keeps its children", w: human, e: subtask.Element{Do: "a", Provider: "named-side"}, wantWhy: "人が担っている"},
+		{name: "kill switch", w: parent, e: subtask.Element{Do: "a", Provider: "named-side"}, off: true, wantWhy: "named_executor=false"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg.NamedExecutor = nil
+			if tc.off {
+				no := false
+				cfg.NamedExecutor = &no
+			}
+			got, why := tc.w.forElement(tc.e)
+			if got.adapter != tc.w.adapter || got.human != tc.w.human {
+				t.Errorf("the child should keep the parent's wiring, got %+v", got)
+			}
+			if got.named != "" {
+				t.Errorf("a declaration that was not honoured must record nothing, got %q", got.named)
+			}
+			if !strings.Contains(why, tc.wantWhy) {
+				t.Errorf("the reason should say %q, got %q", tc.wantWhy, why)
+			}
+		})
+	}
+}
+
+// TestForElementInheritsWhenNobodyIsNamed is the default ADR-0060 must not
+// move (ADR-0054 Decision 1): no declaration, no change, and nothing said.
+func TestForElementInheritsWhenNobodyIsNamed(t *testing.T) {
+	registerFakeProvider(t, "parent-side", &fakeSplitAdapter{name: "parent-side", line: "parent-side"})
+	parent := namedWiring("parent-side")
+	got, why := parent.forElement(subtask.Element{Do: "a"})
+	if got.adapter != parent.adapter || got.named != "" || why != "" {
+		t.Errorf("a plain subtask should inherit silently, got %+v why=%q", got, why)
+	}
+}
+
 // (a) An accepted gate runs a wide group's members in parallel to completion —
 // a failing member does not abandon its neighbor (走り切り) — and a group-level
 // failure stops the next group from starting (群間失敗停止, ADR-0028 Decision 4).
@@ -76,7 +237,7 @@ func TestRunSplitAcceptedRunsWholeGroupThenStopsAtGroupBoundary(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	if err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("marker"), in, &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -121,7 +282,7 @@ func TestRunSplitKillSwitchRunsSequentialFailStop(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	if err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("marker"), bufio.NewReader(strings.NewReader("")), &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -153,7 +314,7 @@ func TestRunSplitParallelsWithNobodyAtTheTerminal(t *testing.T) {
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
 	// nothing on the reader — nobody to ask, and no way to answer if asked.
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	if err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("marker"), bufio.NewReader(strings.NewReader("")), &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -185,7 +346,7 @@ func TestRunSplitFlatProposalSkipsGate(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	if err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("fake-split"), in, &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -212,12 +373,12 @@ func TestParallelCostEstimate(t *testing.T) {
 	s := openTestStore(t)
 	groups := [][]string{{"x", "y"}} // width 2
 
-	if _, ok := parallelCostEstimate(s, groups); ok {
+	if _, ok := parallelCostEstimate(s, plain(groups)); ok {
 		t.Error("no cost sample must yield no estimate — a fabricated number is worse than none")
 	}
 
 	seedProviderCosts(t, s, 0.10, 0.30, 0.20) // median 0.20
-	usd, ok := parallelCostEstimate(s, groups)
+	usd, ok := parallelCostEstimate(s, plain(groups))
 	if !ok {
 		t.Fatal("with samples an estimate should be available")
 	}
@@ -242,7 +403,7 @@ func TestRunSplitRecordsDeclarationAndEstimateButNoGate(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	if err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("fake-split"), bufio.NewReader(strings.NewReader("")), &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -298,7 +459,7 @@ func TestRunSplitParallelGroupWiderThanCapCompletesEveryMember(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	if err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("fake-split"), in, &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -333,7 +494,7 @@ func TestRunGroupParallelRunsHumanMembersOneAtATime(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	if err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		subtaskWiring{human: true, capability: "implement"}, in, &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -374,7 +535,7 @@ func TestExecuteSplitViewEmitsNoPerSubtaskDecision(t *testing.T) {
 	}
 	groups := [][]string{{"sub one"}, {"sub two"}} // flat: parallelGate never fires
 
-	if _, _, err := executeSplit(context.Background(), s, parentSID, groups, "big task",
+	if _, _, err := executeSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("fake-split"), bufio.NewReader(strings.NewReader("")),
 		noteWriter{s: stream}, newView); err != nil {
 		t.Fatalf("executeSplit: %v", err)
@@ -433,7 +594,7 @@ func TestRunSplitParallelCancellationRecordsAllChildrenAndParent(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(ctx, s, parentSID, groups, "big task",
+	if err := runSplit(ctx, s, parentSID, plain(groups), "big task",
 		namedWiring("pc"), in, &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -481,7 +642,7 @@ func TestRunGroupParallelChildrenDecideNothing(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	if err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("fake-a"), in, &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}

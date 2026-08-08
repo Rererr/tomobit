@@ -232,7 +232,7 @@ func TestSplitChildrenRunInTheParentsPlace(t *testing.T) {
 	// A lone group and a wide one, so the sequential and the parallel launch
 	// are both covered.
 	if err := runSplit(context.Background(), s, parentSID,
-		[][]string{{"one"}, {"two", "three"}}, "big task", w,
+		plain([][]string{{"one"}, {"two", "three"}}), "big task", w,
 		bufio.NewReader(strings.NewReader("y\n")), io.Discard,
 		&fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}); err != nil {
 		t.Fatalf("runSplit: %v", err)

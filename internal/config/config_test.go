@@ -173,9 +173,9 @@ func TestResolveBackend(t *testing.T) {
 // UNLESS the new field postdates perceive_backend, in which case it must be
 // left out and counted below instead (see postDatesBackendChoice).
 func TestHasAnyOtherFieldSetEnumeratesEveryConfigField(t *testing.T) {
-	// 3 checked by ResolveBackend + 9 in hasAnyOtherFieldSet + 4 deliberately
+	// 3 checked by ResolveBackend + 9 in hasAnyOtherFieldSet + 5 deliberately
 	// excluded (postDatesBackendChoice).
-	const known = 16
+	const known = 17
 	if n := reflect.TypeOf(Config{}).NumField(); n != known {
 		t.Errorf("Config grew to %d fields (knew %d): update hasAnyOtherFieldSet and this count together", n, known)
 	}
@@ -265,5 +265,18 @@ func TestParallelSubtasksStaysOutOfTheFossilMarker(t *testing.T) {
 	}
 	if got, err := c.ResolveBackend("darwin"); err != nil || got != "mlx-lm" {
 		t.Errorf("a fresh Mac that only turned parallelism off stays on mlx-lm: got %q err=%v", got, err)
+	}
+}
+
+// NamedExecutor (ADR-0060) is the fifth. A config that only refused declared
+// executors is a current config with one opinion, not a fossil.
+func TestNamedExecutorStaysOutOfTheFossilMarker(t *testing.T) {
+	no := false
+	c := Config{NamedExecutor: &no}
+	if c.hasAnyOtherFieldSet() {
+		t.Errorf("named_executor must not mark a config as legacy")
+	}
+	if got, err := c.ResolveBackend("darwin"); err != nil || got != "mlx-lm" {
+		t.Errorf("a fresh Mac that only refused named executors stays on mlx-lm: got %q err=%v", got, err)
 	}
 }

@@ -810,11 +810,22 @@ func recordEvent(s *store.Store, sid string, ev executor.Event, ts int64) error 
 // which drew the same lottery K times and then filed each result under the
 // child's own re-perceived scope — the arm pulled and the arm updated were
 // different ones.
-func openSubtask(s *store.Store, capability, sub, parentSID string) (subSID string, err error) {
+// named, when non-empty, is the executor the proposal declared for this child
+// (ADR-0060 Decision 4). It rides task.started because a named run and a run
+// the lottery routed are not the same population — a person names codex when
+// they think it is codex work — and mixing them into one posterior would bend
+// auto's learning. The separation rule is not decided here; what is decided is
+// that the data stays separable. The name is the declared one, not a resolved
+// adapter: a declaration that fell back to the parent records nothing, so the
+// field never claims a routing that did not happen.
+func openSubtask(s *store.Store, capability, sub, parentSID, named string) (subSID string, err error) {
 	now := time.Now().UnixMilli()
 	subSID = store.NewID(now)
-	if err = s.AppendEvent(subSID, "task.started", now,
-		map[string]any{"intent": sub, "source": "production", "parent": parentSID}); err != nil {
+	started := map[string]any{"intent": sub, "source": "production", "parent": parentSID}
+	if named != "" {
+		started["named_provider"] = named
+	}
+	if err = s.AppendEvent(subSID, "task.started", now, started); err != nil {
 		return "", err
 	}
 	if err = s.AppendEvent(subSID, "capability.started", now,
@@ -838,7 +849,7 @@ func openSubtask(s *store.Store, capability, sub, parentSID string) (subSID stri
 // parent's. Their events stay in the ledger; only the projection skips them.
 // judged=false on the closing finishTask: the parent's own artifact was the
 // split proposal itself, not something to grade.
-func runSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]string,
+func runSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]subtask.Element,
 	parentIntent string, w subtaskWiring,
 	in *bufio.Reader, out io.Writer, extractor perceive.Extractor) error {
 	_, cancelled, err := executeSplit(ctx, s, parentSID, groups, parentIntent, w, in, out, nil)
@@ -859,17 +870,29 @@ func runSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]
 // in task.split's payload (groups [["a"],["b","c"]] → subs [a,b,c], idxGroups
 // [[0],[1,2]] — SCHEMA.md R4). The index form keeps the flat execution order
 // and the independence declaration both auditable from one event.
-func flattenGroups(groups [][]string) (subs []string, idxGroups [][]int) {
+func flattenGroups(groups [][]subtask.Element) (elems []subtask.Element, idxGroups [][]int) {
 	idxGroups = make([][]int, 0, len(groups))
 	for _, g := range groups {
 		idx := make([]int, 0, len(g))
-		for _, sub := range g {
-			idx = append(idx, len(subs))
-			subs = append(subs, sub)
+		for _, e := range g {
+			idx = append(idx, len(elems))
+			elems = append(elems, e)
 		}
 		idxGroups = append(idxGroups, idx)
 	}
-	return subs, idxGroups
+	return elems, idxGroups
+}
+
+// instructions drops the executor slot to leave the subtask texts alone —
+// what task.split records and what the fold-back prompt reads (SCHEMA.md R4's
+// subtasks stays a list of strings; the named executor lands on each child's
+// own task.started, ADR-0060 Decision 4).
+func instructions(elems []subtask.Element) []string {
+	subs := make([]string, len(elems))
+	for i, e := range elems {
+		subs[i] = e.Do
+	}
+	return subs
 }
 
 // splitProtocolEligible reports whether the split protocol rides a do target
@@ -913,6 +936,20 @@ func parallelSubtasksEnabled() bool {
 		return true
 	}
 	return *cfg.ParallelSubtasks
+}
+
+// namedExecutorEnabled resolves the ADR-0060 kill switch (config
+// named_executor, default true), shaped like the three above. An explicit
+// false stops tomobit from honouring a declared executor — every child runs on
+// the parent's wiring again, which is exactly the behaviour before ADR-0060.
+// The protocol text keeps asking for the declaration either way: the norm
+// "declare it, do not launch another CLI yourself" is what closes the hole,
+// and silently dropping it would send the Provider back to the tool box.
+func namedExecutorEnabled() bool {
+	if cfg.NamedExecutor == nil {
+		return true
+	}
+	return *cfg.NamedExecutor
 }
 
 // isolationDir prepares the place this session's Provider is told to build its
@@ -992,7 +1029,7 @@ func subtaskWorkDir(decl *workspace.Declaration, parentDir string) string {
 // declaresGroups reports whether the proposal declared any independent group —
 // a group wider than one subtask (ADR-0028 Decision 2). A flat proposal (every
 // element a lone subtask) declares none, and its task.split omits groups.
-func declaresGroups(groups [][]string) bool {
+func declaresGroups(groups [][]subtask.Element) bool {
 	for _, g := range groups {
 		if len(g) > 1 {
 			return true

@@ -190,7 +190,10 @@ func runDuel(ctx context.Context, s *store.Store, gap curiosity.Gap, prompt, cap
 		// adapter comes straight from the gap, never from a decision made here
 		// (ADR-0054 Decision 1 removed openSubtask's own routing entirely; a
 		// duel never depended on it, since pair is always two concrete names).
-		sid, err := openSubtask(s, capability, prompt, parentSID)
+		// The empty last argument is ADR-0060's named executor: a duel's sides
+		// are not a proposal's declaration, and recording them as one would put
+		// the experiment's own two runs into the named population.
+		sid, err := openSubtask(s, capability, prompt, parentSID, "")
 		if err != nil {
 			return err
 		}

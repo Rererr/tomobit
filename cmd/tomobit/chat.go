@@ -786,7 +786,7 @@ func (c *chat) run(prompt string, opening bool) error {
 // next user turn talks to a Provider that already knows what the subtasks
 // produced — the conversation continues over the integrated result, not over the
 // split JSON it stalled on.
-func (c *chat) splitAndFold(ctx context.Context, groups [][]string, parentIntent string) error {
+func (c *chat) splitAndFold(ctx context.Context, groups [][]subtask.Element, parentIntent string) error {
 	// 子はこのタスクの内訳なので、相手も場所も親のものをそのまま継ぐ
 	// (ADR-0054 Decision 1 / 3)。隔離が宣言されていればそこが子の cwd になり、
 	// 無ければ /cd の値 — どちらにせよ、親が働いている場所である。

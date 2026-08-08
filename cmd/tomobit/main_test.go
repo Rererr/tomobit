@@ -1023,7 +1023,7 @@ func TestProviderSinkCollectsTextAcrossEventsForSplitParsing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("joined collection should parse as a proposal: %v", err)
 	}
-	if len(groups) != 2 || groups[0][0] != "part one" {
+	if len(groups) != 2 || groups[0][0].Do != "part one" {
 		t.Fatalf("got %v, want the proposed subtasks", groups)
 	}
 	if n := countEventsOfTypeInSession(t, s, "sess", "provider.output"); n != 3 {
@@ -1071,7 +1071,7 @@ func TestRunSplitNormalFlowRecordsParentAndPerSubtaskLedger(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("fake-split"), in, &out, extractor)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
@@ -1143,7 +1143,7 @@ func TestRunSplitFlattensGroupsAndRecordsIndexGroups(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("fake-split"), bufio.NewReader(strings.NewReader("")), &out, extractor)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
@@ -1189,7 +1189,7 @@ func TestRunSplitFlatProposalOmitsGroups(t *testing.T) {
 	groups := [][]string{{"one"}, {"two"}}
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
-	if err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	if err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("fake-split"), bufio.NewReader(strings.NewReader("")), &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}
@@ -1358,7 +1358,7 @@ func TestRunSplitStopsAfterAFailedSubtask(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("fail-split"), in, &out, extractor)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
@@ -1398,7 +1398,7 @@ func TestSplitChildrenRecordNoDecisionOfTheirOwn(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("fake-split"), in, &out, extractor)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
@@ -1440,7 +1440,7 @@ func TestEverySplitChildRunsOnTheParentsProvider(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	err := runSplit(context.Background(), s, parentSID, groups, "big task",
+	err := runSplit(context.Background(), s, parentSID, plain(groups), "big task",
 		namedWiring("fake-a"), bufio.NewReader(strings.NewReader("")), &out, extractor)
 	if err != nil {
 		t.Fatalf("runSplit: %v", err)
@@ -1666,7 +1666,7 @@ func TestDuelOfferNonInteractiveNeverAsksTaskPerception(t *testing.T) {
 func TestOpenSubtaskDecidesNothing(t *testing.T) {
 	s := openTestStore(t)
 
-	sid, err := openSubtask(s, "implement", "sub one", "parent")
+	sid, err := openSubtask(s, "implement", "sub one", "parent", "")
 	if err != nil {
 		t.Fatal(err)
 	}
