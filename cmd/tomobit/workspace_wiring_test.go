@@ -213,6 +213,66 @@ func (pwdAdapter) Translate(line []byte) ([]executor.Event, error) {
 	}}, nil
 }
 
+// grantEchoAdapter echoes the grants its Request carried. Same trick as
+// pwdAdapter: the only way to see from the ledger whether a piece of the
+// parent's wiring reached the child's launch is to have the child print it.
+type grantEchoAdapter struct{}
+
+func (grantEchoAdapter) Name() string { return "grant-adapter" }
+
+func (grantEchoAdapter) Command(req executor.Request) (string, []string, []string) {
+	return "sh", []string{"-c", "echo " + shellQuote("tools="+strings.Join(req.AllowedTools, ","))}, nil
+}
+
+func (grantEchoAdapter) Translate(line []byte) ([]executor.Event, error) {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return nil, nil
+	}
+	return []executor.Event{{
+		Type: executor.EventProviderOutput, Payload: map[string]any{"text": string(line)},
+	}}, nil
+}
+
+// TestSplitChildrenInheritTheSessionsGrants: 許可の寿命はこのタスクで
+// (ADR-0053 Decision 3)、分割の子はそのタスクの内訳である (ADR-0054) —
+// 人が答えた「はい」は、内訳に分かれた瞬間には消えない。
+//
+// 直しているのは TestSplitChildrenRunInTheParentsPlace と同型の漏れである:
+// 配線は親にあり、子の Request に載っていなかった。permMode だけが継がれて
+// AllowedTools が落ちていたので、子は許可済みの道具を訊き直すか、誰も
+// 端末にいなければ人が既に許した作業を拒否で落としていた。
+func TestSplitChildrenInheritTheSessionsGrants(t *testing.T) {
+	s := openTestStore(t)
+	registerFakeProvider(t, "grant-adapter", grantEchoAdapter{})
+
+	const parentSID = "parent-grants"
+	if err := s.AppendEvent(parentSID, "task.started", 1000,
+		map[string]any{"intent": "big task", "source": "production"}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := namedWiring("grant-adapter")
+	w.allowedTools = []string{"Read", "Edit"}
+	// 逐次の1本と並走の2本、どちらの起動経路も通す。
+	if err := runSplit(context.Background(), s, parentSID,
+		plain([][]string{{"one"}, {"two", "three"}}), "big task", w,
+		bufio.NewReader(strings.NewReader("")), io.Discard,
+		&fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}); err != nil {
+		t.Fatalf("runSplit: %v", err)
+	}
+
+	kids := subtaskSessionIDs(t, s, parentSID)
+	if len(kids) != 3 {
+		t.Fatalf("three children, got %d", len(kids))
+	}
+	for _, sid := range kids {
+		if got := outputTextOf(t, s, sid); !strings.Contains(got, "tools=Read,Edit") {
+			t.Errorf("child %s launched without the session's grants: %q", sid, got)
+		}
+	}
+}
+
 func TestSplitChildrenRunInTheParentsPlace(t *testing.T) {
 	s := openTestStore(t)
 	place, err := filepath.EvalSymlinks(t.TempDir()) // macOS: /var → /private/var

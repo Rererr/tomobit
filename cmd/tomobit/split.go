@@ -256,6 +256,13 @@ type subtaskWiring struct {
 	// ordinary turn with no /cd does.
 	workDir string
 	addDirs []string
+	// allowedTools are the grants the person gave during this task
+	// (ADR-0053 Decision 3). A split is one task's breakdown, so the children
+	// are inside the same grant's lifetime — the person answered "yes, Edit"
+	// about this task, and the subtasks are what the task turned out to be.
+	// Losing them here made every child re-ask for tools already granted, or,
+	// with nobody at the terminal, fail work the person had already permitted.
+	allowedTools []string
 	// named is the executor this child was declared to run on (ADR-0060), empty
 	// on every child that inherited. It exists to be recorded, not to be acted
 	// on — adapter above already carries the routing — so a fallback leaves it
@@ -305,8 +312,8 @@ func (w subtaskWiring) forElement(e subtask.Element) (subtaskWiring, string) {
 // parent's, which is the whole point of the type.
 func (w subtaskWiring) request(prompt string) executor.Request {
 	return executor.Request{
-		Prompt: prompt, PermissionMode: w.permMode, Timeout: w.timeout,
-		WorkDir: w.workDir, AddDirs: w.addDirs,
+		Prompt: prompt, PermissionMode: w.permMode, AllowedTools: w.allowedTools,
+		Timeout: w.timeout, WorkDir: w.workDir, AddDirs: w.addDirs,
 	}
 }
 
