@@ -29,6 +29,21 @@ const (
 // word "tomobit_split" that isn't actually a JSON key.
 const key = `"tomobit_split"`
 
+// Element is one proposed subtask: the instruction, plus the executor the
+// proposing Provider named for it (ADR-0060 Decision 2). An empty Provider is
+// the unchanged default — the child runs on the parent's wiring (ADR-0054
+// Decision 1) — so a plain string element and a named one differ in exactly
+// one field.
+//
+// This package does not judge the name. Which names exist is the caller's
+// registry, not the protocol's, and "is this subtask really codex work?" is a
+// question of meaning that belongs to the Provider (ADR-0028 Decision 2's
+// posture, applied to the executor slot). Parse's job ends at the shape.
+type Element struct {
+	Do       string
+	Provider string
+}
+
 // exampleGroups is the group structure of the JSON example the instruction
 // embeds: a lone single group plus one two-wide independent group, so the
 // example shows both the string and the string-array element forms at once.
@@ -52,6 +67,15 @@ var exampleGroups = [][]string{
 // wording accident. The example shows the group form (ADR-0028 Decision 2):
 // a string is a lone subtask, a string array is subtasks the Provider
 // declares independent and safe to run in parallel.
+//
+// The last two bullets are ADR-0060 Decision 3. They exist because the
+// protocol had no place to write "who runs this", so a Provider asked to use
+// another CLI could only reach for its own tool box — the work got done and
+// the ledger recorded the wrong executor. The wording adds a way to say it,
+// nothing more: tomobit still does not read the user's sentence and does not
+// judge the declaration. Deterministic harness text, like the rest of this
+// string, so a proposal's absence stays a model decision rather than a
+// wording accident (ADR-0023 Decision 1).
 func Instruction(prompt string) string {
 	return fmt.Sprintf("%s"+
 		"\n\n---\n"+
@@ -61,6 +85,8 @@ func Instruction(prompt string) string {
 		"```\n\n"+
 		"- サブタスクは合計%d〜%d個。各サブタスクは単独で実行可能な自己完結した指示にする\n"+
 		"- 配列の各要素は、文字列（単独のサブタスク）または文字列の配列（互いに独立して並行実行できると判断したサブタスクの群）。群は提案順に逐次実行され、後の群は前の群の成果に依存してよい\n"+
+		"- ユーザーが特定の実行者を名指しした場合は、そのサブタスクを文字列の代わりに {\"do\": \"サブタスクの指示\", \"provider\": \"実行者名\"} と書いて宣言せよ。**自分で別のCLIを起動してはならない**\n"+
+		"- ユーザーが並列実行を明示した場合は、それを尊重せよ\n"+
 		"- 分割が不要ならこの指示は無視し、タスクを完遂せよ",
 		prompt, Min, Max)
 }
@@ -84,23 +110,25 @@ func Prompt(parentIntent, sub string, i, total int) string {
 //   - (nil, err): the marker is present but no legal proposal could be read
 //     from it (too few/many subtasks after flattening, a non-string or blank
 //     element, an empty group, or the surrounding text isn't valid JSON)
-//   - (groups, nil): accepted; each group is a slice of trimmed subtasks the
+//   - (groups, nil): accepted; each group is a slice of trimmed Elements the
 //     Provider declared independent (ADR-0028 Decision 2). A flat proposal
 //     comes back as one single-element group per subtask ([["a"],["b"]]).
+//     An Element carrying a Provider was named an executor (ADR-0060); the
+//     name is passed through unresolved, since this package has no registry.
 //
 // It reads both a fenced ```json block and bare JSON with no fence at all —
 // providers are not guaranteed to wrap their marker in a code fence just
 // because the instruction showed one. A candidate equal to the instruction's
 // own example is the harness's text quoted back (models routinely cite their
 // prompt while declining to split) and reads as no proposal, not a proposal.
-func Parse(text string) ([][]string, error) {
+func Parse(text string) ([][]Element, error) {
 	if !strings.Contains(text, key) {
 		return nil, nil
 	}
 
 	var lastErr error
 	var sawBroken, sawEcho bool
-	tryCandidate := func(c string) [][]string {
+	tryCandidate := func(c string) [][]Element {
 		groups, err := parseObject(c)
 		if err != nil {
 			sawBroken = true
@@ -141,7 +169,9 @@ func Parse(text string) ([][]string, error) {
 // instruction's embedded example (group structure included). Compared
 // post-parse (element-wise, after trimming) so an echo survives whatever
 // reformatting the quoting model applied to the JSON itself.
-func isExampleEcho(groups [][]string) bool {
+// A named executor makes a candidate not an echo: the embedded example
+// carries none, so a model that wrote one wrote something of its own.
+func isExampleEcho(groups [][]Element) bool {
 	if len(groups) != len(exampleGroups) {
 		return false
 	}
@@ -150,7 +180,7 @@ func isExampleEcho(groups [][]string) bool {
 			return false
 		}
 		for j := range groups[i] {
-			if groups[i][j] != exampleGroups[i][j] {
+			if groups[i][j].Do != exampleGroups[i][j] || groups[i][j].Provider != "" {
 				return false
 			}
 		}
@@ -159,12 +189,12 @@ func isExampleEcho(groups [][]string) bool {
 }
 
 // parseObject validates one candidate JSON object against the protocol's
-// group shape (ADR-0028 Decision 2): the array's elements are strings (a lone
-// subtask) or string arrays (a group the Provider declared independent), and
-// the Min/Max bound is on the flattened total, not the element count. A map
-// (not a struct) unmarshal target so a missing key is distinguishable from a
-// present-but-empty one.
-func parseObject(candidate string) ([][]string, error) {
+// group shape (ADR-0028 Decision 2): the array's elements are subtasks (a
+// lone one) or arrays of them (a group the Provider declared independent),
+// and the Min/Max bound is on the flattened total, not the element count. A
+// map (not a struct) unmarshal target so a missing key is distinguishable
+// from a present-but-empty one.
+func parseObject(candidate string) ([][]Element, error) {
 	var m map[string]any
 	if err := json.Unmarshal([]byte(candidate), &m); err != nil {
 		return nil, fmt.Errorf("subtask: not valid JSON: %w", err)
@@ -177,38 +207,32 @@ func parseObject(candidate string) ([][]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("subtask: %s must be an array, got %T", key, raw)
 	}
-	groups := make([][]string, 0, len(arr))
+	groups := make([][]Element, 0, len(arr))
 	total := 0
 	for i, elem := range arr {
-		switch v := elem.(type) {
-		case string:
-			sub, err := cleanElement(v, i, -1)
+		members, isGroup := elem.([]any)
+		if !isGroup {
+			e, err := readElement(elem, i, -1)
 			if err != nil {
 				return nil, err
 			}
-			groups = append(groups, []string{sub})
+			groups = append(groups, []Element{e})
 			total++
-		case []any:
-			if len(v) == 0 {
-				return nil, fmt.Errorf("subtask: element %d is an empty group", i)
-			}
-			group := make([]string, len(v))
-			for j, gv := range v {
-				str, ok := gv.(string)
-				if !ok {
-					return nil, fmt.Errorf("subtask: element %d.%d is not a string, got %T", i, j, gv)
-				}
-				sub, err := cleanElement(str, i, j)
-				if err != nil {
-					return nil, err
-				}
-				group[j] = sub
-				total++
-			}
-			groups = append(groups, group)
-		default:
-			return nil, fmt.Errorf("subtask: element %d is neither a string nor a string array, got %T", i, elem)
+			continue
 		}
+		if len(members) == 0 {
+			return nil, fmt.Errorf("subtask: element %d is an empty group", i)
+		}
+		group := make([]Element, len(members))
+		for j, gv := range members {
+			e, err := readElement(gv, i, j)
+			if err != nil {
+				return nil, err
+			}
+			group[j] = e
+			total++
+		}
+		groups = append(groups, group)
 	}
 	if total < Min || total > Max {
 		return nil, fmt.Errorf("subtask: %d subtasks proposed, want %d-%d", total, Min, Max)
@@ -216,16 +240,74 @@ func parseObject(candidate string) ([][]string, error) {
 	return groups, nil
 }
 
-// cleanElement trims one subtask string and rejects a blank one. j == -1 marks
-// a top-level lone subtask so the error names element i alone; a non-negative
-// j names the group member i.j.
-func cleanElement(s string, i, j int) (string, error) {
+// readElement reads one subtask in either form the protocol accepts: a bare
+// string, or an object naming the executor (ADR-0060 Decision 2). j == -1
+// marks a top-level lone subtask so errors name element i alone; a
+// non-negative j names the group member i.j.
+//
+// The object form is read at the top level too, not only inside a group. A
+// lone subtask is a one-member group everywhere else in this protocol, and an
+// exception here would mean "you may name an executor only if you also
+// declared independence" — a rule with nothing behind it.
+func readElement(v any, i, j int) (Element, error) {
+	switch t := v.(type) {
+	case string:
+		do, err := cleanDo(t, i, j)
+		if err != nil {
+			return Element{}, err
+		}
+		return Element{Do: do}, nil
+	case map[string]any:
+		return readNamedElement(t, i, j)
+	}
+	return Element{}, fmt.Errorf(`subtask: %s is neither a string nor a {"do": …} object, got %T`, elementName(i, j), v)
+}
+
+// readNamedElement reads the object form. `do` is the instruction and is
+// required — an object without it declared an executor for nothing. An absent
+// or blank `provider` is the ordinary default rather than an error: a blank
+// name asks for exactly what a bare string asks for, and failing a whole
+// proposal over an empty string would trade four subtasks for a typo the
+// protocol can simply read as "inherit" (the same reasoning ADR-0060 Decision
+// 2 applies to an unknown name, which the caller resolves).
+func readNamedElement(m map[string]any, i, j int) (Element, error) {
+	raw, ok := m["do"]
+	if !ok {
+		return Element{}, fmt.Errorf("subtask: %s is an object with no `do` field", elementName(i, j))
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return Element{}, fmt.Errorf("subtask: %s has a non-string `do`, got %T", elementName(i, j), raw)
+	}
+	do, err := cleanDo(s, i, j)
+	if err != nil {
+		return Element{}, err
+	}
+	e := Element{Do: do}
+	if raw, ok := m["provider"]; ok {
+		name, ok := raw.(string)
+		if !ok {
+			return Element{}, fmt.Errorf("subtask: %s has a non-string `provider`, got %T", elementName(i, j), raw)
+		}
+		e.Provider = strings.TrimSpace(name)
+	}
+	return e, nil
+}
+
+// cleanDo trims one subtask instruction and rejects a blank one.
+func cleanDo(s string, i, j int) (string, error) {
 	trimmed := strings.TrimSpace(s)
-	if trimmed != "" {
-		return trimmed, nil
+	if trimmed == "" {
+		return "", fmt.Errorf("subtask: %s is blank", elementName(i, j))
 	}
+	return trimmed, nil
+}
+
+// elementName spells an element's position for an error message: "element 2"
+// for a top-level lone subtask (j == -1), "element 2.1" for a group member.
+func elementName(i, j int) string {
 	if j < 0 {
-		return "", fmt.Errorf("subtask: element %d is blank", i)
+		return fmt.Sprintf("element %d", i)
 	}
-	return "", fmt.Errorf("subtask: element %d.%d is blank", i, j)
+	return fmt.Sprintf("element %d.%d", i, j)
 }

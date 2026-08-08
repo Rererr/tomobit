@@ -79,6 +79,17 @@ type Config struct {
 	// false is exactly the 「信じない」 position that ADR was weighed against, so
 	// reverting needs no redesign — only this key.
 	ParallelSubtasks *bool `json:"parallel_subtasks,omitempty"`
+	// NamedExecutor is the ADR-0060 kill switch, shaped like the three above.
+	// nil = key absent = a proposal may declare which Provider runs a subtask
+	// and tomobit honours it; an explicit false ignores every declaration and
+	// runs each child on the parent's wiring, the pre-ADR-0060 behaviour.
+	//
+	// What it switches off is the honouring, not the asking. The protocol text
+	// keeps telling a Provider to declare the executor instead of launching
+	// another CLI itself — that norm is what closed the hole in the first
+	// place, and dropping it would only send the work back to the tool box
+	// where the ledger cannot see it.
+	NamedExecutor *bool `json:"named_executor,omitempty"`
 	// TestCommands maps a working directory to the command that observes whether
 	// its tests pass (ADR-0052 Decision 2). "How this project runs its tests" is
 	// wiring, in the same sense ADR-0047 gave the word: it describes this machine

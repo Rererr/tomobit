@@ -786,15 +786,18 @@ func (c *chat) run(prompt string, opening bool) error {
 // next user turn talks to a Provider that already knows what the subtasks
 // produced — the conversation continues over the integrated result, not over the
 // split JSON it stalled on.
-func (c *chat) splitAndFold(ctx context.Context, groups [][]string, parentIntent string) error {
+func (c *chat) splitAndFold(ctx context.Context, groups [][]subtask.Element, parentIntent string) error {
 	// 子はこのタスクの内訳なので、相手も場所も親のものをそのまま継ぐ
 	// (ADR-0054 Decision 1 / 3)。隔離が宣言されていればそこが子の cwd になり、
 	// 無ければ /cd の値 — どちらにせよ、親が働いている場所である。
 	// addDirs は人が /add-dir で宣言した場所だけ: 隔離先の親ディレクトリは葉を
 	// 作るための足場で、その葉の中で働く子には要らない。
+	// allowedTools も同じ理由で継ぐ (ADR-0053 Decision 3): 許可の寿命はこの
+	// タスクで、子はそのタスクの内訳である。人が答えた「はい」は、内訳に
+	// 分かれた瞬間に消えるものではない。
 	w := subtaskWiring{
 		adapter: c.adapter, human: c.human, capability: c.capability,
-		permMode: c.permMode, timeout: c.timeout,
+		permMode: c.permMode, allowedTools: c.allowedTools, timeout: c.timeout,
 		workDir: subtaskWorkDir(c.workspace, c.workDir), addDirs: c.addDirs,
 	}
 	subs, cancelled, err := executeSplit(ctx, c.s, c.sid, groups, parentIntent, w,

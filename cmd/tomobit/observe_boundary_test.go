@@ -239,7 +239,7 @@ func TestSplitChildrenAreNotObserved(t *testing.T) {
 	var out bytes.Buffer
 	extractor := &fakePerceiveExtractor{semantic: map[string]string{"lang": "go"}}
 
-	if err := runSplit(context.Background(), s, parentSID, [][]string{{"a"}, {"b"}},
+	if err := runSplit(context.Background(), s, parentSID, plain([][]string{{"a"}, {"b"}}),
 		"big task", namedWiring("oc"), in, &out, extractor); err != nil {
 		t.Fatalf("runSplit: %v", err)
 	}

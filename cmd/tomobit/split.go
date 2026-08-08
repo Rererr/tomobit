@@ -52,7 +52,7 @@ const costSampleLimit = 20
 // the sum of the wide groups' sizes. A lone group runs sequentially and is not
 // part of the parallel commitment, so it does not count. This is the multiplier
 // the cost estimate and the gate line both use.
-func parallelWidth(groups [][]string) int {
+func parallelWidth(groups [][]subtask.Element) int {
 	w := 0
 	for _, g := range groups {
 		if len(g) > 1 {
@@ -69,7 +69,7 @@ func parallelWidth(groups [][]string) int {
 // fabricate one — the gate then says "概算なし" instead of a made-up dollar
 // figure. Best-effort: a store read failure is logged and treated as no sample,
 // never fatal to the run.
-func parallelCostEstimate(s *store.Store, groups [][]string) (usd float64, ok bool) {
+func parallelCostEstimate(s *store.Store, groups [][]subtask.Element) (usd float64, ok bool) {
 	costs, err := s.RecentProviderCosts(costSampleLimit)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "split: cost estimate skipped:", err)
@@ -157,7 +157,7 @@ func cancelChildrenAndParent(s *store.Store, parentSID string, childSIDs []strin
 // differently from chat's fold-back (ADR-0028 Decision 5) — because reading
 // the proposal and acting on it are different responsibilities; only the
 // reading was duplicated.
-func readSplitProposal(texts []string) [][]string {
+func readSplitProposal(texts []string) [][]subtask.Element {
 	groups, parseErr := subtask.Parse(strings.Join(texts, "\n"))
 	if parseErr != nil {
 		fmt.Fprintln(os.Stderr, "split: proposal ignored —", parseErr)
@@ -188,10 +188,11 @@ func readSplitProposal(texts []string) [][]string {
 // correlate by sub.
 //
 // w carries everything the children share — see subtaskWiring.
-func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]string,
+func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups [][]subtask.Element,
 	parentIntent string, w subtaskWiring,
 	in *bufio.Reader, out io.Writer, newView subtaskViewFactory) (subs []string, cancelled bool, err error) {
-	subs, idxGroups := flattenGroups(groups)
+	elems, idxGroups := flattenGroups(groups)
+	subs = instructions(elems)
 	now := time.Now().UnixMilli()
 
 	// 独立宣言された群は訊かずに並走する (ADR-0056 Decision 1)。走るかどうかが
@@ -226,9 +227,9 @@ func executeSplit(ctx context.Context, s *store.Store, parentSID string, groups 
 	fmt.Fprintf(out, "split: %d個のサブタスクとして実行\n", len(subs))
 
 	if wide {
-		cancelled, err = runGroups(ctx, s, parentSID, groups, subs, parentIntent, w, in, out, newView, est, haveEst)
+		cancelled, err = runGroups(ctx, s, parentSID, groups, len(elems), parentIntent, w, in, out, newView, est, haveEst)
 	} else {
-		cancelled, err = runSubtasksSequential(ctx, s, parentSID, subs, parentIntent, w, in, out, newView)
+		cancelled, err = runSubtasksSequential(ctx, s, parentSID, elems, parentIntent, w, in, out, newView)
 	}
 	return subs, cancelled, err
 }
@@ -255,14 +256,64 @@ type subtaskWiring struct {
 	// ordinary turn with no /cd does.
 	workDir string
 	addDirs []string
+	// allowedTools are the grants the person gave during this task
+	// (ADR-0053 Decision 3). A split is one task's breakdown, so the children
+	// are inside the same grant's lifetime — the person answered "yes, Edit"
+	// about this task, and the subtasks are what the task turned out to be.
+	// Losing them here made every child re-ask for tools already granted, or,
+	// with nobody at the terminal, fail work the person had already permitted.
+	allowedTools []string
+	// named is the executor this child was declared to run on (ADR-0060), empty
+	// on every child that inherited. It exists to be recorded, not to be acted
+	// on — adapter above already carries the routing — so a fallback leaves it
+	// empty and the ledger never claims a declaration was honoured.
+	named string
+}
+
+// forElement resolves the wiring one child runs on. A declared executor
+// (ADR-0060 Decision 2) replaces the parent's adapter for that child alone;
+// everything else inherits, which is the unchanged ADR-0054 Decision 1 default.
+//
+// It returns the line to show when a declaration was not honoured. Dropping one
+// in silence would leave the Provider — and the person reading the output —
+// believing work was routed somewhere it was not. Every fallback is per-child:
+// a whole proposal is never thrown away over one name, because one typo is not
+// worth four subtasks.
+//
+// Two refusals are deliberate. `human` cannot be named: ADR-0054 Decision 1
+// keeps a breakdown from being handed back to a person piecemeal, and the way
+// to give a person the work is to give them the task. And a human parent keeps
+// its children whatever the element says — a person's split carries no
+// Provider declaration to begin with, so one appearing there is not a routing
+// tomobit should start honouring.
+func (w subtaskWiring) forElement(e subtask.Element) (subtaskWiring, string) {
+	if e.Provider == "" {
+		return w, ""
+	}
+	const tail = "— 親の相手で走る"
+	switch {
+	case !namedExecutorEnabled():
+		return w, fmt.Sprintf("split: 実行者の指名「%s」は使わない（config named_executor=false）%s", e.Provider, tail)
+	case w.human:
+		return w, fmt.Sprintf("split: 実行者の指名「%s」は使わない（このタスクは人が担っている）%s", e.Provider, tail)
+	case e.Provider == "human":
+		return w, fmt.Sprintf("split: 実行者に human は指名できない（内訳の一部だけを人へ差し戻さない）%s", tail)
+	}
+	a, err := resolveProvider(e.Provider)
+	if err != nil {
+		return w, fmt.Sprintf("split: 実行者の指名を解決できない（%v）%s", err, tail)
+	}
+	w.adapter = a
+	w.named = e.Provider
+	return w, ""
 }
 
 // request builds one child's launch. Every field but the prompt is the
 // parent's, which is the whole point of the type.
 func (w subtaskWiring) request(prompt string) executor.Request {
 	return executor.Request{
-		Prompt: prompt, PermissionMode: w.permMode, Timeout: w.timeout,
-		WorkDir: w.workDir, AddDirs: w.addDirs,
+		Prompt: prompt, PermissionMode: w.permMode, AllowedTools: w.allowedTools,
+		Timeout: w.timeout, WorkDir: w.workDir, AddDirs: w.addDirs,
 	}
 }
 
@@ -273,7 +324,7 @@ func (w subtaskWiring) request(prompt string) executor.Request {
 // groups). A lone group is a single sequential run. cancelled reports a SIGINT,
 // after which the children and parent already hold task.cancelled and the
 // caller skips finishTask.
-func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][]string, subs []string,
+func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][]subtask.Element, total int,
 	parentIntent string, w subtaskWiring, in *bufio.Reader, out io.Writer,
 	newView subtaskViewFactory, est float64, haveEst bool) (cancelled bool, err error) {
 	var mu sync.Mutex // guards the shared terminal, not the store (its single connection serializes writes)
@@ -282,7 +333,7 @@ func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][
 		if len(g) > 1 {
 			// 訊かずに、始める前に言う (ADR-0056 Decision 2)。
 			fmt.Fprint(out, parallelNotice(len(g), gi+1, len(groups), est, haveEst))
-			failed, canc, err := runGroupParallel(ctx, s, parentSID, g, base, len(subs),
+			failed, canc, err := runGroupParallel(ctx, s, parentSID, g, base, total,
 				parentIntent, w, in, out, &mu, newView)
 			base += len(g)
 			if err != nil {
@@ -296,13 +347,13 @@ func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][
 				return false, nil
 			}
 		} else {
-			fmt.Fprintf(out, "-- subtask %d/%d: %s --\n", base+1, len(subs), truncate(g[0], 60))
+			fmt.Fprintf(out, "-- subtask %d/%d: %s --\n", base+1, total, truncate(g[0].Do, 60))
 			// A lone group is one subtask, and it gets the same framed view its
 			// flat-proposal twin does. The old comment here said a view was
 			// "structurally never available" on this path because the gate
 			// required a terminal — ADR-0056 removed the gate, so this path is
 			// now the ordinary one under the GUI.
-			failed, canc, err := runSubtaskSequential(ctx, s, parentSID, g[0], base, len(subs),
+			failed, canc, err := runSubtaskSequential(ctx, s, parentSID, g[0], base, total,
 				parentIntent, w, in, out, newView)
 			base++
 			if err != nil {
@@ -312,7 +363,7 @@ func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][
 				return true, nil
 			}
 			if failed {
-				fmt.Fprintf(out, "split: subtask %d/%d failed — remaining subtasks not started\n", base, len(subs))
+				fmt.Fprintf(out, "split: subtask %d/%d failed — remaining subtasks not started\n", base, total)
 				return false, nil
 			}
 		}
@@ -325,12 +376,12 @@ func runGroups(ctx context.Context, s *store.Store, parentSID string, groups [][
 // back to. It is exactly the ADR-0023 fail-stop: a failed subtask stops the
 // loop before the next one opens, so a task that never started leaves no
 // half-run in the ledger.
-func runSubtasksSequential(ctx context.Context, s *store.Store, parentSID string, subs []string,
+func runSubtasksSequential(ctx context.Context, s *store.Store, parentSID string, elems []subtask.Element,
 	parentIntent string, w subtaskWiring,
 	in *bufio.Reader, out io.Writer, newView subtaskViewFactory) (cancelled bool, err error) {
-	for i, sub := range subs {
-		fmt.Fprintf(out, "-- subtask %d/%d: %s --\n", i+1, len(subs), truncate(sub, 60))
-		failed, canc, err := runSubtaskSequential(ctx, s, parentSID, sub, i, len(subs),
+	for i, e := range elems {
+		fmt.Fprintf(out, "-- subtask %d/%d: %s --\n", i+1, len(elems), truncate(e.Do, 60))
+		failed, canc, err := runSubtaskSequential(ctx, s, parentSID, e, i, len(elems),
 			parentIntent, w, in, out, newView)
 		if err != nil {
 			return false, err
@@ -339,7 +390,7 @@ func runSubtasksSequential(ctx context.Context, s *store.Store, parentSID string
 			return true, nil
 		}
 		if failed {
-			fmt.Fprintf(out, "split: subtask %d/%d failed — remaining subtasks not started\n", i+1, len(subs))
+			fmt.Fprintf(out, "split: subtask %d/%d failed — remaining subtasks not started\n", i+1, len(elems))
 			return false, nil
 		}
 	}
@@ -357,21 +408,25 @@ func runSubtasksSequential(ctx context.Context, s *store.Store, parentSID string
 // newView follows executeSplit's own doc: nil (do, plain/TTY chat) keeps
 // providerSink's raw echo; a chat's NDJSON view stream builds one fresh view
 // per subtask and drives begin/show/end around the run exactly as an ordinary
-// turn does. Every child of one split now names the same provider (ADR-0054
-// Decision 1), but the view is still built per subtask — the frames are
-// per-run, not per-provider.
-func runSubtaskSequential(ctx context.Context, s *store.Store, parentSID, sub string, gi, total int,
+// turn does. The view is built per subtask, and it names the provider this
+// child actually runs on — which since ADR-0060 is the parent's unless the
+// proposal declared otherwise.
+func runSubtaskSequential(ctx context.Context, s *store.Store, parentSID string, e subtask.Element, gi, total int,
 	parentIntent string, w subtaskWiring,
 	in *bufio.Reader, out io.Writer, newView subtaskViewFactory) (failed, cancelled bool, err error) {
-	sid, err := openSubtask(s, w.capability, sub, parentSID)
+	cw, warn := w.forElement(e)
+	if warn != "" {
+		fmt.Fprintln(out, warn)
+	}
+	sid, err := openSubtask(s, cw.capability, e.Do, parentSID, cw.named)
 	if err != nil {
 		return false, false, err
 	}
-	prompt := subtask.Prompt(parentIntent, sub, gi, total)
+	prompt := subtask.Prompt(parentIntent, e.Do, gi, total)
 
 	var result executor.Result
 	var runErr error
-	if w.human {
+	if cw.human {
 		fmt.Fprintln(out, prompt)
 		result, runErr = runHuman(s, out, sid, in)
 		if runErr != nil {
@@ -380,15 +435,15 @@ func runSubtaskSequential(ctx context.Context, s *store.Store, parentSID, sub st
 	} else {
 		var v view
 		if newView != nil {
-			v = newView(w.adapter.Name(), gi, total)
+			v = newView(cw.adapter.Name(), gi, total)
 			v.begin()
 		}
 		sink := subtaskSink(s, sid, out, v)
-		ex := &executor.Executor{Adapter: w.adapter, Stderr: os.Stderr, Warn: os.Stderr}
+		ex := &executor.Executor{Adapter: cw.adapter, Stderr: os.Stderr, Warn: os.Stderr}
 		if os.Getenv("TOMOBIT_DEBUG") != "" {
 			ex.Debug = os.Stderr
 		}
-		result, runErr = ex.Run(ctx, w.request(prompt), sink)
+		result, runErr = ex.Run(ctx, cw.request(prompt), sink)
 		if v != nil {
 			v.end(result)
 		}
@@ -444,25 +499,32 @@ func subtaskSink(s *store.Store, sid string, out io.Writer, v view) executor.Sin
 // remaining homework, closed here). The stream's own lock — not this mutex —
 // is what keeps those concurrent emits from tearing; mu still guards the
 // terminal's `[n:provider]` fallback, which is a layout concern.
-func runGroupParallel(ctx context.Context, s *store.Store, parentSID string, group []string, base, total int,
+func runGroupParallel(ctx context.Context, s *store.Store, parentSID string, group []subtask.Element, base, total int,
 	parentIntent string, w subtaskWiring, in *bufio.Reader, out io.Writer, mu *sync.Mutex,
 	newView subtaskViewFactory) (failed, cancelled bool, err error) {
 	type member struct {
 		sid string
 		gi  int
-		sub string
+		e   subtask.Element
+		w   subtaskWiring
 	}
 	members := make([]member, len(group))
 	sids := make([]string, len(group))
 	// Sessions are opened before any goroutine starts, so their ledger writes
-	// keep the proposal's order. Which Provider they run on is not decided here
-	// at all any more (ADR-0054 Decision 1) — w already holds it.
-	for k, sub := range group {
-		sid, err := openSubtask(s, w.capability, sub, parentSID)
+	// keep the proposal's order — and so does the wiring each member resolves
+	// (ADR-0060 Decision 2). Resolving here rather than inside the goroutines
+	// is what lets a fallback line reach the terminal in proposal order,
+	// without the mutex the parallel section needs.
+	for k, e := range group {
+		cw, warn := w.forElement(e)
+		if warn != "" {
+			fmt.Fprintln(out, warn)
+		}
+		sid, err := openSubtask(s, cw.capability, e.Do, parentSID, cw.named)
 		if err != nil {
 			return false, false, err
 		}
-		members[k] = member{sid: sid, gi: base + k, sub: sub}
+		members[k] = member{sid: sid, gi: base + k, e: e, w: cw}
 		sids[k] = sid
 	}
 
@@ -471,7 +533,7 @@ func runGroupParallel(ctx context.Context, s *store.Store, parentSID string, gro
 
 	if w.human {
 		for k := range members {
-			fmt.Fprintln(out, subtask.Prompt(parentIntent, members[k].sub, members[k].gi, total))
+			fmt.Fprintln(out, subtask.Prompt(parentIntent, members[k].e.Do, members[k].gi, total))
 			results[k], runErrs[k] = runHuman(s, out, members[k].sid, in)
 			if runErrs[k] != nil {
 				return false, false, runErrs[k]
@@ -493,20 +555,21 @@ func runGroupParallel(ctx context.Context, s *store.Store, parentSID string, gro
 				sem <- struct{}{}
 				defer func() { <-sem }()
 				m := members[k]
-				ex := &executor.Executor{Adapter: w.adapter, Stderr: os.Stderr, Warn: os.Stderr}
+				ex := &executor.Executor{Adapter: m.w.adapter, Stderr: os.Stderr, Warn: os.Stderr}
 				if os.Getenv("TOMOBIT_DEBUG") != "" {
 					ex.Debug = os.Stderr
 				}
 				// 並走の子も自分のフレームを持つ。K本が同時に開くので、
-				// フレームの同一性は sub が運ぶ（ndjsonView.tag）。
+				// フレームの同一性は sub が運ぶ（ndjsonView.tag）。相手は
+				// 子ごとに違いうるので、名乗る名前も子のものを使う (ADR-0060)。
 				var v view
 				if newView != nil {
-					v = newView(w.adapter.Name(), m.gi, total)
+					v = newView(m.w.adapter.Name(), m.gi, total)
 					v.begin()
 				}
 				results[k], runErrs[k] = ex.Run(ctx,
-					w.request(subtask.Prompt(parentIntent, m.sub, m.gi, total)),
-					splitSink(s, m.sid, out, mu, m.gi+1, w.adapter.Name(), v))
+					m.w.request(subtask.Prompt(parentIntent, m.e.Do, m.gi, total)),
+					splitSink(s, m.sid, out, mu, m.gi+1, m.w.adapter.Name(), v))
 				if v != nil {
 					v.end(results[k])
 				}
