@@ -342,7 +342,7 @@ func TestParseEchoedExampleWithANamedExecutorIsARealProposal(t *testing.T) {
 // forbid the tool box, or the Provider is left with only the tool box.
 func TestInstructionAsksForTheExecutorDeclarationInsteadOfAnotherCLI(t *testing.T) {
 	got := Instruction("do the thing")
-	if !containsAll(got, `"provider"`, `"do"`, "自分で別のCLIを起動してはならない", "並列実行を明示") {
+	if !containsAll(got, `"provider"`, `"do"`, "別のCLIは自分で起動せず", "並列実行を明示") {
 		t.Errorf("Instruction is missing the executor-declaration norms: %q", got)
 	}
 }
